@@ -1,0 +1,11 @@
+{
+  // Solution file. Owns no sources itself — it just orders the build graph so
+  // `tsc --build` compiles packages in dependency order and cross-package
+  // types are checked through real emitted .d.ts files.
+  "files": [],
+  "references": [
+    { "path": "packages/ucp-client" },
+    { "path": "packages/grounding" },
+    { "path": "packages/orchestrator" }
+  ]
+}

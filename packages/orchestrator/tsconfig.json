@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist"
+  },
+  // Project references: `tsc --build` compiles these first and resolves the
+  // workspace packages through their emitted .d.ts, so cross-package types are
+  // checked for real rather than aliased away.
+  "references": [{ "path": "../grounding" }, { "path": "../ucp-client" }],
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

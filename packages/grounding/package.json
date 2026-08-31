@@ -1,5 +1,5 @@
 {
-  "name": "@storeagent/ucp-client",
+  "name": "@storeagent/grounding",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,6 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "bench": "tsc -p tsconfig.json && node dist/bench/latency.js"
+    "test:watch": "vitest"
   }
 }

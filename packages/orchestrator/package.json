@@ -1,5 +1,5 @@
 {
-  "name": "@storeagent/ucp-client",
+  "name": "@storeagent/orchestrator",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,10 +10,13 @@
     ".": "./dist/src/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc --build tsconfig.json",
+    "typecheck": "tsc --build tsconfig.json",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "bench": "tsc -p tsconfig.json && node dist/bench/latency.js"
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@storeagent/grounding": "*",
+    "@storeagent/ucp-client": "*"
   }
 }

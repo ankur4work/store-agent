@@ -1,0 +1,122 @@
+import type { ToolDef } from './model.js';
+
+/**
+ * Tool definitions exposed to the model.
+ *
+ * Descriptions are PRESCRIPTIVE about *when* to call, not just what the tool
+ * does. Recent Claude models reach for tools more conservatively, and trigger
+ * conditions in the description give measurable lift in should-call rate —
+ * which for us is grounding rate, since an ungrounded turn fails validation.
+ *
+ * Order is fixed and sorted: tool definitions render at position 0 of the
+ * prompt, so any reordering invalidates the entire prompt cache.
+ */
+
+export const SEARCH_CATALOG: ToolDef = {
+  name: 'search_catalog',
+  description:
+    'Search this store\'s live product catalog by natural-language query. ' +
+    'Call this whenever the shopper asks what you sell, asks for a recommendation, ' +
+    'describes something they want, or mentions a product you have not already looked up ' +
+    'this turn. You have NO reliable prior knowledge of this catalog — it changes daily. ' +
+    'Prefer calling it and finding nothing over guessing.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'Natural-language description of what the shopper wants.' },
+      limit: { type: 'integer', description: 'Max results, 1-250. Default 6 — shoppers do not scroll.' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+};
+
+export const GET_PRODUCT: ToolDef = {
+  name: 'get_product',
+  description:
+    'Fetch full detail and per-variant availability for one product. ' +
+    'Call this before stating any price, size, colour, or stock fact about a specific ' +
+    'product — search results are summaries and may omit the variant the shopper asked about.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Product id, e.g. gid://shopify/Product/123' },
+      selected: {
+        type: 'object',
+        description: 'Partial option selection, e.g. {"Size":"M"}.',
+        additionalProperties: { type: 'string' },
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+};
+
+export const GET_POLICY: ToolDef = {
+  name: 'get_policy',
+  description:
+    'Retrieve the merchant\'s authoritative policy text (shipping, returns, warranty, FAQ). ' +
+    'Call this before stating any delivery time, return window, or policy detail. ' +
+    'Never answer policy questions from general knowledge — every store differs.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      topic: {
+        type: 'string',
+        enum: ['shipping', 'returns', 'warranty', 'payment', 'faq'],
+      },
+      question: { type: 'string', description: 'The shopper\'s question, for retrieval.' },
+    },
+    required: ['topic', 'question'],
+    additionalProperties: false,
+  },
+};
+
+export const ADD_TO_CART: ToolDef = {
+  name: 'add_to_cart',
+  description:
+    'Add a specific variant to the shopper\'s cart. Only call this on explicit intent ' +
+    '("add it", "I\'ll take it", "yes"). Never add speculatively. Confirm the variant first ' +
+    'if the shopper has not chosen size or colour.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      variant_id: { type: 'string' },
+      quantity: { type: 'integer', description: 'Default 1.' },
+    },
+    required: ['variant_id'],
+    additionalProperties: false,
+  },
+};
+
+export const ESCALATE: ToolDef = {
+  name: 'escalate_to_human',
+  description:
+    'Hand off to the merchant\'s team and capture the shopper\'s email. ' +
+    'Call this when you cannot ground an answer, when the shopper asks for a person, ' +
+    'or when they are frustrated. This is a SUCCESSFUL outcome, not a failure — ' +
+    'a captured lead beats a confident wrong answer.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      reason: { type: 'string' },
+      email: { type: 'string', description: 'If the shopper has provided one.' },
+    },
+    required: ['reason'],
+    additionalProperties: false,
+  },
+};
+
+/** Sorted by name — deterministic order keeps the prompt prefix cacheable. */
+export const DEFAULT_TOOLS: readonly ToolDef[] = [
+  ADD_TO_CART,
+  ESCALATE,
+  GET_POLICY,
+  GET_PRODUCT,
+  SEARCH_CATALOG,
+].sort((a, b) => a.name.localeCompare(b.name));
+
+/** Executes a tool call. Backed by UcpClient + policy corpus in production. */
+export interface ToolExecutor {
+  execute(name: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+}

@@ -9,9 +9,10 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "tsc --build",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "tsc --build",
+    "clean": "tsc --build --clean",
     "bench": "npm run bench --workspace @storeagent/ucp-client"
   },
   "devDependencies": {
