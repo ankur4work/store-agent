@@ -54,4 +54,15 @@ Enforcement config lives in [`perf/`](perf/) — `size-limit.json` and `lighthou
 
 ## Status
 
-Design phase. Next step is Phase 0 (2 weeks): UCP MCP client spike, `update_cart` full-replacement semantics proven against hostile fixtures, and the latency harness. See [`docs/ARCHITECTURE.md §12`](docs/ARCHITECTURE.md).
+**Phase 0 complete — gate passed.** ✅ See [`docs/PHASE-0-FINDINGS.md`](docs/PHASE-0-FINDINGS.md).
+
+`packages/ucp-client` ships a UCP-native client for all seven tools plus `SafeCart`, which makes `update_cart`'s destructive PUT semantics survivable. 42/42 tests green, clean typecheck, 0 production vulnerabilities, all latency budgets met.
+
+```bash
+npm install
+npm test          # 42 passed
+npm run typecheck
+npm run bench     # per-tool latency vs budgets
+```
+
+**Phase 1 is blocked on one thing:** verify the `meta.ucp-agent.profile` key encoding against a live development store (OPEN-QUESTION #1). Every request carries that field — it's the highest-risk unknown and the cheapest to check.
