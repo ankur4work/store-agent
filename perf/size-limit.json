@@ -1,0 +1,30 @@
+[
+  {
+    "name": "loader (ships on every merchant page view)",
+    "path": "packages/widget/dist/loader.js",
+    "limit": "15 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "panel (lazy — prefetched on launcher hover)",
+    "path": "packages/widget/dist/panel.js",
+    "limit": "25 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "voice (lazy — loads on first mic press only)",
+    "path": "packages/widget/dist/voice.js",
+    "limit": "40 KB",
+    "gzip": true,
+    "running": false
+  },
+  {
+    "name": "loader main-thread cost before first interaction",
+    "path": "packages/widget/dist/loader.js",
+    "limit": "20 ms",
+    "gzip": true,
+    "running": true
+  }
+]

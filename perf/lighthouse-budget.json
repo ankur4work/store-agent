@@ -1,0 +1,21 @@
+[
+  {
+    "path": "/*",
+    "timings": [
+      { "metric": "cumulative-layout-shift", "budget": 0 },
+      { "metric": "interaction-to-next-paint", "budget": 100 },
+      { "metric": "total-blocking-time", "budget": 20 }
+    ],
+    "resourceSizes": [
+      { "resourceType": "script", "budget": 15 },
+      { "resourceType": "font", "budget": 0 },
+      { "resourceType": "image", "budget": 0 },
+      { "resourceType": "third-party", "budget": 15 }
+    ],
+    "resourceCounts": [
+      { "resourceType": "script", "budget": 1 },
+      { "resourceType": "font", "budget": 0 },
+      { "resourceType": "third-party", "budget": 1 }
+    ]
+  }
+]
