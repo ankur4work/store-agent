@@ -17,16 +17,43 @@ describe('citation checks', () => {
     expect(v.violations).toHaveLength(0);
   });
 
-  it('rejects a citation to a tool call that never happened', () => {
+  it('errors on an unknown citation whose facts are ALSO unsupported', () => {
     const v = validateGrounding(
       {
-        reply: 'It is $189.00.',
-        claims: [{ assertion: 'It is $189.00', kind: 'price', source_tool_call_id: 'toolu_fabricated' }],
+        reply: 'It is $412.00.',
+        claims: [{ assertion: 'It is $412.00', kind: 'price', source_tool_call_id: 'toolu_fabricated' }],
       },
       [SEARCH_RESULT],
     );
     expect(v.ok).toBe(false);
-    expect(v.violations[0]!.code).toBe('unknown_citation');
+    expect(v.violations.map((x) => x.code)).toContain('unknown_citation');
+  });
+
+  /**
+   * Found live: models reproduce opaque provider call ids unreliably, so a
+   * mislabeled citation on an otherwise CORRECT answer was failing the turn and
+   * driving the retry into a needless refusal. Severity now tracks actual risk.
+   */
+  it('only warns when the citation is mislabeled but the fact is supported', () => {
+    const v = validateGrounding(
+      {
+        reply: 'The overcoat is $189.00.',
+        claims: [{ assertion: 'The overcoat is $189.00', kind: 'price', source_tool_call_id: 'search_catalog#7' }],
+      },
+      [SEARCH_RESULT],
+    );
+    expect(v.ok).toBe(true);
+    const violation = v.violations.find((x) => x.code === 'unknown_citation')!;
+    expect(violation.severity).toBe('warning');
+    expect(violation.message).toContain('mislabeled');
+  });
+
+  it('errors on an unknown citation when no tool ran at all', () => {
+    const v = validateGrounding(
+      { reply: 'We are open until 6.', claims: [{ assertion: 'open until 6', kind: 'policy', source_tool_call_id: 'x' }] },
+      [],
+    );
+    expect(v.ok).toBe(false);
   });
 
   it('rejects a price that is not in the cited result', () => {

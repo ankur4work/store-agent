@@ -4,10 +4,12 @@ import {
   OpenAIModelClient,
   OpenAITimeoutError,
   fromOpenAIResponse,
+  stripNulls,
   toOpenAIRequest,
+  toStrictSchema,
 } from '../src/providers/openai.js';
 import { buildCachedPrefix } from '../src/prompt.js';
-import { DEFAULT_TOOLS } from '../src/tools.js';
+import { DEFAULT_TOOLS, SEARCH_CATALOG } from '../src/tools.js';
 import { MERCHANT } from './harness.js';
 import type { ModelRequest } from '../src/model.js';
 
@@ -26,33 +28,40 @@ function reply(body: unknown, status = 200): typeof globalThis.fetch {
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-describe('request translation', () => {
-  it('puts the cached prefix first and unchanged', () => {
+const OK_RESPONSE = {
+  model: 'gpt-test',
+  status: 'completed',
+  output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+  usage: { input_tokens: 10, output_tokens: 2 },
+};
+
+describe('request translation (Responses API)', () => {
+  it('puts the cached prefix in instructions, unchanged', () => {
     const body = toOpenAIRequest(BASE);
-    const messages = body['messages'] as { role: string; content: string }[];
-    expect(messages[0]!.role).toBe('system');
-    expect(messages[0]!.content).toBe(BASE.system.map((b) => b.text).join('\n\n'));
+    expect(body['instructions']).toBe(BASE.system.map((b) => b.text).join('\n\n'));
   });
 
   it('is byte-stable across builds so automatic prefix caching can hit', () => {
     // OpenAI caches automatically with no breakpoints — an unstable prefix
     // silently loses the discount with nothing in the response to reveal it.
-    const a = JSON.stringify(toOpenAIRequest(BASE));
-    const b = JSON.stringify(toOpenAIRequest(BASE));
-    expect(a).toBe(b);
+    expect(JSON.stringify(toOpenAIRequest(BASE))).toBe(JSON.stringify(toOpenAIRequest(BASE)));
   });
 
-  it('maps tools to strict function definitions', () => {
-    const tools = toOpenAIRequest(BASE)['tools'] as { type: string; function: { name: string; strict: boolean } }[];
+  it('emits FLAT function tools (no nested `function` object)', () => {
+    const tools = toOpenAIRequest(BASE)['tools'] as { type: string; name: string; strict: boolean }[];
     expect(tools[0]!.type).toBe('function');
-    expect(tools[0]!.function.strict).toBe(true);
-    expect(tools.map((t) => t.function.name)).toEqual(DEFAULT_TOOLS.map((t) => t.name));
+    expect(tools[0]!.strict).toBe(true);
+    expect(tools.map((t) => t.name)).toEqual(DEFAULT_TOOLS.map((t) => t.name));
   });
 
-  it('maps the structured-output schema to response_format', () => {
-    const rf = toOpenAIRequest(BASE)['response_format'] as { type: string; json_schema: { strict: boolean } };
-    expect(rf.type).toBe('json_schema');
-    expect(rf.json_schema.strict).toBe(true);
+  it('maps effort to reasoning.effort', () => {
+    expect(toOpenAIRequest(BASE)['reasoning']).toEqual({ effort: 'low' });
+  });
+
+  it('maps the structured-output schema to text.format', () => {
+    const text = toOpenAIRequest(BASE)['text'] as { format: { type: string; strict: boolean } };
+    expect(text.format.type).toBe('json_schema');
+    expect(text.format.strict).toBe(true);
   });
 
   it.each([
@@ -63,16 +72,14 @@ describe('request translation', () => {
     ['max', 'high'],
   ])('collapses effort %s → %s', (input, expected) => {
     const body = toOpenAIRequest({ ...BASE, output_config: { effort: input as 'low' } });
-    expect(body['reasoning_effort']).toBe(expected);
+    expect(body['reasoning']).toEqual({ effort: expected });
   });
 
-  it('uses max_completion_tokens, not the legacy max_tokens', () => {
-    const body = toOpenAIRequest(BASE);
-    expect(body['max_completion_tokens']).toBe(2048);
-    expect(body['max_tokens']).toBeUndefined();
+  it('uses max_output_tokens', () => {
+    expect(toOpenAIRequest(BASE)['max_output_tokens']).toBe(2048);
   });
 
-  it('converts assistant tool_use blocks into tool_calls', () => {
+  it('converts assistant tool_use into function_call items', () => {
     const body = toOpenAIRequest({
       ...BASE,
       messages: [
@@ -80,80 +87,143 @@ describe('request translation', () => {
         { role: 'assistant', content: [{ type: 'tool_use', id: 'c1', name: 'search_catalog', input: { query: 'wool' } }] },
       ],
     });
-    const msgs = body['messages'] as { role: string; tool_calls?: { id: string; function: { arguments: string } }[] }[];
-    const assistant = msgs.at(-1)!;
-    expect(assistant.tool_calls![0]!.id).toBe('c1');
-    expect(JSON.parse(assistant.tool_calls![0]!.function.arguments)).toEqual({ query: 'wool' });
+    const input = body['input'] as { type?: string; call_id?: string; arguments?: string }[];
+    const fc = input.find((i) => i.type === 'function_call')!;
+    expect(fc.call_id).toBe('c1');
+    expect(JSON.parse(fc.arguments!)).toEqual({ query: 'wool' });
   });
 
-  it('converts tool results into one tool message per result', () => {
+  it('converts tool results into function_call_output items', () => {
     const body = toOpenAIRequest({
       ...BASE,
       messages: [
-        { role: 'user', content: [
-          { type: 'tool_result', tool_use_id: 'c1', content: '{"a":1}' },
-          { type: 'tool_result', tool_use_id: 'c2', content: '{"b":2}' },
-        ] },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'c1', content: '{"a":1}' },
+            { type: 'tool_result', tool_use_id: 'c2', content: '{"b":2}' },
+          ],
+        },
       ],
     });
-    const msgs = body['messages'] as { role: string; tool_call_id?: string }[];
-    const toolMsgs = msgs.filter((m) => m.role === 'tool');
-    expect(toolMsgs.map((m) => m.tool_call_id)).toEqual(['c1', 'c2']);
+    const input = body['input'] as { type?: string; call_id?: string }[];
+    expect(input.filter((i) => i.type === 'function_call_output').map((i) => i.call_id)).toEqual(['c1', 'c2']);
   });
 });
 
-describe('response translation', () => {
-  it('maps a plain completion to end_turn text', () => {
+/**
+ * OpenAI strict mode requires `required` to list EVERY property and
+ * `additionalProperties: false`. Our provider-neutral tool defs use genuinely
+ * optional params, so optionality is expressed as a nullable type instead.
+ * Discovered live — the API rejects the un-transformed schema outright.
+ */
+describe('toStrictSchema', () => {
+  it('marks every property required', () => {
+    const s = toStrictSchema(SEARCH_CATALOG.input_schema);
+    expect(s['required']).toEqual(['query', 'limit']);
+  });
+
+  it('makes originally-optional properties nullable', () => {
+    const s = toStrictSchema(SEARCH_CATALOG.input_schema);
+    const props = s['properties'] as Record<string, { type: unknown }>;
+    expect(props['query']!.type).toBe('string'); // was required — unchanged
+    expect(props['limit']!.type).toEqual(['integer', 'null']); // was optional
+  });
+
+  it('forces additionalProperties false', () => {
+    expect(toStrictSchema(SEARCH_CATALOG.input_schema)['additionalProperties']).toBe(false);
+  });
+
+  it('recurses into array items', () => {
+    const s = toStrictSchema({
+      type: 'object',
+      properties: {
+        rows: { type: 'array', items: { type: 'object', properties: { a: { type: 'string' } }, required: [] } },
+      },
+      required: ['rows'],
+    });
+    const items = (s['properties'] as Record<string, { items: Record<string, unknown> }>)['rows']!.items;
+    expect(items['additionalProperties']).toBe(false);
+    expect((items['properties'] as Record<string, { type: unknown }>)['a']!.type).toEqual(['string', 'null']);
+  });
+
+  it('does not double-add null', () => {
+    const s = toStrictSchema({
+      type: 'object',
+      properties: { a: { type: ['string', 'null'] } },
+      required: [],
+    });
+    expect((s['properties'] as Record<string, { type: unknown }>)['a']!.type).toEqual(['string', 'null']);
+  });
+
+  it('leaves every tool schema strict-compliant', () => {
+    for (const t of DEFAULT_TOOLS) {
+      const s = toStrictSchema(t.input_schema);
+      const props = Object.keys(s['properties'] as Record<string, unknown>);
+      expect(s['required'], `${t.name}`).toEqual(props);
+      expect(s['additionalProperties'], `${t.name}`).toBe(false);
+    }
+  });
+});
+
+describe('stripNulls', () => {
+  it('drops nulls, which is how strict mode omits an optional param', () => {
+    expect(stripNulls({ query: 'wool', limit: null })).toEqual({ query: 'wool' });
+  });
+  it('recurses into nested objects', () => {
+    expect(stripNulls({ a: { b: null, c: 1 } })).toEqual({ a: { c: 1 } });
+  });
+  it('leaves arrays alone', () => {
+    expect(stripNulls({ a: [1, null, 2] })).toEqual({ a: [1, null, 2] });
+  });
+});
+
+describe('response translation (Responses API)', () => {
+  it('maps output_text to end_turn text', () => {
     const res = fromOpenAIResponse({
       model: 'gpt-test',
-      choices: [{ finish_reason: 'stop', message: { content: '{"reply":"hi","claims":[]}' } }],
-      usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 90 } },
+      status: 'completed',
+      output: [
+        { type: 'reasoning' },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{"reply":"hi","claims":[]}' }] },
+      ],
+      usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 90 } },
     });
     expect(res.stop_reason).toBe('end_turn');
     expect(res.content[0]).toEqual({ type: 'text', text: '{"reply":"hi","claims":[]}' });
     expect(res.usage.cache_read_input_tokens).toBe(90);
   });
 
-  it('maps tool_calls to tool_use blocks', () => {
+  it('maps function_call to tool_use and infers tool_use stop reason', () => {
     const res = fromOpenAIResponse({
       model: 'gpt-test',
-      choices: [
-        {
-          finish_reason: 'tool_calls',
-          message: {
-            content: null,
-            tool_calls: [
-              { id: 'c1', type: 'function', function: { name: 'search_catalog', arguments: '{"query":"wool"}' } },
-            ],
-          },
-        },
+      status: 'completed',
+      output: [
+        { type: 'function_call', call_id: 'c1', name: 'search_catalog', arguments: '{"query":"wool","limit":null}' },
       ],
     });
     expect(res.stop_reason).toBe('tool_use');
     expect(res.content[0]).toMatchObject({ type: 'tool_use', name: 'search_catalog', input: { query: 'wool' } });
+    // null was stripped — it means "omitted" under toStrictSchema.
+    expect((res.content[0] as { input: Record<string, unknown> }).input).not.toHaveProperty('limit');
   });
 
   it('maps a refusal so the loop escalates instead of reading empty content', () => {
     const res = fromOpenAIResponse({
       model: 'gpt-test',
-      choices: [{ finish_reason: 'stop', message: { content: null, refusal: 'I cannot help with that.' } }],
+      status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'refusal', refusal: 'I cannot help.' }] }],
     });
     expect(res.stop_reason).toBe('refusal');
     expect(res.content).toHaveLength(0);
   });
 
-  it('maps content_filter to refusal', () => {
+  it('maps truncation to max_tokens', () => {
     const res = fromOpenAIResponse({
       model: 'gpt-test',
-      choices: [{ finish_reason: 'content_filter', message: { content: null } }],
-    });
-    expect(res.stop_reason).toBe('refusal');
-  });
-
-  it('maps length to max_tokens', () => {
-    const res = fromOpenAIResponse({
-      model: 'gpt-test',
-      choices: [{ finish_reason: 'length', message: { content: 'truncated' } }],
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'partial' }] }],
     });
     expect(res.stop_reason).toBe('max_tokens');
   });
@@ -161,21 +231,15 @@ describe('response translation', () => {
   it('survives malformed tool arguments rather than crashing the turn', () => {
     const res = fromOpenAIResponse({
       model: 'gpt-test',
-      choices: [
-        {
-          finish_reason: 'tool_calls',
-          message: {
-            content: null,
-            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'x', arguments: 'not json' } }],
-          },
-        },
-      ],
+      output: [{ type: 'function_call', call_id: 'c1', name: 'x', arguments: 'not json' }],
     });
     expect(res.content[0]).toMatchObject({ type: 'tool_use', input: {} });
   });
 
-  it('throws when there are no choices', () => {
-    expect(() => fromOpenAIResponse({ model: 'gpt-test', choices: [] })).toThrow(OpenAIError);
+  it('handles an empty output array', () => {
+    const res = fromOpenAIResponse({ model: 'gpt-test', output: [] });
+    expect(res.content).toHaveLength(0);
+    expect(res.stop_reason).toBe('end_turn');
   });
 });
 
@@ -191,10 +255,7 @@ describe('transport', () => {
       maxRetries: 0,
       fetch: async (_u, init) => {
         seen = init?.headers as Record<string, string>;
-        return new Response(
-          JSON.stringify({ model: 'm', choices: [{ finish_reason: 'stop', message: { content: 'ok' } }] }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify(OK_RESPONSE), { status: 200 });
       },
     });
     await client.create(BASE);
@@ -223,15 +284,11 @@ describe('transport', () => {
       fetch: async () => {
         calls++;
         if (calls === 1) return new Response('slow down', { status: 429 });
-        return new Response(
-          JSON.stringify({ model: 'm', choices: [{ finish_reason: 'stop', message: { content: 'ok' } }] }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify(OK_RESPONSE), { status: 200 });
       },
     });
-    const res = await client.create(BASE);
+    expect((await client.create(BASE)).stop_reason).toBe('end_turn');
     expect(calls).toBe(2);
-    expect(res.stop_reason).toBe('end_turn');
   });
 
   it('times out rather than making a shopper wait', async () => {
@@ -252,14 +309,7 @@ describe('transport', () => {
   });
 
   it('parses a successful response end to end', async () => {
-    const client = new OpenAIModelClient({
-      apiKey: 'sk-test',
-      fetch: reply({
-        model: 'gpt-test',
-        choices: [{ finish_reason: 'stop', message: { content: '{"reply":"hi","claims":[]}' } }],
-        usage: { prompt_tokens: 10, completion_tokens: 2 },
-      }),
-    });
+    const client = new OpenAIModelClient({ apiKey: 'sk-test', fetch: reply(OK_RESPONSE) });
     const res = await client.create(BASE);
     expect(res.model).toBe('gpt-test');
     expect(res.usage.input_tokens).toBe(10);

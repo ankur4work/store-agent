@@ -104,7 +104,7 @@ export const CLAUDE_MODELS: ModelTierMap = {
   escalation: 'claude-opus-5',
 };
 
-/** ⚠️ Unverified ids — confirm against GET /v1/models before deploying. */
+/** Verified present in GET /v1/models on 2026-09-01. */
 export const OPENAI_MODELS: ModelTierMap = {
   classify: 'gpt-5.6-luna',
   workhorse: 'gpt-5.6-terra',

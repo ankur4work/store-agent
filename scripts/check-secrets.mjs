@@ -19,6 +19,12 @@ const RULES = [
   { name: 'Opaque access token (atkn_)', re: /\batkn_[a-f0-9]{40,}\b/i },
   { name: 'Anthropic API key', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
   { name: 'Anthropic OAuth token', re: /\bsk-ant-oat\d+-[A-Za-z0-9_-]{20,}/ },
+  // OpenAI issues several shapes. The generic `sk-` rule is last and widest;
+  // the specific ones exist so the violation message names the right thing.
+  { name: 'OpenAI service account key', re: /\bsk-svcacct-[A-Za-z0-9_-]{20,}/ },
+  { name: 'OpenAI project key', re: /\bsk-proj-[A-Za-z0-9_-]{20,}/ },
+  { name: 'OpenAI admin key', re: /\bsk-admin-[A-Za-z0-9_-]{20,}/ },
+  { name: 'OpenAI API key', re: /\bsk-[A-Za-z0-9_-]{32,}/ },
   { name: 'AWS access key id', re: /\bAKIA[0-9A-Z]{16}\b/ },
   { name: 'GitHub token', re: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
   { name: 'Private key block', re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/ },

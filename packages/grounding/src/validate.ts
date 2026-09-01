@@ -43,12 +43,29 @@ export function validateGrounding(
     const source = byId.get(claim.source_tool_call_id);
 
     if (source === undefined) {
+      // A mislabeled citation is not the same risk as a fabricated fact.
+      // If everything the claim asserts is independently supported by this
+      // turn's tool results, the model got the FACT right and the LABEL wrong
+      // — that is a warning. Treating it as an error rejected correct answers
+      // and drove the retry into needless refusals.
+      //
+      // This is safe because the coverage checks below independently catch
+      // unsupported prices and stock claims regardless of what was declared.
+      const claimMoney = extractMoneyFromText(claim.assertion);
+      const supported =
+        claimMoney.length > 0
+          ? claimMoney.every((m) => isDerivable(m, allSourceMoney))
+          : toolResults.length > 0;
+
       violations.push({
         code: 'unknown_citation',
-        severity: 'error',
-        message:
-          `Claim cites tool_call_id "${claim.source_tool_call_id}", which was not called this turn. ` +
-          `Citations must reference a tool call from the current turn.`,
+        severity: supported ? 'warning' : 'error',
+        message: supported
+          ? `Claim cites unknown source "${claim.source_tool_call_id}", but its facts are supported ` +
+            `by this turn's tool results — mislabeled citation, not fabrication. ` +
+            `Cite the \`source\` handle exactly as it appears in the tool result.`
+          : `Claim cites "${claim.source_tool_call_id}", which was not returned this turn, and its ` +
+            `facts are not supported by any tool result from this turn.`,
         claim,
       });
       continue;

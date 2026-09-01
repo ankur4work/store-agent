@@ -7,3 +7,7 @@ dist/
 coverage/
 bench-results/
 .DS_Store
+
+# Local tool state
+.claude/
+*.tmp.*

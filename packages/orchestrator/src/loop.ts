@@ -241,8 +241,19 @@ export class Orchestrator {
           payload = await this.safeExecute(call.name, call.input, args.signal);
         }
 
-        args.toolResults.push({ tool_call_id: call.id, tool: call.name, result: payload });
-        results.push({ type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(payload) });
+        // Cite by a short, deterministic HANDLE — not the provider's opaque
+        // call id. Models reproduce `search_catalog#1` reliably and
+        // `call_CxYz9f...` unreliably, and a mis-typed citation used to fail
+        // grounding on a perfectly correct answer, pushing the retry into a
+        // needless refusal. The handle is echoed inside the tool result so the
+        // model can read it back off the transcript.
+        const handle = `${call.name}#${args.toolResults.length + 1}`;
+        args.toolResults.push({ tool_call_id: handle, tool: call.name, result: payload });
+        results.push({
+          type: 'tool_result',
+          tool_use_id: call.id,
+          content: JSON.stringify({ source: handle, data: payload }),
+        });
         args.emit({ type: 'tool_end', detail: call.name });
       }
 

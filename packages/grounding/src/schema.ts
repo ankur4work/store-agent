@@ -35,8 +35,9 @@ export const GROUNDED_RESPONSE_SCHEMA = {
           source_tool_call_id: {
             type: 'string',
             description:
-              'The id of the tool call from THIS turn that supports the assertion. ' +
-              'Never invent one; if no tool supports it, do not make the assertion.',
+              'The `source` handle of the tool result that supports this assertion, ' +
+              'copied EXACTLY as it appears in that result — e.g. "search_catalog#1". ' +
+              'Never invent one; if no tool result supports it, do not make the assertion.',
           },
         },
         required: ['assertion', 'kind', 'source_tool_call_id'],

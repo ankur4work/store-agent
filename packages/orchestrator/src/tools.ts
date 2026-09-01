@@ -41,10 +41,18 @@ export const GET_PRODUCT: ToolDef = {
     type: 'object',
     properties: {
       id: { type: 'string', description: 'Product id, e.g. gid://shopify/Product/123' },
+      // Array of pairs rather than an open map: strict structured-output modes
+      // require `additionalProperties: false`, so a free-form
+      // `additionalProperties: {type:"string"}` map is not expressible.
       selected: {
-        type: 'object',
-        description: 'Partial option selection, e.g. {"Size":"M"}.',
-        additionalProperties: { type: 'string' },
+        type: 'array',
+        description: 'Partial option selection, e.g. [{"name":"Size","value":"M"}].',
+        items: {
+          type: 'object',
+          properties: { name: { type: 'string' }, value: { type: 'string' } },
+          required: ['name', 'value'],
+          additionalProperties: false,
+        },
       },
     },
     required: ['id'],
