@@ -14,7 +14,16 @@ export { planSpeculation, speculationMatches } from './speculate.js';
 export type { Speculation } from './speculate.js';
 export { DEFAULT_TOOLS, SEARCH_CATALOG, GET_PRODUCT, GET_POLICY, ADD_TO_CART, ESCALATE } from './tools.js';
 export type { ToolExecutor } from './tools.js';
-export { MODELS, firstText, toolUses } from './model.js';
+export { CLAUDE_MODELS, OPENAI_MODELS, resolveModels, firstText, toolUses } from './model.js';
+export type { ModelTierMap } from './model.js';
+export {
+  OpenAIModelClient,
+  OpenAIError,
+  OpenAITimeoutError,
+  toOpenAIRequest,
+  fromOpenAIResponse,
+} from './providers/openai.js';
+export type { OpenAIClientOptions } from './providers/openai.js';
 export type {
   ContentBlock,
   Effort,

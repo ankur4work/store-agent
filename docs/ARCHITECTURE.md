@@ -267,6 +267,16 @@ Four techniques carry this:
 
 ## 7. Model strategy & cost
 
+> **Provider: OpenAI** (changed 2026-09-01). The orchestrator talks to a narrow
+> provider-neutral `ModelClient` seam, so the loop, grounding, speculation, and
+> UCP layers are unaffected. Model ids are **configuration**, not constants —
+> `resolveModels()` reads them from env.
+>
+> Three things in this section are Anthropic-derived and are flagged inline
+> below: the tier table (§7.1), the thinking/effort finding (§7.2), and the unit
+> economics (§7.4). **§7.4 has not been re-derived for OpenAI pricing and should
+> not be quoted until it is.**
+
 ### 7.1 Routing
 
 | Tier | Model | Price /MTok | Use |
@@ -278,6 +288,18 @@ Four techniques carry this:
 Escalation is triggered by the classifier, by tool-loop depth > 3, or by an explicit shopper frustration signal — never by default.
 
 ### 7.2 Thinking and effort — the non-obvious call
+
+> **Anthropic-specific finding.** The "keep thinking on" conclusion below is a
+> measured Claude Sonnet 5 behaviour. It does **not** transfer to OpenAI, whose
+> reasoning models expose `reasoning_effort` with different semantics and no
+> equivalent thinking on/off switch. What *does* transfer is the underlying
+> question: **verify empirically that your latency setting has not quietly
+> reduced tool-calling rate**, because for us tool-calling rate *is* grounding
+> rate. Re-run that check on OpenAI before tuning effort down.
+>
+> The adapter collapses our five-level effort ladder to OpenAI's three
+> (`xhigh`/`max` → `high`) — documented rather than silently clamped, because it
+> changes cost.
 
 Claude Sonnet 5 runs **adaptive thinking by default** and defaults to `effort: "high"`. Both are wrong for a latency-sensitive retail turn.
 
@@ -320,6 +342,19 @@ Typically 10–14k tokens. Cache reads cost ~0.1×, so this drops per-turn input
 TTL: `1h` for merchants above ~50 sessions/hour (write cost 2× but amortizes); `5m` default for the long tail. Minimum cacheable prefix on Sonnet 5 is 1024 tokens — our prefix clears it comfortably.
 
 ### 7.4 Unit economics
+
+> ⚠️ **Stale — Anthropic-derived.** The figures below assume Anthropic's explicit
+> `cache_control` breakpoints at ~0.1× on cache reads. OpenAI caches
+> **automatically** (no breakpoints, ~1024-token minimum, 24h retention since
+> 2026-05-29) and published sources disagree on the discount. Re-derive from the
+> official OpenAI pricing page before quoting any of this. The *shape* of the
+> argument holds — caching is the difference between a viable and an unviable
+> business — but the numbers do not.
+>
+> One asymmetry to carry over: with automatic caching there is **no
+> `cache_creation_input_tokens` signal** confirming a breakpoint landed, so the
+> `assertStable()` prefix guard (§7.3) becomes the primary defence rather than a
+> backstop. Monitor `usage.prompt_tokens_details.cached_tokens` instead.
 
 Per turn, Sonnet 5, warm cache:
 
@@ -415,8 +450,8 @@ That number survives merchant scrutiny in a way "influenced revenue" never does.
 | Merchant admin | Remix + Polaris + App Bridge (Shopify's required embedded stack) |
 | Edge | Cloudflare Workers + KV |
 | Gateway | Go |
-| Orchestrator | TypeScript / Node 22, `@anthropic-ai/sdk` |
-| LLM | Claude Opus 5 / Sonnet 5 / Haiku 4.5 |
+| Orchestrator | TypeScript / Node 22, provider-neutral `ModelClient` seam |
+| LLM | **OpenAI** via REST adapter; tier ids from env (`resolveModels`) |
 | Voice | LiveKit (WebRTC) · Deepgram Nova-3 (STT) · Cartesia Sonic (TTS) |
 | Commerce | Shopify UCP MCP · Admin GraphQL · Web Pixels · Webhooks |
 | Data | Postgres 17 · Redis Cluster · ClickHouse · S3 |

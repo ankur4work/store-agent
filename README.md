@@ -47,7 +47,7 @@ Enforcement config lives in [`perf/`](perf/) — `size-limit.json` and `lighthou
 
 **Widget** Preact + signals, Shadow DOM, Vite · **Admin** Remix + Polaris + App Bridge
 **Edge** Cloudflare Workers + KV · **Gateway** Go · **Orchestrator** TypeScript
-**LLM** Claude Opus 5 / Sonnet 5 / Haiku 4.5 · **Voice** LiveKit + Deepgram Nova-3 + Cartesia Sonic
+**LLM** OpenAI, behind a provider-neutral `ModelClient` seam · **Voice** LiveKit + Deepgram Nova-3 + Cartesia Sonic
 **Data** Postgres 17 + pgvector · Redis Cluster · ClickHouse · S3
 
 ---

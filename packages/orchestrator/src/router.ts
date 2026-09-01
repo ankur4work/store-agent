@@ -1,4 +1,4 @@
-import { MODELS, type Effort } from './model.js';
+import { OPENAI_MODELS, type Effort, type ModelTierMap } from './model.js';
 
 /**
  * Model routing (ARCHITECTURE.md §7.1).
@@ -28,48 +28,34 @@ export interface Route {
   readonly reason: string;
 }
 
-const WORKHORSE: Route = {
-  tier: 'workhorse',
-  model: MODELS.workhorse,
-  effort: 'low',
-  maxTokens: 2048,
-  reason: 'default conversational turn',
-};
+export function route(signals: RouteSignals, models: ModelTierMap = OPENAI_MODELS): Route {
+  const workhorse: Route = {
+    tier: 'workhorse',
+    model: models.workhorse,
+    effort: 'low',
+    maxTokens: 2048,
+    reason: 'default conversational turn',
+  };
 
-export function route(signals: RouteSignals): Route {
-  if (signals.frustration === true) {
-    return {
-      tier: 'escalation',
-      model: MODELS.escalation,
-      effort: 'medium',
-      maxTokens: 4096,
-      reason: 'shopper frustration — get this right',
-    };
-  }
-  if (signals.complex === true) {
-    return {
-      tier: 'escalation',
-      model: MODELS.escalation,
-      effort: 'medium',
-      maxTokens: 4096,
-      reason: 'multi-constraint reasoning',
-    };
-  }
+  const escalate = (reason: string): Route => ({
+    tier: 'escalation',
+    model: models.escalation,
+    effort: 'medium',
+    maxTokens: 4096,
+    reason,
+  });
+
+  if (signals.frustration === true) return escalate('shopper frustration — get this right');
+  if (signals.complex === true) return escalate('multi-constraint reasoning');
   if (signals.toolDepth > 3) {
-    return {
-      tier: 'escalation',
-      model: MODELS.escalation,
-      effort: 'medium',
-      maxTokens: 4096,
-      reason: `tool loop depth ${signals.toolDepth} — the workhorse is stuck`,
-    };
+    return escalate(`tool loop depth ${signals.toolDepth} — the workhorse is stuck`);
   }
   if (signals.groundingRetry === true) {
     // Same model, more effort. Switching models mid-conversation would also
-    // invalidate the prompt cache (caches are model-scoped).
-    return { ...WORKHORSE, effort: 'medium', reason: 'grounding retry — more effort, same model' };
+    // invalidate the prompt cache — caches are model-scoped on every provider.
+    return { ...workhorse, effort: 'medium', reason: 'grounding retry — more effort, same model' };
   }
-  return WORKHORSE;
+  return workhorse;
 }
 
 /** Cheap keyword frustration detector; the classifier refines it. */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ESCALATION_REPLY, Orchestrator, parseGrounded } from '../src/loop.js';
 import { detectFrustration, route } from '../src/router.js';
+import { OPENAI_MODELS, resolveModels } from '../src/model.js';
 import { planSpeculation, speculationMatches } from '../src/speculate.js';
 import {
   CATALOG_PAYLOAD,
@@ -201,25 +202,40 @@ describe('failure modes', () => {
 });
 
 describe('routing', () => {
-  it('defaults to Sonnet at low effort', () => {
-    const r = route({ toolDepth: 0 });
-    expect(r.model).toBe('claude-sonnet-5');
+  // Provider-neutral: assert against the configured tier map, never a literal
+  // model id. Ids are configuration and change without notice.
+  const MODELS = { classify: 'tier-classify', workhorse: 'tier-workhorse', escalation: 'tier-escalation' };
+
+  it('defaults to the workhorse tier at low effort', () => {
+    const r = route({ toolDepth: 0 }, MODELS);
+    expect(r.model).toBe(MODELS.workhorse);
     expect(r.effort).toBe('low');
   });
 
-  it('escalates to Opus on frustration', () => {
-    expect(route({ toolDepth: 0, frustration: true }).model).toBe('claude-opus-5');
+  it('escalates on frustration', () => {
+    expect(route({ toolDepth: 0, frustration: true }, MODELS).model).toBe(MODELS.escalation);
   });
 
   it('escalates when the tool loop is stuck', () => {
-    expect(route({ toolDepth: 4 }).tier).toBe('escalation');
+    expect(route({ toolDepth: 4 }, MODELS).tier).toBe('escalation');
   });
 
   it('raises effort but keeps the model on a grounding retry', () => {
-    // Switching models mid-conversation would invalidate the prompt cache.
-    const r = route({ toolDepth: 0, groundingRetry: true });
-    expect(r.model).toBe('claude-sonnet-5');
+    // Switching models mid-conversation would invalidate the prompt cache —
+    // caches are model-scoped on every provider.
+    const r = route({ toolDepth: 0, groundingRetry: true }, MODELS);
+    expect(r.model).toBe(MODELS.workhorse);
     expect(r.effort).toBe('medium');
+  });
+
+  it('defaults to the OpenAI tier map when none is supplied', () => {
+    expect(route({ toolDepth: 0 }).model).toBe(OPENAI_MODELS.workhorse);
+  });
+
+  it('resolves model ids from env so they never require a code change', () => {
+    const m = resolveModels({ MODEL_WORKHORSE: 'custom-model' });
+    expect(m.workhorse).toBe('custom-model');
+    expect(m.escalation).toBe(OPENAI_MODELS.escalation);
   });
 
   it.each([

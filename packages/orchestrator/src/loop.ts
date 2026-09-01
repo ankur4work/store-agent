@@ -6,7 +6,15 @@ import {
   type GroundingVerdict,
   type ToolResultRecord,
 } from '@storeagent/grounding';
-import { firstText, toolUses, type Message, type ModelClient, type ModelResponse, type ToolResultBlock } from './model.js';
+import {
+  firstText,
+  toolUses,
+  type Message,
+  type ModelClient,
+  type ModelResponse,
+  type ModelTierMap,
+  type ToolResultBlock,
+} from './model.js';
 import { buildCachedPrefix, prefixFingerprint, renderTurnContext, type MerchantPack, type TurnContext } from './prompt.js';
 import { detectFrustration, route, type Route } from './router.js';
 import { planSpeculation, speculationMatches } from './speculate.js';
@@ -46,6 +54,8 @@ export interface TurnResult {
 export interface OrchestratorDeps {
   readonly model: ModelClient;
   readonly tools: ToolExecutor;
+  /** Provider-neutral tier → model id map. Defaults to OPENAI_MODELS. */
+  readonly models?: ModelTierMap;
   readonly onEvent?: (e: TurnEvent) => void;
 }
 
@@ -87,7 +97,7 @@ export class Orchestrator {
     const toolResults: ToolResultRecord[] = [];
     let attempts = 0;
     let lastVerdict: GroundingVerdict = { ok: false, violations: [] };
-    let chosenRoute = route({ toolDepth: 0, frustration: detectFrustration(input.message) });
+    let chosenRoute = route({ toolDepth: 0, frustration: detectFrustration(input.message) }, this.deps.models);
 
     // Two attempts: the original, then one grounded retry with feedback.
     for (attempts = 1; attempts <= 2; attempts++) {
@@ -96,11 +106,14 @@ export class Orchestrator {
         { role: 'user', content: attempts === 1 ? userText : `${userText}\n\n${violationsToFeedback(lastVerdict.violations)}` },
       ];
 
-      chosenRoute = route({
-        toolDepth: 0,
-        frustration: detectFrustration(input.message),
-        groundingRetry: attempts > 1,
-      });
+      chosenRoute = route(
+        {
+          toolDepth: 0,
+          frustration: detectFrustration(input.message),
+          groundingRetry: attempts > 1,
+        },
+        this.deps.models,
+      );
 
       const outcome = await this.runToolLoop({
         system,
