@@ -11,6 +11,8 @@ import {
   validateSettings,
 } from '../src/admin/settings.js';
 import { esc, renderAdmin } from '../src/admin/render.js';
+import { analyze, describe as describeLift } from '@storeagent/attribution';
+import type { ShopSettings } from '../src/admin/settings.js';
 
 const API_KEY = 'test-client-id';
 const SECRET = 'shpss_admin_secret';
@@ -198,23 +200,88 @@ describe('render escaping', () => {
   });
 
   it('escapes a hostile greeting rather than emitting it raw', () => {
-    const out = renderAdmin({
-      shop: SHOP,
-      apiKey: API_KEY,
-      host: '',
-      settings: {
-        shop: SHOP,
-        accentColor: '#1b3a34',
-        cornerRadius: 16,
-        position: 'right',
-        greeting: '"><script>alert(1)</script>',
-        enabled: true,
-        updatedAt: 0,
-      },
-      stats: { activeSessions: 0, mode: 'demo', model: 'm' },
-    });
+    const out = renderAdmin(viewModel({ greeting: '"><script>alert(1)</script>' }));
     expect(out).not.toContain('<script>alert(1)</script>');
     expect(out).toContain('&lt;script&gt;');
+  });
+});
+
+function viewModel(settingsOver: Partial<ShopSettings> = {}, liftOver?: Parameters<typeof analyze>) {
+  const lift = liftOver
+    ? analyze(...liftOver)
+    : analyze({ sessions: 0, conversions: 0, revenueMinor: 0 }, { sessions: 0, conversions: 0, revenueMinor: 0 });
+  return {
+    shop: SHOP,
+    apiKey: API_KEY,
+    host: '',
+    settings: {
+      shop: SHOP,
+      accentColor: '#1b3a34',
+      cornerRadius: 16,
+      position: 'right' as const,
+      greeting: '',
+      enabled: true,
+      holdoutFraction: 0.2,
+      updatedAt: 0,
+      ...settingsOver,
+    },
+    stats: { activeSessions: 0, mode: 'demo' as const, model: 'm' },
+    lift,
+    liftSummary: describeLift(lift),
+    recommendedHoldout: 0.2,
+    unmatchedOrders: 0,
+  };
+}
+
+/**
+ * The whole product rests on not overclaiming. These assert the admin refuses
+ * to show a lift figure the sample cannot support — no greyed-out placeholder,
+ * no "provisional" number a merchant might act on.
+ */
+describe('results panel honesty', () => {
+  const arm = (sessions: number, conversions: number) => ({
+    sessions,
+    conversions,
+    revenueMinor: conversions * 18_900,
+  });
+
+  it('shows no lift figure while the sample is thin', () => {
+    const out = renderAdmin(viewModel({}, [arm(120, 5), arm(30, 1)]));
+    expect(out).toContain('Still measuring');
+    expect(out).not.toMatch(/Incremental revenue[\s\S]{0,200}\$\d/);
+  });
+
+  it('explains what is missing rather than showing an empty box', () => {
+    const out = renderAdmin(viewModel({}, [arm(120, 5), arm(30, 1)]));
+    expect(out).toMatch(/Not enough (sessions|orders)/);
+  });
+
+  it('reports revenue only once the effect is significant', () => {
+    const out = renderAdmin(viewModel({}, [arm(20_000, 800), arm(20_000, 600)]));
+    expect(out).toContain('Incremental revenue');
+    expect(out).toContain('95% CI');
+    expect(out).not.toContain('Still measuring');
+  });
+
+  it('does not claim revenue when the arms are indistinguishable', () => {
+    const out = renderAdmin(viewModel({}, [arm(5_000, 150), arm(5_000, 148)]));
+    expect(out).toContain('Not proven yet');
+  });
+
+  it('reports a negative result rather than hiding it', () => {
+    const out = renderAdmin(viewModel({}, [arm(20_000, 500), arm(20_000, 700)]));
+    expect(out).toContain('lower');
+    expect(out).toContain('Not proven yet');
+  });
+
+  it('surfaces unmatched orders instead of silently dropping them', () => {
+    const vm = { ...viewModel({}, [arm(20_000, 800), arm(20_000, 600)]), unmatchedOrders: 7 };
+    expect(renderAdmin(vm)).toContain('7 order(s)');
+  });
+
+  it('suggests a different holdout when the current one is off', () => {
+    const vm = { ...viewModel({ holdoutFraction: 0.05 }), recommendedHoldout: 0.3 };
+    expect(renderAdmin(vm)).toContain('30%');
   });
 });
 

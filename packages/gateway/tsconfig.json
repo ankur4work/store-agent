@@ -9,7 +9,8 @@
   "references": [
     { "path": "../grounding" },
     { "path": "../ucp-client" },
-    { "path": "../orchestrator" }
+    { "path": "../orchestrator" },
+    { "path": "../attribution" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

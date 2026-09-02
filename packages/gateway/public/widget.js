@@ -33,7 +33,14 @@
 (function () {
   'use strict';
 
-  var API = (document.currentScript && document.currentScript.dataset.api) || '';
+  // Captured during initial script execution — `document.currentScript` is
+  // null by the time any async callback runs.
+  var SCRIPT = document.currentScript;
+  var API = (SCRIPT && SCRIPT.dataset.api) || '';
+  var SHOP =
+    (SCRIPT && SCRIPT.dataset.shop) ||
+    (window.Shopify && window.Shopify.shop) ||
+    location.hostname;
   var KEY = 'storeagent.session';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
@@ -205,6 +212,10 @@ textarea::placeholder{color:var(--muted)}
 .send:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* merchant-configurable side */
+:host([data-position=left]) .launcher{right:auto;left:22px}
+:host([data-position=left]) .panel{right:auto;left:22px;transform-origin:0 100%}
 
 @media (max-width:540px){
   .panel{right:0;left:0;bottom:0;width:100%;height:88dvh;border-radius:20px 20px 0 0;
@@ -579,8 +590,76 @@ textarea::placeholder{color:var(--muted)}
       });
   }
 
+  // ---------- measurement -------------------------------------------------
+  //
+  // A slice of shoppers is held back and never sees the assistant, so there is
+  // an honest control group to compare against. Two things matter here:
+  //
+  //   1. The ARM IS DECIDED BY THE SERVER. The widget asks; it does not choose.
+  //      Deciding client-side would let a shopper (or a bored developer with
+  //      devtools) put themselves in either group and quietly corrupt the
+  //      experiment.
+  //   2. HELD-BACK SESSIONS STILL GET A SESSION ID, written to storage where
+  //      the web pixel can read it. Without that the control group's orders are
+  //      invisible, and an unmeasurable control group makes the whole
+  //      comparison worthless. This is the one job the widget does even when it
+  //      renders nothing at all.
+  var SESSION_KEY = 'storeagent.sid';
+
+  function sessionId() {
+    try {
+      var existing = localStorage.getItem(SESSION_KEY);
+      if (existing) return existing;
+      var id =
+        (crypto.randomUUID && crypto.randomUUID()) ||
+        String(Date.now()) + Math.random().toString(36).slice(2);
+      localStorage.setItem(SESSION_KEY, id);
+      return id;
+    } catch (e) {
+      return String(Date.now());
+    }
+  }
+
   // ---------- mount -------------------------------------------------------
   function mount() {
+    var sid = sessionId();
+    state.sessionId = state.sessionId || sid;
+    var shop = SHOP;
+
+    fetch(API + '/api/exposure', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: sid, shop: shop }),
+      keepalive: true,
+    })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (d) {
+        // Held back: record nothing on screen, leave the session id in place
+        // for the pixel, and stop.
+        if (d && d.arm === 'holdout') return;
+        return fetch(API + '/api/config?shop=' + encodeURIComponent(shop))
+          .then(function (r) {
+            return r.json();
+          })
+          .then(render);
+      })
+      .catch(function () {
+        // Measurement must never cost a conversation. If the beacon fails,
+        // show the assistant rather than silently disabling it.
+        render({ enabled: true });
+      });
+  }
+
+  function render(cfg) {
+    if (cfg && cfg.enabled === false) return;
+    if (cfg) {
+      if (cfg.accentColor) host.style.setProperty('--sa-accent', cfg.accentColor);
+      if (cfg.cornerRadius != null) host.style.setProperty('--sa-radius', cfg.cornerRadius + 'px');
+      if (cfg.position === 'left') host.setAttribute('data-position', 'left');
+      state.greeting = cfg.greeting || '';
+    }
     document.body.appendChild(host);
     if (state.open) open();
     else if (!state.messages.length) {
@@ -595,6 +674,7 @@ textarea::placeholder{color:var(--muted)}
       }, 20000);
     }
   }
+
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);
   else mount();
 })();

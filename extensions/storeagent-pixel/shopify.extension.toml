@@ -1,0 +1,27 @@
+# Web pixel extension.
+#
+# Runs in Shopify's sandboxed pixel worker on every storefront page, including
+# checkout — which is where the storefront script cannot reach.
+#
+# This is not analytics garnish. Held-back sessions never see the assistant and
+# therefore never create a cart of ours, so the pixel is the ONLY join between a
+# control-group order and the session that placed it. Without it there is no
+# measurable control group, and without a control group there is no honest
+# incrementality number.
+
+api_version = "2026-07"
+
+[[extensions]]
+type = "web_pixel_extension"
+name = "StoreAgent measurement"
+handle = "storeagent-pixel"
+runtime_context = "strict"
+
+  [extensions.settings]
+  type = "object"
+
+    [extensions.settings.fields.gateway_url]
+    name = "Gateway URL"
+    description = "Your StoreAgent origin, e.g. https://api.storeagent.dev"
+    type = "single_line_text_field"
+    validations = [{ name = "min", value = "8" }]

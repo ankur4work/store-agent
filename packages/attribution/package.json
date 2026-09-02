@@ -1,5 +1,5 @@
 {
-  "name": "@storeagent/gateway",
+  "name": "@storeagent/attribution",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,14 +9,6 @@
   "scripts": {
     "build": "tsc --build tsconfig.json",
     "typecheck": "tsc --build tsconfig.json",
-    "test": "vitest run",
-    "start": "node dist/src/main.js",
-    "dev": "npm run build && node dist/src/main.js"
-  },
-  "dependencies": {
-    "@storeagent/attribution": "*",
-    "@storeagent/grounding": "*",
-    "@storeagent/orchestrator": "*",
-    "@storeagent/ucp-client": "*"
+    "test": "vitest run"
   }
 }

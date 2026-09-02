@@ -17,6 +17,15 @@ import {
   type NonceStore,
   type ShopStore,
 } from './shopify/shops.js';
+import {
+  MemoryAttributionStore,
+  analyze,
+  assignArm,
+  describe as describeLift,
+  parseOrderPayload,
+  recommendedHoldout,
+  type AttributionStore,
+} from '@storeagent/attribution';
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import {
@@ -61,6 +70,7 @@ export interface GatewayDeps {
   readonly shops?: ShopStore;
   readonly nonces?: NonceStore;
   readonly settings?: SettingsStore;
+  readonly attribution?: AttributionStore;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
@@ -69,6 +79,7 @@ export function createGateway(deps: GatewayDeps): Server {
   const shops = deps.shops ?? new MemoryShopStore();
   const nonces = deps.nonces ?? new MemoryNonceStore();
   const settings = deps.settings ?? new MemorySettingsStore();
+  const attribution = deps.attribution ?? new MemoryAttributionStore();
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -121,6 +132,38 @@ export function createGateway(deps: GatewayDeps): Server {
 
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       await handleChat(req, res);
+      return;
+    }
+
+    // Widget config. One cheap call the widget makes before deciding whether to
+    // render, so holdout assignment and appearance come from the server rather
+    // than being guessable or edit-able in the page.
+    if (url.pathname === '/api/config' && req.method === 'GET') {
+      const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
+      const s = await settings.get(shop);
+      json(res, 200, {
+        enabled: s.enabled,
+        accentColor: s.accentColor,
+        cornerRadius: s.cornerRadius,
+        position: s.position,
+        greeting: s.greeting,
+        holdoutFraction: s.holdoutFraction,
+      });
+      return;
+    }
+
+    // Exposure beacon. Fired once per session by the widget — in BOTH arms,
+    // including holdout, where nothing renders. Without the holdout half there
+    // is no control group and no incrementality.
+    if (url.pathname === '/api/exposure' && req.method === 'POST') {
+      await handleExposure(req, res);
+      return;
+    }
+
+    // Web pixel: checkout_completed. The only join available for holdout
+    // sessions, which by definition have no cart of ours.
+    if (url.pathname === '/api/pixel' && req.method === 'POST') {
+      await handlePixel(req, res);
       return;
     }
 
@@ -190,7 +233,30 @@ export function createGateway(deps: GatewayDeps): Server {
           hmacHeader: header(req, 'x-shopify-hmac-sha256'),
           rawBody,
         },
-        { apiSecret: app.apiSecret, shops, log: (l) => console.log(l) },
+        {
+          apiSecret: app.apiSecret,
+          shops,
+          log: (l) => console.log(l),
+          // Server-side truth for revenue. Joined to a session by cart token
+          // where the agent created the cart; the pixel covers everything else.
+          onOrder: async (shopDomain, payload) => {
+            const { orderId, revenueMinor, cartToken } = parseOrderPayload(payload);
+            if (orderId === undefined) return;
+            const sessionId =
+              cartToken === undefined
+                ? undefined
+                : await attribution.sessionForCart(shopDomain, cartToken);
+            await attribution.recordConversion({
+              shop: shopDomain,
+              orderId,
+              sessionId,
+              cartId: cartToken,
+              revenueMinor,
+              createdAt: Date.now(),
+              matchedBy: sessionId === undefined ? 'unmatched' : 'cart',
+            });
+          },
+        },
       );
       json(res, outcome.status, outcome.body);
       return;
@@ -227,6 +293,8 @@ export function createGateway(deps: GatewayDeps): Server {
       }
 
       const shop = verified.shop;
+      const totals = await attribution.totals(shop);
+      const lift = analyze(totals.exposed, totals.holdout);
       const vm = {
         shop,
         apiKey: app.apiKey,
@@ -237,6 +305,10 @@ export function createGateway(deps: GatewayDeps): Server {
           mode: (ucp ? 'live' : 'demo') as 'live' | 'demo',
           model: config.models.workhorse,
         },
+        lift,
+        liftSummary: describeLift(lift),
+        recommendedHoldout: recommendedHoldout(totals.exposed.sessions + totals.holdout.sessions),
+        unmatchedOrders: await attribution.unmatchedCount(shop),
         saved: url.searchParams.get('saved') === '1',
       };
       html(res, 200, renderAdmin(vm), shop);
@@ -285,6 +357,61 @@ export function createGateway(deps: GatewayDeps): Server {
     json(res, 404, { error: 'not_found' });
   }
 
+  async function handleExposure(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: { sessionId?: unknown; shop?: unknown };
+    try {
+      body = JSON.parse(await readBody(req, 4 * 1024)) as typeof body;
+    } catch {
+      json(res, 400, { error: 'invalid_json' });
+      return;
+    }
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+    if (sessionId === '') {
+      json(res, 400, { error: 'sessionId required' });
+      return;
+    }
+    const shop = typeof body.shop === 'string' && body.shop !== '' ? body.shop : config.shopDomain ?? 'demo.local';
+
+    // The arm is computed SERVER-SIDE from the shop-salted hash. The widget
+    // computes the same value to decide whether to render, but nothing it sends
+    // is trusted — otherwise a shopper could put themselves in either arm.
+    const s = await settings.get(shop);
+    const arm = assignArm(shop, sessionId, s.holdoutFraction);
+    await attribution.recordExposure({ shop, sessionId, arm, createdAt: Date.now(), engaged: false });
+    json(res, 200, { arm });
+  }
+
+  async function handlePixel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: { sessionId?: unknown; shop?: unknown; orderId?: unknown; totalMinor?: unknown };
+    try {
+      body = JSON.parse(await readBody(req, 8 * 1024)) as typeof body;
+    } catch {
+      json(res, 400, { error: 'invalid_json' });
+      return;
+    }
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined;
+    const orderId = body.orderId === undefined ? undefined : String(body.orderId);
+    if (sessionId === undefined || orderId === undefined) {
+      json(res, 400, { error: 'sessionId and orderId required' });
+      return;
+    }
+    const shop = typeof body.shop === 'string' && body.shop !== '' ? body.shop : config.shopDomain ?? 'demo.local';
+
+    // The pixel is client-side and therefore forgeable. It is recorded as a
+    // provisional signal; the orders/create webhook is the server-side truth
+    // and overwrites revenue when it arrives (same orderId, deduped).
+    await attribution.recordConversion({
+      shop,
+      orderId,
+      sessionId,
+      cartId: undefined,
+      revenueMinor: typeof body.totalMinor === 'number' ? Math.round(body.totalMinor) : 0,
+      createdAt: Date.now(),
+      matchedBy: 'pixel',
+    });
+    json(res, 200, { ok: true });
+  }
+
   async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let body: ChatRequest;
     try {
@@ -320,11 +447,25 @@ export function createGateway(deps: GatewayDeps): Server {
     const ctl = new AbortController();
     req.on('close', () => ctl.abort());
 
+    // Reaching /api/chat at all means the shopper opened the assistant.
+    // Exposure is being shown it; engagement is using it — and only the second
+    // has a plausible causal path to a sale.
+    void attribution.markEngaged(session.shopDomain, sessionId);
+
     const products: unknown[] = [];
     const executor = createToolExecutor({
       session,
       ucp,
-      onCartChange: (cartId) => send('cart', { cartId }),
+      onCartChange: (cartId) => {
+        send('cart', { cartId });
+        // The second join path: order → cart → session, for the exposed arm.
+        void attribution.linkCart({
+          shop: session.shopDomain,
+          sessionId,
+          cartId,
+          createdAt: Date.now(),
+        });
+      },
     });
 
     // Wrap the executor so product results can be pushed to the UI the moment

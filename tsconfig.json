@@ -1,4 +1,4 @@
-{
+﻿{
   // Solution file. Owns no sources itself - it just orders the build graph so
   // `tsc --build` compiles packages in dependency order and cross-package
   // types are checked through real emitted .d.ts files.
@@ -8,6 +8,8 @@
     { "path": "packages/grounding" },
     { "path": "packages/orchestrator" },
     { "path": "packages/gateway" },
-    { "path": "packages/eval" }
+    { "path": "packages/eval" },
+    { "path": "packages/attribution" }
   ]
 }
+

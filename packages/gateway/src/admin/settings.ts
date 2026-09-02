@@ -15,6 +15,15 @@ export interface ShopSettings {
   position: 'right' | 'left';
   greeting: string;
   enabled: boolean;
+  /**
+   * Fraction of sessions held out of seeing the assistant, 0–0.5.
+   *
+   * The price of a trustworthy number. Defaults higher than the 5% in
+   * ARCHITECTURE §10 because 5% is statistically unaffordable for most stores —
+   * the holdout arm is the bottleneck, so at 5% you need ~20x total traffic to
+   * fill it. See `recommendedHoldout`.
+   */
+  holdoutFraction: number;
   updatedAt: number;
 }
 
@@ -24,6 +33,7 @@ export const DEFAULT_SETTINGS: Omit<ShopSettings, 'shop' | 'updatedAt'> = {
   position: 'right',
   greeting: '',
   enabled: true,
+  holdoutFraction: 0.2,
 };
 
 export interface SettingsStore {
@@ -77,6 +87,14 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
 
   const enabled = input['enabled'] === undefined ? true : Boolean(input['enabled']);
 
+  const holdoutRaw = Number(input['holdoutFraction'] ?? DEFAULT_SETTINGS.holdoutFraction);
+  const holdoutFraction = Number.isFinite(holdoutRaw) ? Math.round(holdoutRaw * 100) / 100 : NaN;
+  // Capped at 0.5: beyond an even split you are withholding the product from
+  // most shoppers to measure it, which is no longer a reasonable trade.
+  if (!Number.isFinite(holdoutFraction) || holdoutFraction < 0 || holdoutFraction > 0.5) {
+    errors.push('holdoutFraction must be between 0 and 0.5');
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   return {
@@ -89,6 +107,7 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
       position: position as 'right' | 'left',
       greeting,
       enabled,
+      holdoutFraction,
       updatedAt: Date.now(),
     },
   };
