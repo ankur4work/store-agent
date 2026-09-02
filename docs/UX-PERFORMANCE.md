@@ -4,6 +4,25 @@
 
 ---
 
+## 0. Design position — where "iconic" can actually live
+
+An embedded widget **cannot have its own visual identity.** Merchant brand tokens override our accent, radius, and font, and it has to look native inside whatever store it lands in. Any distinctiveness we build into a palette gets overwritten on install.
+
+So the craft has to live in what survives re-skinning:
+
+| Lever | What we do |
+|---|---|
+| **Hierarchy** | **Products are the hero.** Every rival buries results in chat bubbles. Cards are large, image-forward, and land *before* the prose — ~16–44 ms from the speculative search, while the model is still thinking. The text is commentary on something already being read. |
+| **Continuity** | The panel **scales out of the launcher's corner** (`transform-origin: 100% 100%`) rather than teleporting in, so launcher and panel read as one object rather than two. |
+| **Cadence** | Cards and chips enter on a 55 ms stagger. It costs nothing and is the whole difference between "rendered" and "composed". |
+| **Typography** | A real scale with tight tracking on headings, tabular numerals on prices, and 2-line clamped titles so cards never ragged-edge. |
+| **State design** | Every state is drawn: first-open greeting that changes by page type, shimmer skeletons, three-dot thinking cadence, sold-out pills, offline copy that still offers a route. **No spinners** — a spinner says "waiting", a skeleton says "arriving". |
+| **Restraint** | One attention nudge per session, after 20 s of real dwell, never on load, never twice. |
+
+Everything above is `transform`/`opacity` only, fully collapsed under `prefers-reduced-motion`, and the whole widget is **8.0 KB gzipped** against a 15 KB budget.
+
+---
+
 ## 1. Performance budget (CI-enforced)
 
 Build fails on any regression.
