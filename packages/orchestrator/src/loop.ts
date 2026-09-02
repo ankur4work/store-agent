@@ -1,10 +1,13 @@
 import {
   GROUNDED_RESPONSE_SCHEMA,
+  GroundingTripwire,
+  settledPrefix,
   validateGrounding,
   violationsToFeedback,
   type GroundedResponse,
   type GroundingVerdict,
   type ToolResultRecord,
+  type Violation,
 } from '@storeagent/grounding';
 import {
   firstText,
@@ -22,6 +25,14 @@ import { DEFAULT_TOOLS, type ToolExecutor } from './tools.js';
 
 const MAX_TOOL_ITERATIONS = 6;
 
+/** Placeholder returned alongside a tripwire trip; never surfaced to a shopper. */
+const EMPTY_RESPONSE: ModelResponse = {
+  model: '',
+  stop_reason: 'end_turn',
+  content: [],
+  usage: { input_tokens: 0, output_tokens: 0 },
+};
+
 /** The escalation reply. There are no dead ends — see EXPERIENCE-CONTRACT §3. */
 const ESCALATION_REPLY =
   "I don't want to guess on that one. Let me get the team to confirm — " +
@@ -35,8 +46,25 @@ export interface TurnInput {
 }
 
 export interface TurnEvent {
-  readonly type: 'tool_start' | 'tool_end' | 'speculation_hit' | 'speculation_miss' | 'grounding_retry' | 'escalated';
+  readonly type:
+    | 'tool_start'
+    | 'tool_end'
+    | 'speculation_hit'
+    | 'speculation_miss'
+    | 'grounding_retry'
+    | 'stream_aborted'
+    | 'escalated';
   readonly detail?: string;
+}
+
+export interface RunTurnOptions {
+  readonly signal?: AbortSignal;
+  /**
+   * Receives decoded, TRIPWIRE-VALIDATED prose as it is produced. Text is only
+   * delivered once it can no longer change and has passed grounding checks, so
+   * anything handed to this callback is safe to paint.
+   */
+  readonly onReplyDelta?: (text: string) => void;
 }
 
 export interface TurnResult {
@@ -72,7 +100,8 @@ export interface OrchestratorDeps {
 export class Orchestrator {
   constructor(private readonly deps: OrchestratorDeps) {}
 
-  async runTurn(input: TurnInput, signal?: AbortSignal): Promise<TurnResult> {
+  async runTurn(input: TurnInput, opts: RunTurnOptions = {}): Promise<TurnResult> {
+    const { signal, onReplyDelta } = opts;
     const events: TurnEvent[] = [];
     const emit = (e: TurnEvent): void => {
       events.push(e);
@@ -125,11 +154,29 @@ export class Orchestrator {
         usage,
         emit,
         signal,
+        onReplyDelta,
       });
 
       if (outcome.kind === 'refusal' || outcome.kind === 'exhausted') {
         emit({ type: 'escalated', detail: outcome.kind });
         return this.escalate(events, chosenRoute, toolResults, fingerprint, usage, attempts);
+      }
+
+      // The tripwire killed the generation mid-sentence. The shopper saw a
+      // truncated message, never a wrong number — but whatever partial text
+      // reached the UI must now be discarded, hence the event.
+      if (outcome.kind === 'tripwire') {
+        lastVerdict = { ok: false, violations: [outcome.violation] };
+        emit({ type: 'stream_aborted', detail: outcome.violation.code });
+        if (attempts === 1) {
+          emit({ type: 'grounding_retry', detail: outcome.violation.code });
+          continue;
+        }
+        emit({ type: 'escalated', detail: 'tripwire fired twice' });
+        return {
+          ...this.escalate(events, chosenRoute, toolResults, fingerprint, usage, attempts),
+          verdict: lastVerdict,
+        };
       }
 
       const parsed = parseGrounded(outcome.text);
@@ -180,26 +227,40 @@ export class Orchestrator {
     usage: { input: number; output: number; cacheRead: number };
     emit: (e: TurnEvent) => void;
     signal?: AbortSignal | undefined;
-  }): Promise<{ kind: 'text'; text: string } | { kind: 'refusal' } | { kind: 'exhausted' }> {
+    onReplyDelta?: ((t: string) => void) | undefined;
+  }): Promise<
+    | { kind: 'text'; text: string }
+    | { kind: 'refusal' }
+    | { kind: 'exhausted' }
+    | { kind: 'tripwire'; violation: Violation }
+  > {
     const messages = [...args.messages];
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-      const res: ModelResponse = await this.deps.model.create(
-        {
-          model: args.route.model,
-          system: args.system,
-          // Snapshot: a request is a VALUE. Passing the live array would let
-          // later pushes mutate an already-issued request, which corrupts
-          // tracing, request logs, and any retry that replays the payload.
-          messages: [...messages],
-          tools: DEFAULT_TOOLS,
-          // Adaptive stays ON — see ARCHITECTURE.md §7.2.
-          thinking: { type: 'adaptive' },
-          output_config: { effort: args.route.effort, format: { type: 'json_schema', schema: GROUNDED_RESPONSE_SCHEMA } },
-          max_tokens: args.route.maxTokens,
+      const request = {
+        model: args.route.model,
+        system: args.system,
+        // Snapshot: a request is a VALUE. Passing the live array would let
+        // later pushes mutate an already-issued request, which corrupts
+        // tracing, request logs, and any retry that replays the payload.
+        messages: [...messages],
+        tools: DEFAULT_TOOLS,
+        // Adaptive stays ON — see ARCHITECTURE.md §7.2.
+        thinking: { type: 'adaptive' as const },
+        output_config: {
+          effort: args.route.effort,
+          format: { type: 'json_schema', schema: GROUNDED_RESPONSE_SCHEMA },
         },
-        args.signal,
-      );
+        max_tokens: args.route.maxTokens,
+      };
+
+      const streamed = await this.callModel(request, {
+        toolResults: args.toolResults,
+        onReplyDelta: args.onReplyDelta,
+        signal: args.signal,
+      });
+      if (streamed.tripwire !== undefined) return { kind: 'tripwire', violation: streamed.tripwire };
+      const res: ModelResponse = streamed.response;
 
       args.usage.input += res.usage.input_tokens;
       args.usage.output += res.usage.output_tokens;
@@ -261,6 +322,73 @@ export class Orchestrator {
     }
 
     return { kind: 'exhausted' };
+  }
+
+  /**
+   * Issue one model call, streaming when the adapter supports it.
+   *
+   * Text reaches the shopper only after it has passed the tripwire. We forward
+   * `settledPrefix(accumulated)` rather than each raw delta, because a price
+   * arrives character by character — forwarding eagerly would paint `$189`
+   * on screen and only *then* discover it was unsupported. Holding back the
+   * unsettled tail costs roughly one token of lag and makes it impossible for
+   * an ungrounded number to be seen.
+   */
+  private async callModel(
+    request: Parameters<ModelClient['create']>[0],
+    args: {
+      toolResults: ToolResultRecord[];
+      onReplyDelta?: ((t: string) => void) | undefined;
+      signal?: AbortSignal | undefined;
+    },
+  ): Promise<{ response: ModelResponse; tripwire?: Violation }> {
+    const canStream = typeof this.deps.model.stream === 'function' && args.onReplyDelta !== undefined;
+    if (!canStream) {
+      return { response: await this.deps.model.create(request, args.signal) };
+    }
+
+    const tripwire = new GroundingTripwire(args.toolResults);
+    const ctl = new AbortController();
+    const onOuterAbort = (): void => ctl.abort();
+    args.signal?.addEventListener('abort', onOuterAbort, { once: true });
+
+    let accumulated = '';
+    let emitted = 0;
+    let violation: Violation | undefined;
+
+    try {
+      const response = await this.deps.model.stream!(
+        request,
+        {
+          onReplyDelta: (delta) => {
+            accumulated += delta;
+            const found = tripwire.check(accumulated);
+            if (found !== undefined) {
+              violation = found;
+              ctl.abort();
+              return;
+            }
+            const safe = settledPrefix(accumulated);
+            if (safe.length > emitted) {
+              args.onReplyDelta!(safe.slice(emitted));
+              emitted = safe.length;
+            }
+          },
+        },
+        ctl.signal,
+      );
+
+      // Stream finished clean — release the held-back tail.
+      if (accumulated.length > emitted) args.onReplyDelta!(accumulated.slice(emitted));
+      return { response };
+    } catch (err) {
+      if (violation !== undefined) {
+        return { response: EMPTY_RESPONSE, tripwire: violation };
+      }
+      throw err;
+    } finally {
+      args.signal?.removeEventListener('abort', onOuterAbort);
+    }
   }
 
   private async safeExecute(

@@ -211,7 +211,30 @@ The agent is explicitly rewarded for "I don't have that — let me get you someo
 
 ## 6. Latency engineering
 
-### 6.1 Text turn budget — target p50 350 ms to first token
+### 6.1 Text turn budget
+
+> ⚠️ **Corrected 2026-09-02 after measuring.** The original 350 ms
+> first-token target was measuring the wrong thing. On a tool-driven turn the
+> reply cannot begin until the model has done a full inference pass to pick a
+> tool, the tool has run, and a second pass has produced the answer — so prose
+> lands at **~3 s**, and no tuning changes that. Speculation collapses tool
+> *execution* time, not model *round trips*.
+>
+> What the shopper actually experiences is **time to first useful pixel**, and
+> product cards render in **44 ms** (measured, end-to-end through the gateway)
+> off the speculative catalog search — before the model has said anything. The
+> prose is commentary on cards already being read.
+>
+> Both are now tracked separately:
+>
+> | Metric | Target | Measured |
+> |---|---:|---:|
+> | Time to renderable products | < 200 ms | **44 ms** |
+> | TTFT prose | < 3.5 s | ~2.9–3.6 s |
+> | Total turn | < 6 s | ~4.0–5.2 s |
+>
+> The table below is retained as the per-hop breakdown; treat the 350 ms total
+> as historical.
 
 | Stage | Budget | Technique |
 |---|---:|---|

@@ -45,16 +45,30 @@ export function extractMoneyFromText(text: string): Minor[] {
  * Deep-walk an arbitrary tool payload and collect every money value it
  * contains, as minor units.
  *
- * Recognizes the UCP `{ amount, currency }` shape wherever it appears —
- * variant prices, price_range min/max, cart subtotal/total, line item prices.
- * Bare numbers are deliberately IGNORED: treating every integer in a payload
- * as a price would make the check meaningless (quantities, ratings, counts).
+ * Two sources, both necessary:
+ *
+ *  1. **Structured** — the UCP `{ amount, currency }` shape wherever it appears:
+ *     variant prices, price_range min/max, cart subtotal/total, line items.
+ *
+ *  2. **Prose inside string values** — policy and FAQ text says things like
+ *     "free shipping over $75". That is a perfectly grounded fact, but it lives
+ *     in a string, not a money object. Found live: omitting this made the
+ *     mid-stream tripwire abort a *correct* answer about free-shipping
+ *     thresholds.
+ *
+ * Bare numbers are still ignored — treating every integer in a payload as a
+ * price would make the check meaningless (quantities, ratings, counts). A
+ * string only contributes when it carries an explicit currency marker.
  */
 export function collectMoneyFromResult(result: unknown): Minor[] {
   const out: Minor[] = [];
   const seen = new Set<unknown>();
 
   const walk = (node: unknown): void => {
+    if (typeof node === 'string') {
+      out.push(...extractMoneyFromText(node));
+      return;
+    }
     if (node === null || typeof node !== 'object') return;
     if (seen.has(node)) return; // cycle guard
     seen.add(node);

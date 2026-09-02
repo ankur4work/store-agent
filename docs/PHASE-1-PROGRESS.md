@@ -1,129 +1,173 @@
 # Phase 1 — Text MVP: Progress
 
-**Status: 2 of 5 deliverables complete.** Gate not yet claimable — see §4.
+**Status: 4 of 5 deliverables.** You can now run it and watch someone use it.
 
 | Deliverable | Status |
 |---|---|
-| Grounding validator | ✅ `packages/grounding` — 60 tests |
-| Orchestrator (agent loop) | ✅ `packages/orchestrator` — 58 tests |
-| Widget (theme app extension) | ⬜ not started |
-| Gateway (Go, WebSocket) | ⬜ not started |
-| Merchant admin (Remix + Polaris) | ⬜ not started |
+| Grounding validator | ✅ `packages/grounding` |
+| Orchestrator (agent loop) | ✅ `packages/orchestrator` |
+| Streaming | ✅ end-to-end, with a mid-stream grounding tripwire |
+| Gateway | ✅ `packages/gateway` — SSE, sessions, demo storefront |
+| Widget | ✅ `packages/gateway/public/widget.js` — 5.7 KB gzipped |
+| Merchant admin | ⬜ not started |
 
 ```
-npm test       → 160 passed (7 files, 3 packages)
-npm run typecheck → clean (tsc --build, project references)
-npm run bench  → ALL BUDGETS MET
+npm test          → 267 passed (11 files, 4 packages)
+npm run typecheck → clean
+npm run build && node packages/gateway/dist/src/main.js
+                  → http://localhost:8787
 ```
 
 ---
 
-## 1. Grounding validator — the gate metric
+## Run it
 
-The differentiator, built first because `validator failure < 1%` is the Phase 1 gate.
-
-**Two independent check families**, deliberately separated so a failure is diagnosable rather than just "grounding failed":
-
-- **Citation checks** — every declared claim resolves to a real tool call from this turn whose payload actually supports it. Catches *mis-citation*.
-- **Coverage checks** — factual language in the prose must be traceable to some tool result, declared or not. Catches *fabrication*.
-
-Coverage is the non-obvious half. Without it a model could emit `claims: []` and pass validation trivially while inventing prices in `reply`. There is a test for exactly that bypass.
-
-**The validator is pure and synchronous.** No model in the loop where a string or number comparison suffices — the check must be cheaper and more reliable than the thing it is checking.
-
-### Both halves of the gate are tested
-
-A validator that rejects everything catches 100% of hallucinations and is useless. So the suite has two corpora:
-
-| Corpus | Requirement | Contents |
-|---|---|---|
-| **Adversarial** | all must be caught | invented price, plausible-but-wrong price, alternate currency forms, spelled-out amounts, in-stock claim on a sold-out item, price with no tool call at all |
-| **False-positive** | all must pass | correctly cited price, clarifying question, honest refusal, rating numbers (`4.6 out of 5`), quantities (`2 of those`), legitimate two-item sum, accurate out-of-stock with alternatives, brand copy without a delivery number |
-
-The false-positive corpus is what keeps the < 1% target honest.
-
-### Design notes
-
-- **Bare numbers are never treated as money.** Only the UCP `{amount, currency}` shape counts as a source value. Otherwise ratings, counts, and quantities would register as prices and the check would be meaningless.
-- **Negation is handled explicitly.** `"not in stock"` contains the substring `"in stock"` — naive matching gets it exactly backwards. Out-of-stock patterns are evaluated first, with a dedicated negation pattern ahead of them.
-- **Bounded arithmetic derivation.** The model legitimately says "that's $268 for both", a value in no single tool field. Exact match is tried first, then pairs, triples, and the full-set total. *Known limitation:* quantity-weighted sums (3 × $79) are not covered — in practice cart results carry `subtotal`/`total`, so real totals match by exact lookup.
-- **Retry feedback names the failure.** `violationsToFeedback` produces the specific violation codes and messages. A bare "try again" wastes the regeneration.
-
----
-
-## 2. Orchestrator
-
-### Prompt caching enforced in code, not code review
-
-Caching is the business model (`ARCHITECTURE.md §7.4`): ~$84k/month of model spend with it, ~$310k without. A single interpolated timestamp disables it silently — no error, no failing test, just a 4× bill.
-
-So the §7.3 audit checklist is now executable. `assertStable()` runs on every prefix build, in production as well as tests, and throws `UnstablePrefixError` on ISO timestamps, dates, clock times, UUIDs, session ids, cart ids, and epoch millis — naming the offending fragment and pointing at the fix.
-
-`prefixFingerprint()` gives a stable 16-char hash per merchant. If it changes mid-session the cache was just invalidated; alert on it rather than discovering it in the monthly bill.
-
-Volatile state has a designated home: `renderTurnContext()` renders page, cart, and navigation state into the **last user turn**, never the prefix.
-
-### Adaptive thinking stays ON
-
-The tempting latency optimization is `thinking: {type: 'disabled'}`. It is wrong here: on Sonnet 5 that makes the model measurably less likely to call tools — and this product is entirely tool-driven, so it would silently degrade the grounding we sell. `effort: 'low'` is the latency lever. There is a test asserting the request shape so nobody "optimizes" it later.
-
-### Speculative tool execution
-
-`search_catalog` fires in parallel with the model request, driven by a <2 ms local intent extraction. On a hit the model's tool round trip collapses to a memory read; on a miss we pay one wasted (edge-cached) call. Support intents (`where is my order`, `return policy`, `refund`) are excluded — no point speculating on those.
-
-### The grounding gate wired into the loop
-
-```
-tool loop → structured output → validate
-   ok            → return
-   fail (1st)    → regenerate ONCE with the specific violations as feedback
-   fail (2nd)    → escalate; never ship an ungrounded answer
+```bash
+npm install
+npm run build
+node packages/gateway/dist/src/main.js
 ```
 
-Escalation is also the response to a model refusal (`stop_reason: 'refusal'`, checked *before* reading content), unparseable structured output, and a stuck tool loop. Tool failures do **not** escalate — the error is handed to the model so it can adapt, and grounding decides whether the answer is still safe.
+Open **http://localhost:8787** — a demo storefront with the widget on it. Ask
+*"do you have a warm wool coat?"* or *"what's your return policy?"*.
 
-Tests assert the escalation reply never contains the hallucinated figures from either failed attempt.
+Needs `OPENAI_API_KEY` in `.env`. With no `SHOP_DOMAIN` set it runs in **demo
+mode** against a fixture catalog, so the Shopify development store is no longer
+blocking. Set `SHOP_DOMAIN` and it talks to a real store instead — configuration,
+not code.
 
----
+End-to-end check against a running gateway:
 
-## 3. Bugs found
-
-**Live array reference passed into the model call (real).** The loop passed its working `messages` array into `create()` and then kept pushing into it, so every recorded request mutated after being issued. A real HTTP client serializes immediately, so production output was correct — but request logs, traces, and any payload-replaying retry would all have lied. Fixed by snapshotting: a request is a value, not a reference. The test harness now deep-freezes what it records so the mock can't hide this class of bug again.
-
-*How it surfaced:* a test asserted on `requests[2]` and got a `tool_result` where a user turn belonged. The instinct is to fix the index; the actual cause was upstream.
-
-**`exactOptionalPropertyTypes` violation.** `evidence: string | undefined` is not assignable to `evidence?: string`. Fixed by omitting the key rather than assigning `undefined` — the distinction is real and the strict flag exists to enforce it.
-
-**Monorepo type resolution.** Cross-package imports were resolving through a vitest alias but failing under `tsc`, meaning cross-package types were never actually checked. Fixed with proper TypeScript **project references** and a root solution `tsconfig.json`, so `tsc --build` compiles in dependency order and types are verified through real emitted `.d.ts`. Entry points corrected to `dist/src/` (tests share the package rootDir so they're typechecked too).
+```bash
+node scripts/smoke-gateway.mjs "is the overcoat available in L?"
+```
 
 ---
 
-## 4. Gate status — not yet claimable
+## Streaming: structured output vs. time-to-first-token
 
-| Gate criterion | Status |
-|---|---|
-| Validator failure < 1% | **Partial.** Both corpora pass 100%, but on ~15 hand-written cases. A real rate needs a few hundred logged production turns. |
-| p50 TTFT < 400 ms | **Unmeasured.** Needs the gateway + a live model endpoint. Client-side overhead is ~0.1 ms, so the budget is entirely network + model. |
-| Loader < 15 KB | **Not applicable yet** — widget not started. Budget is wired in `perf/size-limit.json`. |
+Our answers are structured output — `{"reply": "...", "claims": [...]}` — so the
+model streams **JSON, not prose**. Naive streaming paints `{"reply":"The Mer`.
+Waiting for valid JSON throws away the whole TTFT budget.
+
+**Resolution:** `reply` is deliberately the first property in the schema, and
+`ReplyExtractor` pulls that string out of a growing, still-invalid document —
+correct across chunk boundaries, including a chunk ending mid-escape-sequence
+(`"a\` + `nb"`) or mid-`\uXXXX`. Tested one character at a time.
+
+## The mid-stream grounding tripwire
+
+Streaming and grounding pull against each other. Full validation needs the
+`claims` payload, which arrives last — but the shopper is watching prose appear
+*now*. Two bad options: buffer everything (no TTFT), or stream optimistically and
+retract (shows a hallucinated price, then takes it back — the worst possible
+failure for a product whose headline claim is *never makes things up*).
+
+The expensive half of grounding — *is this price in the tool results?* — needs
+only the tool results, which we already hold before the model writes a word. So
+`GroundingTripwire` checks each fact the moment it is fully typed and **aborts
+the generation mid-sentence** if one is unsupported. This is why the agent loop
+is hand-rolled rather than an SDK tool runner: it has to kill an in-flight
+generation.
+
+Two subtleties that make it work:
+
+- **Partial-token safety.** While `$189.00` is arriving the buffer briefly reads
+  `$18`. Every check runs against a *settled prefix* that excludes any trailing
+  token still capable of growing. The dot is the fiddly part: `$189.` may become
+  `$189.50`, but `$189.00.` already has its decimals, so that second dot is
+  punctuation.
+- **Text is only released once validated.** The loop forwards
+  `settledPrefix(accumulated)`, not raw deltas. Forwarding eagerly would paint
+  `$189` and only *then* discover it was unsupported. Costs about one token of
+  lag; makes it impossible for an ungrounded number to be seen.
+
+On a trip the gateway emits `reset` and the widget clears the partial bubble.
 
 ---
 
-## 5. Still open
+## Latency: the target in ARCHITECTURE §6.1 was measuring the wrong thing
 
-**OPEN-QUESTION #1 (from Phase 0) is still unresolved** — the `meta.ucp-agent.profile` key encoding needs verification against a live development store. It remains isolated to `UcpTransport.buildMeta()`.
+Measured end-to-end through the gateway:
 
-**New in Phase 1:**
+| Metric | Measured | Note |
+|---|---:|---|
+| **Time to renderable products** | **44 ms** | first useful pixel |
+| TTFT prose | ~2.9–3.6 s | after the tool round trip |
+| Total turn | ~4.0–5.2 s | |
 
-- **No live model verification.** No `ANTHROPIC_API_KEY` in this environment, so the orchestrator has only ever run against a scripted mock. The request *shape* is asserted, but nothing has verified that Sonnet 5 actually honours the structured-output schema and emits usable `claims`. This is the first thing to check once a key is available — the grounding design depends on it.
-- **Streaming not implemented.** The loop is request/response. The p50 TTFT < 400 ms gate requires token streaming, which lands with the gateway.
-- **Distributed cart lock** (Phase 0 OQ#2) still outstanding.
+The 350 ms first-token budget is **not achievable for a tool-driven turn**, and
+no amount of tuning changes that: the reply cannot begin until the model has
+done a full inference pass to decide which tool to call, the tool has run, and a
+second pass has produced the answer. Speculation collapses the *tool execution*
+time, not the *model round trips*.
+
+**So the metric was wrong, not the system.** What a shopper experiences is time
+to first *useful pixel*, and product cards render in 44 ms — from the
+speculative catalog search, before the model has said anything. The prose is
+commentary on cards the shopper is already reading.
+
+Both numbers are now tracked separately. `ARCHITECTURE.md §6.1` is corrected.
+
+**One concrete win along the way:** the model was calling `search_catalog` then
+`get_product` for detail the search results already contained. Rewriting both
+tool descriptions to say so cut a full round trip — 3 model calls to 2, TTFT
+6,008 ms → 3,518 ms, input tokens 3,881 → 2,543, same answer quality.
 
 ---
 
-## 6. Next
+## Deliberate deviations from the architecture
 
-1. Gateway (Go) — WebSocket termination, session hydration, streaming
-2. Widget — theme app extension against the `perf/` budgets
-3. Merchant admin — Remix + Polaris + App Bridge
-4. Verify the orchestrator against a live Anthropic endpoint
-5. Resolve OPEN-QUESTION #1 against a dev store
+Both documented in `server.ts`, neither silent drift:
+
+**SSE over POST, not WebSocket.** Voice (Phase 3) genuinely needs a
+bidirectional channel. Text chat does not — the client sends one message and
+consumes one stream. SSE-over-POST is dependency-free, survives proxies that
+mangle upgrade requests, and needs no session-correlation dance.
+
+**Node gateway, not Go.** Go's advantage is connection density at 100k+
+sockets/node, a scale problem we do not have. A Go gateway would also put a
+process boundary between itself and the TypeScript orchestrator for no present
+benefit. The connection-termination layer can be extracted later; that is a
+contained change.
+
+**Vanilla widget, not Preact.** It is a panel and a list. Preact would cost 4 KB
+and buy nothing yet. At 5.7 KB gzipped we have 9.3 KB of headroom under the
+15 KB budget — spend it when complexity earns it.
+
+---
+
+## Defects found by running it
+
+**Money written in prose was invisible to grounding.** A policy question
+produced *"free shipping over $75"* — a correct, grounded fact — and the
+tripwire **aborted it**. `collectMoneyFromResult` only recognised UCP
+`{amount, currency}` objects, so money inside policy *text* counted as
+unsupported. It now also extracts from string values, while still ignoring bare
+numbers (ratings, quantities, counts) that carry no currency marker.
+
+This is the second time the grounding mechanism has rejected a correct answer.
+Both times the fix was the same shape: the check was right, its notion of
+"supported" was too narrow. Worth watching for a third.
+
+**Static file paths only resolved in the built layout.** `../../public` works
+from `dist/src/` and not from `src/`, so the served-files tests failed under
+vitest. Now resolved by walking up until `public/` is found — works in both, and
+returns `undefined` rather than silently serving the wrong directory.
+
+---
+
+## Still open
+
+- **Merchant admin** (Remix + Polaris + App Bridge) — last Phase 1 deliverable.
+- **Shopify OAuth / install flow** — nothing can be installed on a real store yet.
+- **No Shopify development store**, so `meta.ucp-agent.profile` (Phase 0
+  OPEN-QUESTION #1) is still unverified. Demo mode routes around it for now.
+- **Persistence** — sessions are in-memory. The `SessionStore` interface is
+  Redis-shaped so swapping is an implementation change, not a refactor.
+- **The `<1%` grounding gate is still unproven.** Both corpora pass and two live
+  paths work, but that is not an eval. It needs a few hundred logged adversarial
+  turns.
+- **Voice may be simpler than designed** — `gpt-realtime-2.1` and
+  `gpt-live-transcribe` could collapse the Phase 3 STT → LLM → TTS pipeline into
+  one hop. Evaluate before building §6.3 as specced.

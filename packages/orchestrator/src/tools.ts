@@ -19,7 +19,11 @@ export const SEARCH_CATALOG: ToolDef = {
     'Call this whenever the shopper asks what you sell, asks for a recommendation, ' +
     'describes something they want, or mentions a product you have not already looked up ' +
     'this turn. You have NO reliable prior knowledge of this catalog — it changes daily. ' +
-    'Prefer calling it and finding nothing over guessing.',
+    'Prefer calling it and finding nothing over guessing. ' +
+    'Results already include each variant with its price and availability, so you can ' +
+    'answer price, size, and stock questions directly from them — do NOT call get_product ' +
+    'again for detail that is already here. Every extra tool call costs the shopper ' +
+    'seconds of waiting.',
   input_schema: {
     type: 'object',
     properties: {
@@ -34,9 +38,11 @@ export const SEARCH_CATALOG: ToolDef = {
 export const GET_PRODUCT: ToolDef = {
   name: 'get_product',
   description:
-    'Fetch full detail and per-variant availability for one product. ' +
-    'Call this before stating any price, size, colour, or stock fact about a specific ' +
-    'product — search results are summaries and may omit the variant the shopper asked about.',
+    'Fetch full detail for ONE product. Use this only when search_catalog results do not ' +
+    'already contain what you need — for example a long description, or an option ' +
+    'combination that was not listed. If the price, sizes, and availability are already ' +
+    'in the search results, answer from those instead: this call adds a full round trip ' +
+    'the shopper waits through.',
   input_schema: {
     type: 'object',
     properties: {

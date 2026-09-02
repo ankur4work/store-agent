@@ -26,6 +26,9 @@ Plus: **unlimited SKUs on every tier including free**, and roughly **4–6× che
 | [`docs/RESEARCH.md`](docs/RESEARCH.md) | SiteAgent teardown, nine exploitable weaknesses, competitive landscape, positioning |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System topology, UCP integration, grounding layer, latency engineering, model strategy & unit economics, multi-tenancy, attribution, build sequence, pricing |
 | [`docs/UX-PERFORMANCE.md`](docs/UX-PERFORMANCE.md) | Performance budget, load strategy, conversation surface, voice UX, accessibility, edge states |
+| [`docs/PHASE-0-FINDINGS.md`](docs/PHASE-0-FINDINGS.md) | UCP cart PUT semantics; gate evidence |
+| [`docs/PHASE-1-LIVE-VERIFICATION.md`](docs/PHASE-1-LIVE-VERIFICATION.md) | First live model run — three defects no mock could find |
+| [`docs/PHASE-1-PROGRESS.md`](docs/PHASE-1-PROGRESS.md) | Streaming, grounding tripwire, gateway, widget; latency correction |
 
 Enforcement config lives in [`perf/`](perf/) — `size-limit.json` and `lighthouse-budget.json` wire the contract into CI.
 
@@ -54,15 +57,32 @@ Enforcement config lives in [`perf/`](perf/) — `size-limit.json` and `lighthou
 
 ## Status
 
-**Phase 0 complete — gate passed.** ✅ See [`docs/PHASE-0-FINDINGS.md`](docs/PHASE-0-FINDINGS.md).
+**Phase 0 complete.** **Phase 1: 4 of 5 deliverables** — grounding, orchestrator, streaming, gateway + widget. Merchant admin remains.
 
-`packages/ucp-client` ships a UCP-native client for all seven tools plus `SafeCart`, which makes `update_cart`'s destructive PUT semantics survivable. 42/42 tests green, clean typecheck, 0 production vulnerabilities, all latency budgets met.
+### Run it
 
 ```bash
 npm install
-npm test          # 42 passed
-npm run typecheck
-npm run bench     # per-tool latency vs budgets
+npm run build
+node packages/gateway/dist/src/main.js     # → http://localhost:8787
 ```
 
-**Phase 1 is blocked on one thing:** verify the `meta.ucp-agent.profile` key encoding against a live development store (OPEN-QUESTION #1). Every request carries that field — it's the highest-risk unknown and the cheapest to check.
+Open the URL for a demo storefront with the widget on it. Ask *"do you have a warm wool coat?"*
+
+Needs `OPENAI_API_KEY` in `.env` (copy `.env.example`). With no `SHOP_DOMAIN` it runs in **demo mode** against a fixture catalog, so a Shopify dev store isn't required to see it work.
+
+```bash
+npm test                          # 267 passed
+npm run typecheck                 # clean
+node scripts/smoke-gateway.mjs    # end-to-end, live model
+```
+
+### Measured
+
+| | |
+|---|---:|
+| Time to renderable products | **44 ms** |
+| TTFT prose | ~2.9–3.6 s |
+| Widget bundle | **5.7 KB** gzipped (budget 15) |
+
+**Not yet a shippable app:** no merchant admin, no Shopify OAuth/install flow, sessions are in-memory, and it has never run against a real Shopify store. See [`docs/PHASE-1-PROGRESS.md`](docs/PHASE-1-PROGRESS.md).

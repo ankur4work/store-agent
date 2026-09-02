@@ -114,9 +114,11 @@ describe('tool definitions', () => {
   });
 
   it('state WHEN to call, not just what the tool does', () => {
+    // Prescriptive trigger conditions measurably raise should-call rate on
+    // recent models — and for us tool-calling rate IS grounding rate.
     for (const t of DEFAULT_TOOLS) {
       expect(t.description.toLowerCase(), `${t.name} lacks a trigger condition`).toMatch(
-        /call this|never|whenever|only call/,
+        /call this|use this|use it|never|whenever|only call|only when/,
       );
     }
   });

@@ -1,4 +1,5 @@
 export { validateGrounding, violationsToFeedback, hasErrors } from './validate.js';
+export { GroundingTripwire, settledPrefix, completedSentences } from './incremental.js';
 export { GROUNDED_RESPONSE_SCHEMA, GROUNDING_SYSTEM_RULES } from './schema.js';
 export {
   extractMoneyFromText,

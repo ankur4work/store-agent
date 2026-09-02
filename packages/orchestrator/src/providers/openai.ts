@@ -26,10 +26,12 @@ import type {
   ModelRequest,
   ModelResponse,
   StopReason,
+  StreamHandlers,
   ToolResultBlock,
   ToolUseBlock,
   Usage,
 } from '../model.js';
+import { ReplyExtractor, SseParser } from '../streaming.js';
 
 const ENDPOINT = 'https://api.openai.com/v1/responses';
 
@@ -109,6 +111,92 @@ export class OpenAIModelClient implements ModelClient {
       }
     }
     throw lastErr;
+  }
+
+  /**
+   * Streamed turn.
+   *
+   * Deltas drive the UI; the terminal `response.completed` event carries the
+   * authoritative full response, which is what we convert. Reconstructing tool
+   * calls from argument deltas would be a second, redundant parser with its own
+   * bugs — the API already sends the assembled object.
+   */
+  async stream(req: ModelRequest, handlers: StreamHandlers, signal?: AbortSignal): Promise<ModelResponse> {
+    const body = { ...toOpenAIRequest(req), stream: true };
+
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), this.timeoutMs);
+    const onAbort = (): void => ctl.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        authorization: `Bearer ${this.opts.apiKey}`,
+        accept: 'text/event-stream',
+      };
+      if (this.opts.organization !== undefined) headers['openai-organization'] = this.opts.organization;
+
+      const res = await this.doFetch(this.endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: ctl.signal,
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new OpenAIError(`OpenAI HTTP ${res.status}: ${text.slice(0, 400)}`, res.status, text);
+      }
+      if (res.body === null) throw new OpenAIError('OpenAI returned no stream body');
+
+      const parser = new SseParser();
+      const reply = new ReplyExtractor();
+      const decoder = new TextDecoder();
+      let final: ResponsesApiResponse | undefined;
+
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        for (const evt of parser.push(decoder.decode(value, { stream: true }))) {
+          if (evt.data === '[DONE]') continue;
+          let payload: Record<string, unknown>;
+          try {
+            payload = JSON.parse(evt.data) as Record<string, unknown>;
+          } catch {
+            continue; // heartbeat or partial — the parser only yields whole records
+          }
+          const type = (payload['type'] as string | undefined) ?? evt.event;
+
+          if (type === 'response.output_text.delta' && typeof payload['delta'] === 'string') {
+            // Deltas are raw structured-output JSON. Unwrap to prose first.
+            const prose = reply.push(payload['delta']);
+            if (prose !== '') handlers.onReplyDelta?.(prose);
+          } else if (type === 'response.output_item.added') {
+            const item = payload['item'] as { type?: string; name?: string } | undefined;
+            if (item?.type === 'function_call' && item.name) handlers.onToolUse?.(item.name);
+          } else if (type === 'response.completed' || type === 'response.incomplete') {
+            final = (payload['response'] as ResponsesApiResponse | undefined) ?? undefined;
+          } else if (type === 'error' || type === 'response.failed') {
+            throw new OpenAIError(`OpenAI stream error: ${evt.data.slice(0, 300)}`);
+          }
+        }
+      }
+
+      if (final === undefined) throw new OpenAIError('OpenAI stream ended without a terminal response event');
+      return fromOpenAIResponse(final);
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        if (signal?.aborted) throw err; // caller aborted (e.g. grounding tripwire)
+        throw new OpenAITimeoutError(`OpenAI stream exceeded ${this.timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
   }
 
   private async once(body: Record<string, unknown>, outer?: AbortSignal): Promise<ModelResponse> {

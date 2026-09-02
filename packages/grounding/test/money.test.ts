@@ -39,6 +39,27 @@ describe('collectMoneyFromResult', () => {
     expect(collectMoneyFromResult({ rating: 4.6, count: 212, quantity: 2 })).toEqual([]);
   });
 
+  /**
+   * Found live: the tripwire aborted a correct answer about free shipping
+   * because "$75" lived in policy prose rather than a {amount,currency} object.
+   */
+  it('extracts money written in prose inside string values', () => {
+    const policy = { topic: 'shipping', text: 'Standard shipping is free over $75 and Express is $12.' };
+    expect(collectMoneyFromResult(policy).sort((a, b) => a - b)).toEqual([1200, 7500]);
+  });
+
+  it('still ignores numbers in prose that carry no currency marker', () => {
+    expect(collectMoneyFromResult({ text: 'Arrives in 3-5 business days, rated 4.6 by 212 people.' })).toEqual([]);
+  });
+
+  it('collects from structured and prose sources together', () => {
+    const mixed = {
+      price: { amount: 18900, currency: 'USD' },
+      note: 'Free shipping over $75.',
+    };
+    expect(collectMoneyFromResult(mixed).sort((a, b) => a - b)).toEqual([7500, 18900]);
+  });
+
   it('survives cyclic structures', () => {
     const a: Record<string, unknown> = { price: { amount: 100, currency: 'USD' } };
     a['self'] = a;

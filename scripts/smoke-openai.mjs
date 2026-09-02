@@ -50,10 +50,15 @@ const CATALOG = {
   ],
 };
 
+export const timings = { firstToolResultAt: undefined };
+
 const tools = {
   calls: [],
   async execute(name, input) {
     this.calls.push({ name, input });
+    // Time-to-first-useful-pixel: when product data is available to render
+    // skeleton cards, independent of when prose starts.
+    if (timings.firstToolResultAt === undefined) timings.firstToolResultAt = performance.now();
     if (name === 'search_catalog') return CATALOG;
     if (name === 'get_product') return { product: CATALOG.products[0] };
     if (name === 'get_policy') return { topic: input.topic, text: 'Standard shipping arrives in 3-5 business days.' };
@@ -81,14 +86,26 @@ const orch = new Orchestrator({
 
 console.log(`\n=== live smoke: ${MODEL} ===\n`);
 const t0 = performance.now();
+let ttft;
+let streamedChars = 0;
 
 try {
-  const res = await orch.runTurn({
-    message: 'do you have a warm wool coat? what size options and how much?',
-    context: { sessionId: 'smoke_1', page: { type: 'collection', title: 'Outerwear' } },
-    merchant: MERCHANT,
-  });
+  const res = await orch.runTurn(
+    {
+      message: 'do you have a warm wool coat? what size options and how much?',
+      context: { sessionId: 'smoke_1', page: { type: 'collection', title: 'Outerwear' } },
+      merchant: MERCHANT,
+    },
+    {
+      onReplyDelta: (t) => {
+        if (ttft === undefined) ttft = performance.now() - t0;
+        streamedChars += t.length;
+        process.stdout.write(t);
+      },
+    },
+  );
   const ms = performance.now() - t0;
+  if (streamedChars > 0) process.stdout.write('\n\n');
 
   console.log('reply      :', JSON.stringify(res.reply));
   console.log('escalated  :', res.escalated);
@@ -102,6 +119,15 @@ try {
   console.log('usage      :', JSON.stringify(res.usage));
   console.log('events     :', events.map((e) => (e.detail ? `${e.type}(${e.detail})` : e.type)).join(' -> '));
   console.log('tool args  :', JSON.stringify(tools.calls));
+  console.log('streamed   :', `${streamedChars} chars`);
+  console.log('model calls:', `${tools.calls.length + 1} (tool round trips + final answer)`);
+  console.log(
+    'TT-products:',
+    timings.firstToolResultAt === undefined
+      ? 'n/a'
+      : `${(timings.firstToolResultAt - t0).toFixed(0)}ms  <- first renderable product data`,
+  );
+  console.log('TTFT prose :', ttft === undefined ? 'n/a (not streamed)' : `${ttft.toFixed(0)}ms`);
   console.log('latency    :', `${ms.toFixed(0)}ms total`);
 
   const ok = !res.escalated && res.verdict.ok && tools.calls.length > 0;

@@ -1,0 +1,21 @@
+{
+  "name": "@storeagent/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "_comment": "rootDir is the package root so tests are typechecked too, hence dist/src/.",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "typecheck": "tsc --build tsconfig.json",
+    "test": "vitest run",
+    "start": "node dist/src/main.js",
+    "dev": "npm run build && node dist/src/main.js"
+  },
+  "dependencies": {
+    "@storeagent/grounding": "*",
+    "@storeagent/orchestrator": "*",
+    "@storeagent/ucp-client": "*"
+  }
+}

@@ -77,8 +77,23 @@ export interface ModelResponse {
   readonly stop_details?: { readonly category?: string | null };
 }
 
+export interface StreamHandlers {
+  /**
+   * Decoded prose from the `reply` field, incrementally. NOT raw JSON —
+   * the adapter unwraps structured output before calling this.
+   */
+  readonly onReplyDelta?: (text: string) => void;
+  readonly onToolUse?: (name: string) => void;
+}
+
 export interface ModelClient {
   create(req: ModelRequest, signal?: AbortSignal): Promise<ModelResponse>;
+  /**
+   * Optional. When present the loop streams the final answer, enabling both
+   * time-to-first-token and the mid-stream grounding tripwire. Adapters
+   * without it degrade to `create()` — correct, just slower to first paint.
+   */
+  stream?(req: ModelRequest, handlers: StreamHandlers, signal?: AbortSignal): Promise<ModelResponse>;
 }
 
 /**
