@@ -1,5 +1,12 @@
 import { readFileSync } from 'node:fs';
 
+export interface ShopifyAppConfig {
+  readonly apiKey: string;
+  readonly apiSecret: string;
+  readonly scopes: string;
+  readonly appUrl: string;
+}
+
 export interface GatewayConfig {
   readonly port: number;
   readonly openaiApiKey: string;
@@ -7,6 +14,12 @@ export interface GatewayConfig {
   readonly agentProfile: string;
   readonly models: { classify: string; workhorse: string; escalation: string };
   readonly allowedOrigins: readonly string[];
+  /**
+   * Present only when the app is fully configured for install. Absent means the
+   * OAuth routes are disabled rather than half-working — a partly-configured
+   * install flow fails in confusing ways at the worst moment.
+   */
+  readonly shopify: ShopifyAppConfig | undefined;
 }
 
 /** Load `.env` if present. Real deployments use the process environment. */
@@ -47,5 +60,26 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       escalation: env['MODEL_ESCALATION'] ?? 'gpt-5.6-sol',
     },
     allowedOrigins: (env['ALLOWED_ORIGINS'] ?? '*').split(',').map((s) => s.trim()),
+    shopify: loadShopifyConfig(env),
+  };
+}
+
+function loadShopifyConfig(env: Record<string, string | undefined>): ShopifyAppConfig | undefined {
+  const apiKey = env['SHOPIFY_API_KEY'];
+  const apiSecret = env['SHOPIFY_API_SECRET'];
+  const appUrl = env['SHOPIFY_APP_URL'];
+  if (!apiKey || !apiSecret || !appUrl) return undefined;
+
+  // A non-HTTPS app URL would put the OAuth callback — and therefore the
+  // authorization code — on the wire in plaintext. Shopify rejects it too.
+  if (!appUrl.startsWith('https://')) {
+    throw new Error('SHOPIFY_APP_URL must be https:// — OAuth codes must not travel in plaintext');
+  }
+
+  return {
+    apiKey,
+    apiSecret,
+    appUrl: appUrl.replace(/\/+$/, ''),
+    scopes: env['SHOPIFY_SCOPES'] ?? 'read_products',
   };
 }

@@ -1,0 +1,71 @@
+{% comment %}
+  StoreAgent — app embed block.
+
+  Performance rules this file must keep (docs/EXPERIENCE-CONTRACT.md §4):
+
+    - `defer` so it never blocks parsing or the LCP element
+    - no stylesheet link: all CSS lives inside the widget's Shadow DOM
+    - no webfont: the widget inherits the theme's font stack
+    - nothing rendered above the fold; the launcher is a fixed, reserved box,
+      so the block contributes 0 to CLS
+    - `preconnect` to the gateway so the first chat request skips DNS + TLS
+
+  Brand tokens are passed as CSS custom properties rather than baked in, so the
+  widget looks native in whatever theme it lands in.
+{% endcomment %}
+
+{% if block.settings.enabled %}
+  <link rel="preconnect" href="{{ block.settings.gateway_url }}" crossorigin>
+
+  <style>
+    #storeagent-root {
+      --sa-accent: {{ block.settings.accent_color }};
+      --sa-radius: {{ block.settings.corner_radius }}px;
+    }
+  </style>
+
+  <script
+    src="{{ block.settings.gateway_url }}/widget.js"
+    data-api="{{ block.settings.gateway_url }}"
+    data-shop="{{ shop.permanent_domain }}"
+    defer></script>
+{% endif %}
+
+{% schema %}
+{
+  "name": "StoreAgent",
+  "target": "body",
+  "settings": [
+    {
+      "type": "checkbox",
+      "id": "enabled",
+      "label": "Enable assistant",
+      "default": true
+    },
+    {
+      "type": "text",
+      "id": "gateway_url",
+      "label": "Gateway URL",
+      "info": "Your StoreAgent origin, e.g. https://api.storeagent.dev",
+      "default": "https://api.storeagent.dev"
+    },
+    {
+      "type": "color",
+      "id": "accent_color",
+      "label": "Accent colour",
+      "info": "Matches your brand. Contrast is validated before the widget uses it.",
+      "default": "#1b3a34"
+    },
+    {
+      "type": "range",
+      "id": "corner_radius",
+      "label": "Corner radius",
+      "min": 0,
+      "max": 24,
+      "step": 2,
+      "unit": "px",
+      "default": 16
+    }
+  ]
+}
+{% endschema %}

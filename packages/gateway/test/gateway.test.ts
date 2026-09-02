@@ -200,3 +200,90 @@ describe('stub helper', () => {
     expect(stubOpenAI([{ a: 1 }])).toBe('[{"a":1}]');
   });
 });
+
+describe('shopify install routes — unconfigured', () => {
+  let server: Server;
+  let base: string;
+
+  beforeEach(async () => {
+    server = createGateway({ config: loadConfig({ OPENAI_API_KEY: 'sk-test' }) });
+    await new Promise<void>((r) => server.listen(0, r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('disables install wholesale rather than half-working', async () => {
+    // A partly-configured OAuth flow fails confusingly, mid-install.
+    const r = await fetch(`${base}/shopify/auth?shop=acme.myshopify.com`, { redirect: 'manual' });
+    expect(r.status).toBe(503);
+  });
+
+  it('reports install status on health without echoing the secret', async () => {
+    const h = await fetch(`${base}/healthz`).then((x) => x.json());
+    expect(h.install).toBe('disabled');
+    expect(JSON.stringify(h)).not.toMatch(/secret|shpss_/i);
+  });
+});
+
+describe('shopify install routes — configured', () => {
+  let server: Server;
+  let base: string;
+
+  const env = {
+    OPENAI_API_KEY: 'sk-test',
+    SHOPIFY_API_KEY: 'client-id',
+    SHOPIFY_API_SECRET: 'shpss_secret',
+    SHOPIFY_APP_URL: 'https://app.test',
+  };
+
+  beforeEach(async () => {
+    server = createGateway({ config: loadConfig(env) });
+    await new Promise<void>((r) => server.listen(0, r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('redirects a valid install to the shop origin', async () => {
+    const r = await fetch(`${base}/shopify/auth?shop=acme.myshopify.com`, { redirect: 'manual' });
+    expect(r.status).toBe(302);
+    const loc = new URL(r.headers.get('location')!);
+    expect(loc.origin).toBe('https://acme.myshopify.com');
+    expect(loc.pathname).toBe('/admin/oauth/authorize');
+  });
+
+  it('refuses an attacker-supplied shop rather than redirecting to it', async () => {
+    // Open-redirect guard: the response must not carry a Location at all.
+    const r = await fetch(`${base}/shopify/auth?shop=evil.com`, { redirect: 'manual' });
+    expect(r.status).toBe(400);
+    expect(r.headers.get('location')).toBeNull();
+  });
+
+  it('rejects a callback with no valid hmac', async () => {
+    const r = await fetch(`${base}/shopify/auth/callback?shop=acme.myshopify.com&code=c&state=s&hmac=bad`, {
+      redirect: 'manual',
+    });
+    expect(r.status).toBe(401);
+  });
+
+  it('rejects an unsigned webhook', async () => {
+    const r = await fetch(`${base}/shopify/webhooks`, {
+      method: 'POST',
+      headers: { 'x-shopify-topic': 'app/uninstalled', 'x-shopify-shop-domain': 'acme.myshopify.com' },
+      body: '{}',
+    });
+    expect(r.status).toBe(401);
+  });
+
+  it('404s an unknown shopify route', async () => {
+    expect((await fetch(`${base}/shopify/nope`)).status).toBe(404);
+  });
+
+  it('refuses a non-https app url at config time', () => {
+    // The OAuth code would otherwise travel in plaintext.
+    expect(() => loadConfig({ ...env, SHOPIFY_APP_URL: 'http://app.test' })).toThrow(/https/);
+  });
+});

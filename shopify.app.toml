@@ -1,0 +1,56 @@
+# Shopify app manifest.
+#
+# `client_id` is public — it is in every OAuth redirect. The API SECRET is not
+# here and must never be: it lives in .env (gitignored) and in the deployment's
+# environment.
+#
+# `application_url` must be your public HTTPS origin. For local development,
+# run a tunnel and paste the URL here AND in SHOPIFY_APP_URL:
+#
+#   cloudflared tunnel --url http://localhost:8787
+#
+# A quick tunnel gets a new URL on every restart, so it has to be updated in
+# both places together — a mismatch surfaces as a redirect_uri error at the
+# worst possible moment, mid-install.
+
+name = "StoreAgent"
+handle = "storeagent"
+client_id = "37c27b85fef223ec4f8b89893af17ac6"
+application_url = "https://REPLACE-WITH-YOUR-TUNNEL.trycloudflare.com"
+embedded = true
+
+[access_scopes]
+# Deliberately minimal. `read_products` is all the catalog path needs, because
+# product data comes from the unauthenticated UCP endpoint, not the Admin API.
+#
+# `read_orders` is NOT requested yet: order status needs Shopify's protected
+# customer data approval, which is a review process rather than a checkbox.
+# Requesting scopes you do not use also slows app review.
+scopes = "read_products"
+
+[auth]
+redirect_urls = [
+  "https://REPLACE-WITH-YOUR-TUNNEL.trycloudflare.com/shopify/auth/callback"
+]
+
+[webhooks]
+api_version = "2026-07"
+
+  # The GDPR three are MANDATORY for app review. An app that does not respond
+  # correctly to them is rejected.
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/shopify/webhooks"
+
+  [[webhooks.subscriptions]]
+  topics = [ "shop/redact", "customers/redact", "customers/data_request" ]
+  uri = "/shopify/webhooks"
+
+  # Attribution reconciliation (Phase 2) — the server-side source of truth for
+  # whether the agent earned a sale.
+  [[webhooks.subscriptions]]
+  topics = [ "orders/create" ]
+  uri = "/shopify/webhooks"
+
+[build]
+automatically_update_urls_on_dev = true

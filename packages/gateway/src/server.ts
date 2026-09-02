@@ -9,6 +9,14 @@ import type { GatewayConfig } from './config.js';
 import { MemorySessionStore, newSession, type SessionStore } from './sessions.js';
 import { createToolExecutor } from './tool-executor.js';
 import { DEMO_CATALOG } from './catalog-fixture.js';
+import { beginInstall, completeInstall } from './shopify/oauth.js';
+import { handleWebhook } from './shopify/webhooks.js';
+import {
+  MemoryNonceStore,
+  MemoryShopStore,
+  type NonceStore,
+  type ShopStore,
+} from './shopify/shops.js';
 
 /**
  * Gateway.
@@ -41,11 +49,15 @@ const DEMO_MERCHANT: MerchantPack = {
 export interface GatewayDeps {
   readonly config: GatewayConfig;
   readonly sessions?: SessionStore;
+  readonly shops?: ShopStore;
+  readonly nonces?: NonceStore;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
   const { config } = deps;
   const sessions = deps.sessions ?? new MemorySessionStore();
+  const shops = deps.shops ?? new MemoryShopStore();
+  const nonces = deps.nonces ?? new MemoryNonceStore();
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -83,6 +95,9 @@ export function createGateway(deps: GatewayDeps): Server {
         shop: config.shopDomain ?? null,
         sessions: await sessions.size(),
         model: config.models.workhorse,
+        // Never echo the secret — only whether install is wired up.
+        install: config.shopify === undefined ? 'disabled' : 'ready',
+        installedShops: await shops.count(),
       });
       return;
     }
@@ -98,7 +113,72 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
+    if (url.pathname.startsWith('/shopify/')) {
+      await handleShopify(url, req, res);
+      return;
+    }
+
     if (req.method === 'GET' && serveStatic(url.pathname, res)) return;
+
+    json(res, 404, { error: 'not_found' });
+  }
+
+  /**
+   * Shopify install + webhooks.
+   *
+   * Disabled wholesale when the app is not fully configured — a half-configured
+   * OAuth flow fails confusingly, and at the worst possible moment (a merchant
+   * clicking Install).
+   */
+  async function handleShopify(url: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const app = config.shopify;
+    if (app === undefined) {
+      json(res, 503, {
+        error: 'install_not_configured',
+        detail: 'Set SHOPIFY_API_KEY, SHOPIFY_API_SECRET and SHOPIFY_APP_URL to enable installs.',
+      });
+      return;
+    }
+    const oauthDeps = { config: app, shops, nonces };
+
+    if (url.pathname === '/shopify/auth' && req.method === 'GET') {
+      const begun = await beginInstall(url.searchParams.get('shop'), oauthDeps);
+      if (!begun.ok) {
+        json(res, begun.status, { error: 'invalid_install_request', detail: begun.reason });
+        return;
+      }
+      res.writeHead(302, { location: begun.redirectTo }).end();
+      return;
+    }
+
+    if (url.pathname === '/shopify/auth/callback' && req.method === 'GET') {
+      const done = await completeInstall(url.searchParams, oauthDeps);
+      if (!done.ok) {
+        console.warn(`[shopify] install rejected: ${done.reason}`);
+        json(res, done.status, { error: 'install_failed', detail: done.reason });
+        return;
+      }
+      console.log(`[shopify] installed ${done.shop.shop} (scopes: ${done.shop.scopes})`);
+      res.writeHead(302, { location: done.redirectTo }).end();
+      return;
+    }
+
+    if (url.pathname === '/shopify/webhooks' && req.method === 'POST') {
+      // RAW bytes. Parsing and re-serializing changes whitespace and key order,
+      // so the HMAC can never match.
+      const rawBody = await readRawBody(req, 1024 * 1024);
+      const outcome = await handleWebhook(
+        {
+          topic: header(req, 'x-shopify-topic') ?? '',
+          shopHeader: header(req, 'x-shopify-shop-domain'),
+          hmacHeader: header(req, 'x-shopify-hmac-sha256'),
+          rawBody,
+        },
+        { apiSecret: app.apiSecret, shops, log: (l) => console.log(l) },
+      );
+      json(res, outcome.status, outcome.body);
+      return;
+    }
 
     json(res, 404, { error: 'not_found' });
   }
@@ -309,6 +389,30 @@ function cors(res: ServerResponse, origin: string | undefined, allowed: readonly
   res.setHeader('access-control-allow-headers', 'content-type');
   res.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS');
   res.setHeader('vary', 'origin');
+}
+
+function header(req: IncomingMessage, name: string): string | undefined {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+
+/** Raw bytes, required for webhook HMAC verification. */
+function readRawBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error('payload_too_large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 function readBody(req: IncomingMessage, limit: number): Promise<string> {

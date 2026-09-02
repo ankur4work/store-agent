@@ -1,0 +1,13 @@
+# Theme app extension — how the widget reaches a real storefront.
+#
+# An "app embed" block rather than a section: it renders once per page from
+# theme.liquid without the merchant editing any template, and it can be toggled
+# from the theme editor. Crucially it also means we never inject a script tag
+# into theme code, which is the pattern merchants (rightly) distrust.
+
+api_version = "2026-07"
+
+[[extensions]]
+type = "theme"
+name = "StoreAgent widget"
+handle = "storeagent-widget"
