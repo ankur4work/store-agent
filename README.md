@@ -29,6 +29,7 @@ Plus: **unlimited SKUs on every tier including free**, and roughly **4–6× che
 | [`docs/PHASE-0-FINDINGS.md`](docs/PHASE-0-FINDINGS.md) | UCP cart PUT semantics; gate evidence |
 | [`docs/PHASE-1-LIVE-VERIFICATION.md`](docs/PHASE-1-LIVE-VERIFICATION.md) | First live model run — three defects no mock could find |
 | [`docs/PHASE-1-PROGRESS.md`](docs/PHASE-1-PROGRESS.md) | Streaming, grounding tripwire, gateway, widget; latency correction |
+| [`docs/PHASE-1-EVAL.md`](docs/PHASE-1-EVAL.md) | Grounding eval: the oracle problem, corpus, five defects found, and what it does *not* prove |
 
 Enforcement config lives in [`perf/`](perf/) — `size-limit.json` and `lighthouse-budget.json` wire the contract into CI.
 
@@ -72,9 +73,10 @@ Open the URL for a demo storefront with the widget on it. Ask *"do you have a wa
 Needs `OPENAI_API_KEY` in `.env` (copy `.env.example`). With no `SHOP_DOMAIN` it runs in **demo mode** against a fixture catalog, so a Shopify dev store isn't required to see it work.
 
 ```bash
-npm test                          # 267 passed
+npm test                          # 312 passed
 npm run typecheck                 # clean
 node scripts/smoke-gateway.mjs    # end-to-end, live model
+node scripts/run-eval.mjs         # 28-case grounding eval, live model
 ```
 
 ### Measured
@@ -84,5 +86,6 @@ node scripts/smoke-gateway.mjs    # end-to-end, live model
 | Time to renderable products | **44 ms** |
 | TTFT prose | ~2.9–3.6 s |
 | Widget bundle | **5.7 KB** gzipped (budget 15) |
+| Grounding eval | **28/28 clean**, 0 escapes, 0 false positives (×3 runs) |
 
 **Not yet a shippable app:** no merchant admin, no Shopify OAuth/install flow, sessions are in-memory, and it has never run against a real Shopify store. See [`docs/PHASE-1-PROGRESS.md`](docs/PHASE-1-PROGRESS.md).

@@ -107,9 +107,12 @@ export const ESCALATE: ToolDef = {
   name: 'escalate_to_human',
   description:
     'Hand off to the merchant\'s team and capture the shopper\'s email. ' +
-    'Call this when you cannot ground an answer, when the shopper asks for a person, ' +
-    'or when they are frustrated. This is a SUCCESSFUL outcome, not a failure — ' +
-    'a captured lead beats a confident wrong answer.',
+    'Call this WHENEVER you are about to tell the shopper you cannot help — because a ' +
+    'tool failed, the data is missing, the question needs a person, or they are ' +
+    'frustrated. Saying "I can\'t confirm that" WITHOUT calling this tool is a dead end: ' +
+    'nothing reaches the team and the shopper leaves with nothing. ' +
+    'This is a SUCCESSFUL outcome, not a failure — a captured lead beats a confident ' +
+    'wrong answer, and beats an apology even more.',
   input_schema: {
     type: 'object',
     properties: {

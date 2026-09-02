@@ -70,7 +70,20 @@ export interface RunTurnOptions {
 export interface TurnResult {
   readonly reply: string;
   readonly verdict: GroundingVerdict;
+  /**
+   * The LOOP gave up — grounding failed twice, the model refused, or the tool
+   * loop exhausted. A fallback, not an outcome anyone wants.
+   */
   readonly escalated: boolean;
+  /**
+   * The AGENT deliberately handed off by calling `escalate_to_human`.
+   *
+   * Distinct from `escalated` and far more interesting: this is the successful
+   * refusal — a captured lead rather than a dead end. Conflating the two hid
+   * lead capture entirely, so the eval reported "0 escalations" while the agent
+   * was handing off correctly.
+   */
+  readonly handedOff: boolean;
   readonly route: Route;
   readonly toolResults: readonly ToolResultRecord[];
   readonly prefixFingerprint: string;
@@ -191,6 +204,7 @@ export class Orchestrator {
           reply: parsed.reply,
           verdict: lastVerdict,
           escalated: false,
+          handedOff: toolResults.some((r) => r.tool === 'escalate_to_human'),
           route: chosenRoute,
           toolResults,
           prefixFingerprint: fingerprint,
@@ -417,6 +431,7 @@ export class Orchestrator {
       reply: ESCALATION_REPLY,
       verdict: { ok: true, violations: [] }, // the escalation text asserts nothing
       escalated: true,
+      handedOff: toolResults.some((r) => r.tool === 'escalate_to_human'),
       route: chosenRoute,
       toolResults,
       prefixFingerprint: fingerprint,

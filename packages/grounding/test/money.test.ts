@@ -111,6 +111,26 @@ describe('detectStock', () => {
   it('returns undefined when no stock language is present', () => {
     expect(detectStock('What size do you need?')).toBeUndefined();
   });
+
+  /**
+   * Found by the eval: "the catalog is unavailable" is a statement about our
+   * systems, not the merchant's inventory. Reading it as an out-of-stock claim
+   * turned correct tool-failure responses into stock hallucinations.
+   */
+  it.each([
+    'I can’t verify the price right now because the catalog is unavailable.',
+    'The policy service is unavailable.',
+    'Order tracking is unavailable here.',
+    'The team handoff is unavailable right now.',
+  ])('ignores system unavailability: %s', (text) => {
+    expect(detectStock(text)).toBeUndefined();
+  });
+
+  it('still detects product unavailability in the same reply', () => {
+    // System sentence first, product claim second — only the second counts.
+    const text = 'The catalog is unavailable. Size L is sold out.';
+    expect(detectStock(text)?.polarity).toBe('out_of_stock');
+  });
 });
 
 describe('detectShippingEstimate', () => {

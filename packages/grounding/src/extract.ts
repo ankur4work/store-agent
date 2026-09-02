@@ -25,6 +25,26 @@ const OUT_OF_STOCK = [
   /\bno longer (?:available|carried)\b/i,
 ];
 
+/**
+ * Words that make "unavailable"/"not available" a statement about our SYSTEMS
+ * rather than the merchant's inventory.
+ *
+ * Found by the eval: "I can't verify the price because the catalog is
+ * unavailable" was being read as an out-of-stock claim, so a correct
+ * tool-failure response was scored as a stock hallucination. The production
+ * validator shares this code path, so the same sentence could trip a
+ * stock-contradiction violation on a live turn.
+ */
+const SYSTEM_SUBJECT =
+  /\b(?:catalog|service|system|handoff|tool|api|server|site|feature|tracking|lookup|connection|network|database|integration)\b/i;
+
+/** The sentence containing `index`, used to scope the system-subject check. */
+function sentenceAround(text: string, index: number): string {
+  const start = Math.max(0, text.lastIndexOf('.', index - 1) + 1, text.lastIndexOf('!', index - 1) + 1);
+  const endDot = text.indexOf('.', index);
+  return text.slice(start, endDot === -1 ? text.length : endDot + 1);
+}
+
 /** Shipping-duration claims: "ships in 2-3 days", "arrives within a week". */
 const SHIPPING_ESTIMATE = [
   /\b(?:ships?|arrives?|delivered?|delivery)\b[^.!?]{0,40}?\b\d+\s?(?:[-–]\s?\d+\s?)?(?:business\s)?(?:day|week|month)s?\b/i,
@@ -46,15 +66,23 @@ function firstMatch(text: string, patterns: readonly RegExp[]): string | undefin
  */
 export function detectStock(text: string): { polarity: StockPolarity; evidence: string } | undefined {
   const negated = /\b(?:not|isn't|is not|aren't|are not|no longer)\s+(?:currently\s+)?(?:in stock|available)\b/i.exec(text);
-  if (negated) return { polarity: 'out_of_stock', evidence: negated[0] };
+  if (negated && !aboutSystems(text, negated.index)) {
+    return { polarity: 'out_of_stock', evidence: negated[0] };
+  }
 
-  const out = firstMatch(text, OUT_OF_STOCK);
-  if (out !== undefined) return { polarity: 'out_of_stock', evidence: out };
+  for (const p of OUT_OF_STOCK) {
+    const m = p.exec(text);
+    if (m && !aboutSystems(text, m.index)) return { polarity: 'out_of_stock', evidence: m[0] };
+  }
 
   const inStock = firstMatch(text, IN_STOCK);
   if (inStock !== undefined) return { polarity: 'in_stock', evidence: inStock };
 
   return undefined;
+}
+
+function aboutSystems(text: string, index: number): boolean {
+  return SYSTEM_SUBJECT.test(sentenceAround(text, index));
 }
 
 export function detectShippingEstimate(text: string): string | undefined {

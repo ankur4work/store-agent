@@ -11,3 +11,4 @@ bench-results/
 # Local tool state
 .claude/
 *.tmp.*
+eval-results/
