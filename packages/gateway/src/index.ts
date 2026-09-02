@@ -13,3 +13,14 @@ export type { OAuthConfig, OAuthDeps } from './shopify/oauth.js';
 export { handleWebhook, REQUIRED_TOPICS } from './shopify/webhooks.js';
 export { MemoryShopStore, MemoryNonceStore, newShop } from './shopify/shops.js';
 export type { Shop, ShopStore, NonceStore } from './shopify/shops.js';
+export { verifySessionToken, bearerToken, signSessionToken } from './admin/session-token.js';
+export type { SessionTokenClaims, VerifyResult } from './admin/session-token.js';
+export {
+  MemorySettingsStore,
+  validateSettings,
+  accentIsAccessible,
+  contrastWithWhite,
+  DEFAULT_SETTINGS,
+} from './admin/settings.js';
+export type { ShopSettings, SettingsStore } from './admin/settings.js';
+export { renderAdmin, renderUnauthenticated, esc } from './admin/render.js';

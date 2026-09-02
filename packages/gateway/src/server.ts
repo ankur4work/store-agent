@@ -17,6 +17,15 @@ import {
   type NonceStore,
   type ShopStore,
 } from './shopify/shops.js';
+import { bearerToken, verifySessionToken } from './admin/session-token.js';
+import { renderAdmin, renderUnauthenticated } from './admin/render.js';
+import {
+  MemorySettingsStore,
+  accentIsAccessible,
+  contrastWithWhite,
+  validateSettings,
+  type SettingsStore,
+} from './admin/settings.js';
 
 /**
  * Gateway.
@@ -51,6 +60,7 @@ export interface GatewayDeps {
   readonly sessions?: SessionStore;
   readonly shops?: ShopStore;
   readonly nonces?: NonceStore;
+  readonly settings?: SettingsStore;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
@@ -58,6 +68,7 @@ export function createGateway(deps: GatewayDeps): Server {
   const sessions = deps.sessions ?? new MemorySessionStore();
   const shops = deps.shops ?? new MemoryShopStore();
   const nonces = deps.nonces ?? new MemoryNonceStore();
+  const settings = deps.settings ?? new MemorySettingsStore();
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -115,6 +126,11 @@ export function createGateway(deps: GatewayDeps): Server {
 
     if (url.pathname.startsWith('/shopify/')) {
       await handleShopify(url, req, res);
+      return;
+    }
+
+    if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+      await handleAdmin(url, req, res);
       return;
     }
 
@@ -177,6 +193,92 @@ export function createGateway(deps: GatewayDeps): Server {
         { apiSecret: app.apiSecret, shops, log: (l) => console.log(l) },
       );
       json(res, outcome.status, outcome.body);
+      return;
+    }
+
+    json(res, 404, { error: 'not_found' });
+  }
+
+  /**
+   * Merchant admin. Embedded inside the Shopify admin iframe.
+   *
+   * Authenticated by App Bridge session token, never by a `shop` query
+   * parameter alone — that would let anyone view or change any merchant's
+   * settings by guessing a store name.
+   */
+  async function handleAdmin(url: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const app = config.shopify;
+    if (app === undefined) {
+      json(res, 503, { error: 'admin_not_configured' });
+      return;
+    }
+    const auth = { apiKey: app.apiKey, apiSecret: app.apiSecret };
+
+    if (url.pathname === '/admin' && req.method === 'GET') {
+      // Shopify puts `id_token` on the embedded app URL. Fall back to a bearer
+      // header for direct fetches.
+      const token = url.searchParams.get('id_token') ?? bearerToken(header(req, 'authorization'));
+      const verified = verifySessionToken(token ?? undefined, auth);
+
+      if (!verified.ok) {
+        // No frame-ancestors here: we do not know which shop to trust yet.
+        html(res, 401, renderUnauthenticated(verified.reason));
+        return;
+      }
+
+      const shop = verified.shop;
+      const vm = {
+        shop,
+        apiKey: app.apiKey,
+        host: url.searchParams.get('host') ?? '',
+        settings: await settings.get(shop),
+        stats: {
+          activeSessions: await sessions.size(),
+          mode: (ucp ? 'live' : 'demo') as 'live' | 'demo',
+          model: config.models.workhorse,
+        },
+        saved: url.searchParams.get('saved') === '1',
+      };
+      html(res, 200, renderAdmin(vm), shop);
+      return;
+    }
+
+    if (url.pathname === '/admin/settings' && req.method === 'POST') {
+      const verified = verifySessionToken(bearerToken(header(req, 'authorization')), auth);
+      if (!verified.ok) {
+        json(res, 401, { errors: ['Your session expired. Reload the page and try again.'] });
+        return;
+      }
+
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(await readBody(req, 32 * 1024)) as Record<string, unknown>;
+      } catch {
+        json(res, 400, { errors: ['Malformed request.'] });
+        return;
+      }
+
+      // The shop comes from the VERIFIED token, never from the payload — a
+      // merchant must not be able to write another store's settings by
+      // editing a hidden field.
+      const result = validateSettings(verified.shop, payload);
+      if (!result.ok) {
+        json(res, 422, { errors: result.errors });
+        return;
+      }
+      if (!accentIsAccessible(result.settings!.accentColor)) {
+        json(res, 422, {
+          errors: [
+            `That accent is too light for white text (${contrastWithWhite(
+              result.settings!.accentColor,
+            ).toFixed(1)}:1, needs 4.5:1). Pick a darker shade.`,
+          ],
+        });
+        return;
+      }
+
+      await settings.put(result.settings!);
+      json(res, 200, { ok: true });
       return;
     }
 
@@ -375,6 +477,31 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Send an HTML page.
+ *
+ * When a shop is known, `frame-ancestors` is set so the Shopify admin (and only
+ * the Shopify admin, for that one store) may iframe us. Getting this wrong
+ * either breaks embedding entirely or leaves the page clickjackable from
+ * anywhere — Shopify checks for it during app review.
+ */
+function html(res: ServerResponse, status: number, body: string, shop?: string): void {
+  const buf = Buffer.from(body, 'utf8');
+  const headers: Record<string, string> = {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': String(buf.length),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  };
+  headers['content-security-policy'] =
+    shop === undefined
+      ? "frame-ancestors 'none';"
+      : `frame-ancestors https://${shop} https://admin.shopify.com;`;
+  res.writeHead(status, headers);
+  res.end(buf);
 }
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
