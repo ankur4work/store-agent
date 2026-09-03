@@ -13,6 +13,7 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "tsc --build",
     "clean": "tsc --build --clean",
+    "check-deploy": "npm run build && node scripts/check-deploy.mjs",
     "check-secrets": "node scripts/check-secrets.mjs",
     "check-secrets:all": "node scripts/check-secrets.mjs --all",
     "bench": "npm run bench --workspace @storeagent/ucp-client"

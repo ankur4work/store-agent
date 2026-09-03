@@ -1,14 +1,21 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Secrets. .env.example is checked in as documentation.
 .env
 .env.*
 !.env.example
-coverage/
-bench-results/
-.DS_Store
+
+# Durable state. Committing a database would commit merchant access tokens.
+*.db
+*.db-wal
+*.db-shm
 
 # Local tool state
 .claude/
+.DS_Store
 *.tmp.*
+coverage/
+bench-results/
 eval-results/

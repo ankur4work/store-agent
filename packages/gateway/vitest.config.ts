@@ -15,4 +15,20 @@ export default defineConfig({
       '@storeagent/voice': `${here}../voice/src/index.ts`,
     },
   },
+  // Vite's list of Node builtins predates `node:sqlite`, so it strips the
+  // `node:` prefix and then looks for an npm package called `sqlite`. Mark it
+  // external explicitly; `ssr.external` alone does not help, because the
+  // failure happens during resolution.
+  plugins: [
+    {
+      name: 'external-node-sqlite',
+      enforce: 'pre',
+      resolveId(id: string) {
+        if (id === 'node:sqlite' || id === 'sqlite') {
+          return { id: 'node:sqlite', external: true };
+        }
+        return null;
+      },
+    },
+  ],
 });
