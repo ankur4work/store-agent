@@ -10,7 +10,8 @@
     { "path": "../grounding" },
     { "path": "../ucp-client" },
     { "path": "../orchestrator" },
-    { "path": "../attribution" }
+    { "path": "../attribution" },
+    { "path": "../voice" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

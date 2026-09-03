@@ -17,6 +17,7 @@
     "@storeagent/attribution": "*",
     "@storeagent/grounding": "*",
     "@storeagent/orchestrator": "*",
-    "@storeagent/ucp-client": "*"
+    "@storeagent/ucp-client": "*",
+    "@storeagent/voice": "*"
   }
 }

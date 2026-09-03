@@ -9,7 +9,9 @@
     { "path": "packages/orchestrator" },
     { "path": "packages/gateway" },
     { "path": "packages/eval" },
-    { "path": "packages/attribution" }
+    { "path": "packages/attribution" },
+    { "path": "packages/voice" }
   ]
 }
+
 

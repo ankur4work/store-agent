@@ -210,6 +210,21 @@ textarea::placeholder{color:var(--muted)}
 .send:not(:disabled):hover{transform:translateY(-1px) scale(1.03)}
 .send:not(:disabled):active{transform:scale(.94)}
 .send:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mic{width:42px;height:42px;flex:0 0 auto;border:1px solid var(--line);border-radius:12px;cursor:pointer;
+  background:var(--paper);color:var(--ink);display:grid;place-items:center;position:relative;
+  transition:background .18s,border-color .18s,transform .18s var(--ease),color .18s}
+.mic:hover{background:var(--sunk)}
+.mic:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mic[data-state=listening]{background:var(--accent);color:#fff;border-color:var(--accent)}
+.mic[data-state=listening]::after{content:'';position:absolute;inset:-4px;border-radius:14px;
+  border:2px solid var(--accent);opacity:.45;animation:ring 1.4s var(--ease) infinite}
+.mic[data-state=speaking]{color:var(--accent);border-color:var(--accent)}
+.mic[data-state=thinking]{opacity:.55}
+.voicebar{display:none;align-items:center;gap:9px;padding:9px 16px 0;font-size:12.5px;color:var(--muted)}
+.voicebar.on{display:flex}
+.voicebar .live{flex:1;color:var(--ink);font-style:italic}
+.voicebar button{background:none;border:0;color:var(--muted);cursor:pointer;font:inherit;
+  text-decoration:underline;padding:0}
 
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
@@ -281,7 +296,13 @@ textarea::placeholder{color:var(--muted)}
       '<div class="log" aria-live="polite"></div>' +
       '<div class="chips"></div>' +
       '</div>' +
+      '<div class="voicebar"><span class="live">Listening…</span>' +
+      '<button type="button" class="voiceoff">Stop voice</button></div>' +
       '<form><div class="field"><textarea rows="1" placeholder="Ask about fit, shipping, anything…" aria-label="Message"></textarea></div>' +
+      '<button class="mic" type="button" aria-label="Talk instead of typing">' +
+      '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>' +
+      '</button>' +
       '<button class="send" type="submit" aria-label="Send" disabled>' +
       '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 5l7 7-7 7"/></svg>' +
       '</button></form>';
@@ -298,7 +319,12 @@ textarea::placeholder{color:var(--muted)}
     els.form = p.querySelector('form');
     els.input = p.querySelector('textarea');
     els.send = p.querySelector('.send');
+    els.mic = p.querySelector('.mic');
+    els.voicebar = p.querySelector('.voicebar');
+    els.live = p.querySelector('.voicebar .live');
 
+    els.mic.addEventListener('click', toggleVoice);
+    p.querySelector('.voiceoff').addEventListener('click', function () { stopVoice(true); });
     p.querySelector('.x').addEventListener('click', close);
     els.form.addEventListener('submit', submit);
     els.input.addEventListener('input', grow);
@@ -466,6 +492,197 @@ textarea::placeholder{color:var(--muted)}
     }
   }
 
+  // ---------- voice -------------------------------------------------------
+  //
+  // Deliberately a pipeline (STT -> grounded text turn -> TTS) rather than a
+  // speech-to-speech model. Speech-to-speech emits audio, so there is no text
+  // for the grounding validator to check — and unlike a chat bubble, spoken
+  // audio cannot be retracted. We only ever speak text the tripwire has
+  // already settled and validated, which the gateway sends as `speak` events.
+  //
+  // Mic permission is requested on the FIRST deliberate press, never on load.
+  var voice = {
+    on: false,
+    recorder: null,
+    stream: null,
+    chunks: [],
+    queue: [],
+    playing: null,
+    ctx: null,
+    analyser: null,
+    silenceSince: 0,
+    spokeMs: 0,
+    raf: 0,
+  };
+
+  function setVoiceState(s) {
+    if (els.mic) els.mic.dataset.state = s;
+    if (els.status) {
+      els.status.textContent =
+        s === 'listening' ? 'Listening…' : s === 'speaking' ? 'Speaking' : s === 'thinking' ? 'Thinking…' : 'Ready';
+    }
+  }
+
+  async function toggleVoice() {
+    if (voice.on) return stopVoice(true);
+    try {
+      voice.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      // Permission denied is a normal outcome, not an error state. Fall back
+      // to text without ceremony.
+      els.voicebar.classList.remove('on');
+      addMsg('bot', 'I couldn’t get microphone access — type instead and I’ll help the same way.');
+      return;
+    }
+    voice.on = true;
+    els.voicebar.classList.add('on');
+    startCapture();
+  }
+
+  function stopVoice(full) {
+    cancelAnimationFrame(voice.raf);
+    if (voice.recorder && voice.recorder.state !== 'inactive') voice.recorder.stop();
+    if (full && voice.stream) voice.stream.getTracks().forEach(function (t) { t.stop(); });
+    if (full) {
+      voice.on = false;
+      voice.stream = null;
+      els.voicebar.classList.remove('on');
+      stopPlayback();
+    }
+    setVoiceState('idle');
+  }
+
+  function startCapture() {
+    voice.chunks = [];
+    var rec = new MediaRecorder(voice.stream, { mimeType: pickMime() });
+    voice.recorder = rec;
+    rec.ondataavailable = function (e) { if (e.data.size) voice.chunks.push(e.data); };
+    rec.onstop = function () {
+      var blob = new Blob(voice.chunks, { type: rec.mimeType });
+      if (blob.size > 1200) transcribeAndSend(blob);
+      else if (voice.on) startCapture(); // too short to be speech
+    };
+    rec.start(100);
+    setVoiceState('listening');
+    monitorSilence();
+  }
+
+  function pickMime() {
+    var candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+    for (var i = 0; i < candidates.length; i++) {
+      if (MediaRecorder.isTypeSupported(candidates[i])) return candidates[i];
+    }
+    return '';
+  }
+
+  // Energy-based endpointing. The server-side endpointer uses the transcript to
+  // vary this threshold; here we only have loudness, so it stays conservative.
+  function monitorSilence() {
+    if (!voice.ctx) {
+      voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      voice.analyser = voice.ctx.createAnalyser();
+      voice.analyser.fftSize = 512;
+      voice.ctx.createMediaStreamSource(voice.stream).connect(voice.analyser);
+    }
+    var buf = new Uint8Array(voice.analyser.frequencyBinCount);
+    voice.silenceSince = performance.now();
+    voice.spokeMs = 0;
+    var last = performance.now();
+
+    function tick() {
+      if (!voice.on) return;
+      voice.analyser.getByteFrequencyData(buf);
+      var sum = 0;
+      for (var i = 0; i < buf.length; i++) sum += buf[i];
+      var level = sum / buf.length;
+      var now = performance.now();
+      var dt = now - last;
+      last = now;
+
+      if (level > 12) {
+        voice.silenceSince = now;
+        voice.spokeMs += dt;
+        // Barge-in: talking over playback cancels audio AND the generation.
+        if (voice.playing && voice.spokeMs > 160) {
+          stopPlayback();
+          if (inflight) inflight.abort();
+        }
+      } else if (
+        voice.spokeMs > 250 &&
+        now - voice.silenceSince > 700 &&
+        voice.recorder &&
+        voice.recorder.state === 'recording'
+      ) {
+        voice.recorder.stop();
+        return;
+      }
+      voice.raf = requestAnimationFrame(tick);
+    }
+    voice.raf = requestAnimationFrame(tick);
+  }
+
+  async function transcribeAndSend(blob) {
+    setVoiceState('thinking');
+    try {
+      var r = await fetch(API + '/api/voice/transcribe', {
+        method: 'POST',
+        headers: { 'content-type': blob.type || 'audio/webm' },
+        body: blob,
+      });
+      var d = await r.json();
+      var text = (d && d.text ? d.text : '').trim();
+      if (!text) { if (voice.on) startCapture(); return; }
+      els.live.textContent = text;
+      addMsg('user', text);
+      state.messages.push({ role: 'user', text: text });
+      persist();
+      stream(text, true);
+    } catch (e) {
+      if (voice.on) startCapture();
+    }
+  }
+
+  function enqueueSpeech(text) {
+    voice.queue.push(text);
+    if (!voice.playing) playNext();
+  }
+
+  async function playNext() {
+    var text = voice.queue.shift();
+    if (!text) {
+      voice.playing = null;
+      if (voice.on) startCapture(); // hand the turn back
+      return;
+    }
+    try {
+      var r = await fetch(API + '/api/voice/speak', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: text }),
+      });
+      if (!r.ok) throw new Error('tts');
+      var url = URL.createObjectURL(await r.blob());
+      var audio = new Audio(url);
+      voice.playing = audio;
+      setVoiceState('speaking');
+      audio.onended = function () { URL.revokeObjectURL(url); playNext(); };
+      audio.onerror = function () { URL.revokeObjectURL(url); playNext(); };
+      await audio.play();
+    } catch (e) {
+      playNext(); // a failed utterance must not stall the queue
+    }
+  }
+
+  function stopPlayback() {
+    if (voice.playing) {
+      voice.playing.pause();
+      voice.playing = null;
+    }
+    voice.queue.length = 0;
+  }
+
   // ---------- send --------------------------------------------------------
   var inflight = null;
 
@@ -484,7 +701,7 @@ textarea::placeholder{color:var(--muted)}
     stream(text);
   }
 
-  function stream(text) {
+  function stream(text, isVoice) {
     var bubble = addMsg('bot', '');
     bubble.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
     els.status.textContent = 'Thinking…';
@@ -515,7 +732,12 @@ textarea::placeholder{color:var(--muted)}
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       signal: ctl.signal,
-      body: JSON.stringify({ message: text, sessionId: state.sessionId, page: detectPage() }),
+      body: JSON.stringify({
+        message: text,
+        sessionId: state.sessionId,
+        page: detectPage(),
+        voice: isVoice === true,
+      }),
     })
       .then(function (res) {
         if (!res.ok || !res.body) throw new Error('http ' + res.status);
@@ -559,10 +781,15 @@ textarea::placeholder{color:var(--muted)}
           } else if (ev === 'delta') {
             pending += d.text;
             schedule();
+          } else if (ev === 'speak') {
+            // Already grounded and settled server-side — safe to voice.
+            enqueueSpeech(d.text);
           } else if (ev === 'reset') {
-            // Grounding tripwire fired — discard the partial answer entirely.
+            // Grounding tripwire fired — discard the partial answer entirely,
+            // and drop any queued audio before it can be spoken.
             shown = '';
             pending = '';
+            stopPlayback();
             bubble.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
           } else if (ev === 'done') {
             flush();

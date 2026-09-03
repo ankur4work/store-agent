@@ -26,6 +26,14 @@ import {
   recommendedHoldout,
   type AttributionStore,
 } from '@storeagent/attribution';
+import { SpeechChunker } from '@storeagent/voice';
+import {
+  DEFAULT_VOICE,
+  MAX_AUDIO_BYTES,
+  VoiceError,
+  synthesize,
+  transcribe,
+} from './voice/service.js';
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import {
@@ -164,6 +172,16 @@ export function createGateway(deps: GatewayDeps): Server {
     // sessions, which by definition have no cart of ours.
     if (url.pathname === '/api/pixel' && req.method === 'POST') {
       await handlePixel(req, res);
+      return;
+    }
+
+    // Voice I/O, proxied so the API key never reaches the browser.
+    if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') {
+      await handleTranscribe(req, res);
+      return;
+    }
+    if (url.pathname === '/api/voice/speak' && req.method === 'POST') {
+      await handleSpeak(req, res);
       return;
     }
 
@@ -357,6 +375,36 @@ export function createGateway(deps: GatewayDeps): Server {
     json(res, 404, { error: 'not_found' });
   }
 
+  const voiceConfig = { apiKey: config.openaiApiKey, ...DEFAULT_VOICE };
+
+  async function handleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const audio = await readRawBody(req, MAX_AUDIO_BYTES);
+      const text = await transcribe(audio, header(req, 'content-type') ?? 'audio/webm', voiceConfig);
+      json(res, 200, { text });
+    } catch (err) {
+      const status = err instanceof VoiceError ? err.status : 500;
+      json(res, status, { error: 'transcription_failed' });
+    }
+  }
+
+  async function handleSpeak(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const body = JSON.parse(await readBody(req, 8 * 1024)) as { text?: unknown };
+      const audio = await synthesize(String(body.text ?? ''), voiceConfig);
+      const buf = Buffer.from(audio);
+      res.writeHead(200, {
+        'content-type': 'audio/ogg',
+        'content-length': String(buf.length),
+        'cache-control': 'no-store',
+      });
+      res.end(buf);
+    } catch (err) {
+      const status = err instanceof VoiceError ? err.status : 500;
+      json(res, status, { error: 'speech_failed' });
+    }
+  }
+
   async function handleExposure(req: IncomingMessage, res: ServerResponse): Promise<void> {
     let body: { sessionId?: unknown; shop?: unknown };
     try {
@@ -447,6 +495,11 @@ export function createGateway(deps: GatewayDeps): Server {
     const ctl = new AbortController();
     req.on('close', () => ctl.abort());
 
+    // Voice turns speak only text that has already passed the grounding
+    // tripwire — audio cannot be retracted, so nothing unvalidated may reach
+    // the speaker. See voice/service.ts.
+    const chunker = body.voice === true ? new SpeechChunker() : undefined;
+
     // Reaching /api/chat at all means the shopper opened the assistant.
     // Exposure is being shown it; engagement is using it — and only the second
     // has a plausible causal path to a sale.
@@ -506,9 +559,25 @@ export function createGateway(deps: GatewayDeps): Server {
         },
         {
           signal: ctl.signal,
-          onReplyDelta: (text) => send('delta', { text }),
+          onReplyDelta: (text) => {
+            send('delta', { text });
+            // Voice turns get the same validated text, chunked into whole
+            // utterances. The chunker runs HERE rather than in the widget so
+            // the tested implementation is the one in the audio path — and so
+            // the widget stays buildless.
+            if (chunker !== undefined) {
+              for (const utterance of chunker.push(text)) send('speak', { text: utterance });
+            }
+          },
         },
       );
+
+      // Whatever is left over once the model stops — usually a final clause
+      // with no terminal punctuation.
+      if (chunker !== undefined) {
+        const tail = chunker.flush();
+        if (tail !== undefined) send('speak', { text: tail });
+      }
 
       // The tripwire may have aborted a partial message — tell the client to
       // discard whatever it painted before showing the final text.
@@ -547,6 +616,8 @@ interface ChatRequest {
   sessionId?: unknown;
   page?: { type: 'product' | 'collection' | 'cart' | 'other'; title?: string; productId?: string };
   justNavigated?: unknown;
+  /** Emit `speak` events with whole utterances alongside the text deltas. */
+  voice?: unknown;
 }
 
 /** Pull renderable product cards out of a catalog tool result. */
