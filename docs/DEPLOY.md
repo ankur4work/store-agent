@@ -143,8 +143,9 @@ that autoscale by default, pin `min=max=1`. Two instances on one volume will
 produce `SQLITE_BUSY` errors and, worse, two nodes disagreeing about holdout
 assignment — which silently corrupts the experiment.
 
-This is the deliberate trade in §5. When one node is no longer enough, the fix
-is a Postgres implementation of the same five interfaces.
+This is the deliberate trade in §5. When one node is no longer enough, the
+Postgres layer exists and is tested — see `POSTGRES.md`. It is not wired in by
+default, because it needs a driver dependency and a database to operate.
 
 ### Shopify app configuration
 
@@ -225,7 +226,7 @@ matter.
 Being precise, because "deployed" and "working" are different claims:
 
 **Tested and verified live**
-- 725 tests, typecheck clean
+- 799 tests, typecheck clean
 - Observability: verified over real HTTP (`scripts/check-observability.mjs`) —
   including that the scrape endpoints fail closed without a token
 - Billing: verified over real HTTP (`scripts/check-billing.mjs`) — an exhausted

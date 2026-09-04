@@ -23,6 +23,7 @@ claims, and this document keeps them apart.
 | **Hardening** | Rate limiting, persisted daily spend ceilings | done |
 | **Billing** | Plans, Shopify subscriptions, usage, overage, admin card | built, unverified |
 | **Observability** | Metrics, SLO gates, redacting structured logs | done |
+| **4 — Scale** | Ladder, breaker, chaos tests, Postgres layer | started |
 
 Widget is 11.7 KB gzipped against a 15 KB gate. Grounding runs a 28-case eval.
 Voice is verified live through a TTS → STT round trip.
@@ -90,11 +91,28 @@ call site to remember is how it leaks.
 Still open: no external error tracking (Sentry or similar), no tracing, and no
 alerting — `/api/slo` is a thing to poll, not a thing that pages you.
 
-### 4. Phase 4 — Scale (unstarted)
+### 4. Phase 4 — Scale (**started**)
 
-Multi-region, tenant isolation, budget ladder, chaos tests. Includes replacing
-SQLite with Postgres, which is what lifts the current one-instance limit and
-allows zero-downtime deploys.
+Done: the **budget ladder**, a **per-merchant circuit breaker**, retry with
+full jitter, chaos tests, and a **Postgres layer tested against real
+PostgreSQL 18.3** (PGlite, in-process) — 31 tests that execute the SQL rather
+than typecheck it.
+
+The ladder corrected a real bug: billing previously returned a hard `402` at
+quota, which broke §8's *"never a hard cut-off mid-conversation with a
+shopper"*. The person cut off was the shopper, who has no idea a billing
+relationship exists. An exhausted allowance now degrades to FAQ-only instead.
+
+Not done:
+- **Multi-region and DNS failover.** Needs real infrastructure; unbuildable
+  and untestable here.
+- **Concurrency is unproven.** PGlite is single-connection, so multi-node
+  contention is argued (single atomic statements everywhere) but not
+  demonstrated. Two nodes on one Postgres is still an untested configuration.
+- **Postgres is not wired into `main.ts`.** SQLite remains the default; the
+  swap is documented in `POSTGRES.md` and needs a driver dependency.
+- **Row-level security** — schema supports it, policies are a deployment step.
+- **The 10x load test** in the §12 gate has not been run.
 
 ### 5. Phase 5 — Launch (unstarted)
 
@@ -147,7 +165,7 @@ and is exactly why it should happen before any merchant sees this.
 2. ~~Rate limiting~~ — **done** (2026-09-04).
 3. ~~Billing~~ — **done** (2026-09-04), but unverified against Shopify.
 4. ~~Observability~~ — **done** (2026-09-04).
-5. Phase 4, then Phase 5.
+5. Phase 4 (started), then Phase 5.
 
 Everything on this list except Phase 4/5 is now built. Step 1 is the one that
 tells you whether the rest of the plan survives contact with reality.

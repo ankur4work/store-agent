@@ -18,6 +18,7 @@
     "@storeagent/billing": "*",
     "@storeagent/grounding": "*",
     "@storeagent/orchestrator": "*",
+    "@storeagent/resilience": "*",
     "@storeagent/ucp-client": "*",
     "@storeagent/voice": "*"
   }

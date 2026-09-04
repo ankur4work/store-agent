@@ -11,6 +11,7 @@ import { createToolExecutor } from './tool-executor.js';
 import { RateLimiter } from './limits/limiter.js';
 import { BillingService } from './billing/service.js';
 import { Telemetry } from './observability/telemetry.js';
+import { CircuitBreaker, decideLevel, shopperMessage, tierFor } from '@storeagent/resilience';
 import { createLogger, type Logger } from './observability/logger.js';
 import { PLANS, PLAN_ORDER, isPlanId } from '@storeagent/billing';
 import { DEMO_CATALOG } from './catalog-fixture.js';
@@ -105,6 +106,10 @@ export function createGateway(deps: GatewayDeps): Server {
   const log = deps.logger ?? createLogger(config.production);
   const startedAt = Date.now();
 
+  // Per merchant: a storefront that keeps failing must not hold connections
+  // and starve every other merchant's turns. See resilience/breaker.ts.
+  const catalogBreaker = new CircuitBreaker();
+
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
     timeoutMs: 90_000,
@@ -196,6 +201,7 @@ export function createGateway(deps: GatewayDeps): Server {
       metrics.sessions.set(await sessions.size());
       metrics.installs.set(await shops.count());
       metrics.trackedClients.set(limiter.trackedClients);
+      metrics.breakersOpen.set(catalogBreaker.openKeys().length);
 
       const body = metrics.render();
       res.writeHead(200, {
@@ -655,25 +661,31 @@ export function createGateway(deps: GatewayDeps): Server {
     const session =
       (await sessions.get(sessionId)) ?? newSession(sessionId, config.shopDomain ?? 'demo.local');
 
-    // Entitlement is checked BEFORE any model work: a shop past its allowance
-    // must cost nothing to refuse. Checking afterwards would mean paying for
-    // the call and then declining to bill for it.
+    // Service level, decided before any model work so a degraded shop costs
+    // less rather than costing a refusal.
     //
-    // 402 rather than 429: this is not "too fast", it is "not entitled", and
-    // the widget renders a different, non-alarming message for each. The
-    // `reason` is merchant-facing text and is never shown to a shopper.
-    if (billing !== undefined) {
-      const entitlement = billing.check(session.shopDomain);
-      if (!entitlement.allowed) {
-        json(res, 402, {
-          error: 'billing_required',
-          verdict: entitlement.verdict,
-          plan: entitlement.plan.id,
-          used: entitlement.used,
-          included: entitlement.included,
-        });
-        return;
-      }
+    // This REPLACES an earlier hard 402 at quota exhaustion, which violated
+    // §8's "never a hard cut-off mid-conversation with a shopper". The person
+    // cut off was the shopper — who has no idea a billing relationship exists,
+    // was mid-sentence, and did nothing wrong. The merchant's plan is not the
+    // shopper's problem, so an exhausted allowance now walks down the ladder
+    // instead of off it. See resilience/ladder.ts.
+    const entitlement = billing?.check(session.shopDomain);
+    const level = decideLevel({
+      budgetUsedFraction:
+        entitlement === undefined || entitlement.included === 0
+          ? 0
+          : entitlement.used / entitlement.included,
+      // Frozen or past an approved cap: no path to charging for more.
+      unbillable: entitlement !== undefined && (entitlement.verdict === 'frozen' || entitlement.verdict === 'cap_reached'),
+      catalogBreakerOpen: catalogBreaker.state(session.shopDomain) !== 'closed',
+      modelDegraded: false,
+      catalogUnavailable: false,
+    });
+
+    metrics.serviceLevel.inc({ shop: session.shopDomain, level: level.level });
+    if (level.level !== 'full') {
+      log.info('degraded', { shop: session.shopDomain, level: level.level, reason: level.reason });
     }
 
     // SSE. Headers go out immediately so the client can start rendering state
@@ -689,6 +701,16 @@ export function createGateway(deps: GatewayDeps): Server {
     };
 
     send('session', { sessionId });
+
+    // The bottom two rungs need no model at all. Answering here costs nothing
+    // and is still not an error page — the shopper gets a route to a person.
+    const bottomRung = shopperMessage(level.level);
+    if (bottomRung !== undefined) {
+      send('delta', { text: bottomRung });
+      send('done', { reply: bottomRung, escalated: true, grounded: true, attempts: 0, ms: 0, degraded: level.level });
+      res.end();
+      return;
+    }
 
     // Abort the model turn if the shopper closes the tab or navigates away.
     const ctl = new AbortController();
@@ -722,9 +744,22 @@ export function createGateway(deps: GatewayDeps): Server {
 
     // Wrap the executor so product results can be pushed to the UI the moment
     // they exist — skeleton cards render seconds before the prose arrives.
+    const CART_TOOLS = new Set(['create_cart', 'update_cart', 'get_cart', 'cancel_cart']);
     const observing = {
       async execute(name: string, input: Record<string, unknown>, signal?: AbortSignal) {
-        const result = await executor.execute(name, input, signal);
+        // §9: "disable cart actions rather than guessing". Adding the wrong
+        // variant is worse than adding nothing, because the shopper finds out
+        // at checkout.
+        if (!level.cartActions && CART_TOOLS.has(name)) {
+          return { error: 'Cart actions are temporarily unavailable for this store.' };
+        }
+
+        // Catalog calls go through the merchant's breaker, so a storefront
+        // that keeps timing out stops holding connections open.
+        const upstreamStart = Date.now();
+        const result = await catalogBreaker
+          .run(session.shopDomain, () => executor.execute(name, input, signal))
+          .finally(() => metrics.upstream.observe(Date.now() - upstreamStart, { target: 'catalog' }));
         if (name === 'search_catalog' || name === 'get_product') {
           const extracted = extractProducts(result);
           if (extracted.length > 0 && products.length === 0) {
@@ -736,10 +771,20 @@ export function createGateway(deps: GatewayDeps): Server {
       },
     };
 
+    // Degrading picks a cheaper tier rather than refusing. `faq_only` drops to
+    // the classify tier, which is enough to answer from merchant policy but
+    // not to reason over a live catalog — exactly the expensive part we are
+    // trying to stop paying for.
+    const tier = tierFor(level.level, false) ?? 'classify';
+    const tieredModels =
+      tier === 'workhorse'
+        ? config.models
+        : { ...config.models, workhorse: config.models[tier], escalation: config.models[tier] };
+
     const orchestrator = new Orchestrator({
       model,
       tools: observing,
-      models: config.models,
+      models: tieredModels,
       onEvent: (e) => send('trace', e),
     });
 

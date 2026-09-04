@@ -145,22 +145,46 @@ try {
   const after = start({ SHOPIFY_BILLING_TEST: 'true' });
   await waitForHealth();
 
-  const refused = await fetch(`${BASE}/api/chat?shop=${SHOP}`, {
+  // An exhausted allowance must NOT refuse the shopper. §8: "never a hard
+  // cut-off mid-conversation". This asserts the Phase 4 correction to an
+  // earlier version of this file, which expected a 402 here.
+  const exhausted = await fetch(`${BASE}/api/chat?shop=${SHOP}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ message: 'hello', page: { type: 'product' }, sessionId: 'new-session' }),
   });
-  // 402, not 429: this is "not entitled", not "too fast", and the widget shows
-  // a different message for each.
-  check('exhausted free plan is refused', refused.status, 402);
-  const body = await refused.json();
-  check('with a billing verdict', body.verdict, 'quota_exhausted');
-  check('and reports the plan', body.plan, 'free');
-  check('and the counts', `${body.used}/${body.included}`, '100/100');
+  check('exhausted plan still serves the shopper', exhausted.status, 200);
+  check('and is not a payment error', exhausted.status !== 402, true);
+  await exhausted.body?.cancel().catch(() => undefined);
 
-  // Usage counts persisted across the restart — an uncounted conversation is
-  // revenue we never bill, and a reset counter would be free service forever.
-  check('usage survived the restart', body.used, 100);
+  // A shop Shopify has frozen drops to handoff, which needs no model at all —
+  // so this path is both free to test and free to serve.
+  {
+    const db = new DatabaseSync(DB);
+    db.prepare(
+      `INSERT INTO subscriptions (shop, subscription_id, plan_id, status, test, updated_at)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(shop) DO UPDATE SET status = excluded.status, plan_id = excluded.plan_id`,
+    ).run(SHOP, 'gid://sub/1', 'growth', 'frozen', 1, Date.now());
+    db.close();
+  }
+
+  const frozen = await fetch(`${BASE}/api/chat?shop=${SHOP}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message: 'hello', page: { type: 'product' }, sessionId: 'frozen-session' }),
+  });
+  check('frozen shop still gets a response', frozen.status, 200);
+
+  const text = await frozen.text();
+  check('degraded to handoff', text.includes('"degraded":"handoff"'), true);
+  // The shopper must never learn about the merchant's billing state.
+  check(
+    'shopper is told nothing about billing',
+    !/plan|billing|quota|allowance|subscription|payment/i.test(text),
+    true,
+  );
+  check('and is offered a person instead', /email/i.test(text), true);
 
   await stop(after.child);
 } finally {

@@ -60,6 +60,24 @@ export class Telemetry {
     'Replies retracted mid-stream by the grounding tripwire',
   );
 
+  /**
+   * Turns served at each rung of the degradation ladder.
+   *
+   * The §9 promise is "never show an error", which is kept by degrading. That
+   * only stays honest if degradation is visible: a fleet quietly serving
+   * everything at `faq_only` looks healthy on every other metric.
+   */
+  readonly serviceLevel = this.registry.counter(
+    'storeagent_service_level_total',
+    'Turns served, labelled by shop and degradation level',
+  );
+
+  /** Merchants currently failing fast on their own storefront. */
+  readonly breakersOpen = this.registry.gauge(
+    'storeagent_circuit_breakers_open',
+    'Merchants whose catalog circuit breaker is not closed',
+  );
+
   readonly escalations = this.registry.counter(
     'storeagent_escalations_total',
     'Turns escalated to a human or lead capture',

@@ -12,6 +12,7 @@
     { "path": "../orchestrator" },
     { "path": "../attribution" },
     { "path": "../billing" },
+    { "path": "../resilience" },
     { "path": "../voice" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]

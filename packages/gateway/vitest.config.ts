@@ -11,6 +11,7 @@ export default defineConfig({
       '@storeagent/attribution': `${here}../attribution/src/index.ts`,
       '@storeagent/billing': `${here}../billing/src/index.ts`,
       '@storeagent/grounding': `${here}../grounding/src/index.ts`,
+      '@storeagent/resilience': `${here}../resilience/src/index.ts`,
       '@storeagent/orchestrator': `${here}../orchestrator/src/index.ts`,
       '@storeagent/ucp-client': `${here}../ucp-client/src/index.ts`,
       '@storeagent/voice': `${here}../voice/src/index.ts`,
