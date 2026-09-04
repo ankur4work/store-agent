@@ -133,11 +133,12 @@ needs a real baseline.
 `validator failure < 1%` gate needs a few hundred logged turns with adversarial
 inputs, not one smoke test.
 
-**Voice: `/v1/models` lists `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`,
-`gpt-live-transcribe`, `gpt-realtime-translate`.** A speech-to-speech realtime
-model could collapse the Phase 3 STT → LLM → TTS pipeline into one hop, which
-would change the voice latency budget in `ARCHITECTURE.md §6.3` substantially.
-Worth evaluating before building that pipeline as designed.
+~~**Voice: a speech-to-speech realtime model could collapse the Phase 3
+STT → LLM → TTS pipeline into one hop.**~~ **Evaluated and rejected in Phase 3.**
+It would collapse the grounding with it: speech-to-speech emits audio, so there
+is no structured output to validate, no claims to check, and no text stream for
+the tripwire — and audio cannot be retracted. A hallucinated price that has been
+spoken is already in the shopper's ear. See `PHASE-3-VOICE.md`.
 
 ---
 

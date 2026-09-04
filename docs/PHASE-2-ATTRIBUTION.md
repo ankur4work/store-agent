@@ -146,10 +146,10 @@ knowing that a real store will see that message for a while.
 
 ## Open
 
-- **Persistence.** Everything is in-memory; a restart loses the experiment.
-  `AttributionStore` is Postgres-shaped, so this is a swap, not a refactor — but
-  it must land before any real store, since a lost experiment cannot be
-  reconstructed.
+- ~~**Persistence.** Everything is in-memory; a restart loses the experiment.~~
+  **Resolved** — `SqliteAttributionStore` persists exposures, cart links and
+  conversions, verified across a real close-and-reopen. As predicted this was a
+  swap, not a refactor. See `DEPLOY.md`; note the single-node constraint.
 - **The pixel is unverified against real Shopify.** It is written against the
   documented `strict` sandbox API but has never run in one. Notably, the pixel
   sandbox cannot read the storefront's `localStorage`, so the session id is
