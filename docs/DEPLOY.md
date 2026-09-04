@@ -35,6 +35,10 @@ but the transcript is outside its reach.
 | `SHOPIFY_APP_URL` | ✅ in prod | Must be `https://` — enforced |
 | `ALLOWED_ORIGINS` | ✅ in prod | Real storefront origins. `*` is rejected |
 | `NODE_ENV=production` | ✅ | Turns on the checks below |
+| `RATE_LIMIT_ENABLED` | ✅ in prod | Must not be `false`; refuses to start |
+| `TRUST_PROXY_HOPS` | ⚠️ | **Set to `1` behind Coolify/Traefik.** See below |
+| `DAILY_UNITS_PER_SHOP` | | Default `5000` |
+| `DAILY_UNITS_GLOBAL` | | Default `50000` |
 | `SHOPIFY_SCOPES` | | Default `read_products` |
 | `PORT` | | Default `8787` |
 | `MODEL_WORKHORSE` | | Default `gpt-5.6-terra` |
@@ -72,6 +76,30 @@ merchant is logged out on the next deploy.
 
 Any container host works — Fly, Render, Railway, Cloud Run with a volume, or a
 VPS. The one requirement below applies everywhere.
+
+### Set `TRUST_PROXY_HOPS` correctly, or the limiter does nothing useful
+
+Rate limits key on client IP, and `X-Forwarded-For` is a request header anyone
+can send. This variable says how far to trust it — the number of proxies
+actually in front of this process.
+
+| Deployment | Value |
+|---|---:|
+| **Coolify / Traefik** (this deployment) | **1** |
+| Behind Cloudflare *and* Traefik | 2 |
+| Container exposed directly | 0 (default) |
+
+Both mistakes are silent, in opposite directions:
+
+- **Too low behind a proxy** — every request appears to come from the proxy's
+  address, so all shoppers share one bucket and throttle *each other*. The site
+  looks broken under normal traffic.
+- **Too high** — the limiter reads an attacker-supplied value, so an attacker
+  varies the header and is never limited at all. Worse than no limiter, since
+  it also fills the bucket store with keys of their choosing.
+
+The default is 0 because the failure it causes is visible; the other is not.
+Startup logs a warning if this is 0 in production.
 
 ### One node only, for now
 
@@ -162,7 +190,10 @@ matter.
 Being precise, because "deployed" and "working" are different claims:
 
 **Tested and verified live**
-- 589 tests, typecheck clean
+- 626 tests, typecheck clean
+- Rate limiting: verified over real HTTP (`scripts/check-limits.mjs`) —
+  including that `/healthz` survives a flood, since a 429 there would make the
+  orchestrator kill a healthy container
 - Voice: TTS → STT round trip against the live API (`scripts/check-voice.mjs`)
 - Grounding: 28-case eval suite
 - Persistence: durability across a genuine close-and-reopen

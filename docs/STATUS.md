@@ -1,11 +1,11 @@
 # Status — what is built, what is not
 
-Last updated 2026-09-04, at commit `3a95e8a`.
+Last updated 2026-09-04.
 
 **Short answer: the product is built; the business around it is not, and none of
 it has ever touched a real Shopify store.**
 
-589 tests pass and typecheck is clean. That means the code does what the tests
+626 tests pass and typecheck is clean. That means the code does what the tests
 say. It does not mean a merchant can use this yet — the two are different
 claims, and this document keeps them apart.
 
@@ -20,6 +20,7 @@ claims, and this document keeps them apart.
 | **2 — Trust** | Attribution chain, holdout, ROI dashboard | done |
 | **3 — Voice** | Voice lane, semantic endpointing, barge-in | done |
 | **Deploy** | SQLite persistence, Dockerfile, config validation | done |
+| **Hardening** | Rate limiting, persisted daily spend ceilings | done |
 
 Widget is 9.09 KB gzipped against a 15 KB gate. Grounding runs a 28-case eval.
 Voice is verified live through a TTS → STT round trip.
@@ -39,17 +40,24 @@ unlimited, and every token would be billed to you. This is the largest single
 gap and it is not a Phase 4/5 nicety — it is the difference between a product
 and a hobby.
 
-### 2. Rate limiting and spend control — nothing exists
+### 2. Rate limiting and spend control — **built**
 
-There is no per-shop quota, no throttle, and no budget ceiling. `/api/chat` is
-reachable directly, so `ALLOWED_ORIGINS` (a browser-enforced control) does not
-stop a script.
+Two independent controls, because they stop different things: a per-client
+token bucket bounds the *rate*, and persisted daily unit ceilings (per shop and
+global) bound the *total*. Only the ceiling stops distributed low-rate traffic
+that never trips a per-client limit but runs all day.
 
-The exposure is asymmetric: someone who finds the endpoint can run up
-unbounded model spend on your key, and the first signal would be the invoice.
-This should land **before** any public URL, not after.
+Verified over real HTTP, not just in unit tests. `/healthz` and Shopify
+webhooks are exempt — a 429 on the former makes the orchestrator kill a healthy
+container, and dropping `orders/create` corrupts the revenue attribution the
+product is sold on.
 
-`ARCHITECTURE §7.4`'s budget ladder is the intended design and is unbuilt.
+**Set `TRUST_PROXY_HOPS=1` on Coolify.** Left at 0 behind a proxy, every
+shopper shares one bucket and they throttle each other; see `DEPLOY.md`.
+
+Still open: `ARCHITECTURE §7.4`'s budget *ladder* — degrading to a cheaper
+model as a shop approaches its ceiling, rather than refusing outright — is not
+built. Today the ceiling is a hard stop.
 
 ### 3. Observability — nothing beyond stdout
 
@@ -112,10 +120,10 @@ and is exactly why it should happen before any merchant sees this.
 
 1. **Install on a development store.** Cheapest way to convert five unknowns
    into facts, and it gates everything else.
-2. **Rate limiting**, before any public URL exists.
+2. ~~Rate limiting~~ — **done** (2026-09-04).
 3. **Billing**, before any merchant could plausibly sign up.
 4. **Observability**, before there is traffic worth watching.
 5. Phase 4, then Phase 5.
 
-Steps 2–4 are each small next to what is already built. Step 1 is the one that
+Steps 3–4 are each small next to what is already built. Step 1 is the one that
 tells you whether the rest of the plan survives contact with reality.

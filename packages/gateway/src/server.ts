@@ -8,6 +8,7 @@ import { UcpClient } from '@storeagent/ucp-client';
 import type { GatewayConfig } from './config.js';
 import { MemorySessionStore, newSession, type SessionStore } from './sessions.js';
 import { createToolExecutor } from './tool-executor.js';
+import { RateLimiter } from './limits/limiter.js';
 import { DEMO_CATALOG } from './catalog-fixture.js';
 import { beginInstall, completeInstall } from './shopify/oauth.js';
 import { handleWebhook } from './shopify/webhooks.js';
@@ -79,6 +80,8 @@ export interface GatewayDeps {
   readonly nonces?: NonceStore;
   readonly settings?: SettingsStore;
   readonly attribution?: AttributionStore;
+  /** Injectable so tests can supply a persisted spend store. */
+  readonly limiter?: RateLimiter;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
@@ -88,6 +91,7 @@ export function createGateway(deps: GatewayDeps): Server {
   const nonces = deps.nonces ?? new MemoryNonceStore();
   const settings = deps.settings ?? new MemorySettingsStore();
   const attribution = deps.attribution ?? new MemoryAttributionStore();
+  const limiter = deps.limiter ?? new RateLimiter(config.rateLimits);
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -115,6 +119,27 @@ export function createGateway(deps: GatewayDeps): Server {
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
+      return;
+    }
+
+    // Admission control, before any work is done. Deliberately ahead of route
+    // dispatch so a refused request never reaches a model call — the whole
+    // point is to not spend money on it.
+    //
+    // The shop is taken from the query string where the widget provides it.
+    // That is client-supplied and therefore spoofable, but the consequence is
+    // bounded: a forged shop can only spend *its own* ceiling, and the global
+    // ceiling still applies underneath. Keying on something unforgeable would
+    // mean parsing the body before admission, which inverts the ordering.
+    const limitShop = url.searchParams.get('shop') ?? config.shopDomain;
+    const decision = limiter.check(req, url.pathname, limitShop);
+    if (!decision.allowed) {
+      res.setHeader('retry-after', String(decision.retryAfterSec));
+      json(res, 429, {
+        error: 'rate_limited',
+        reason: decision.reason,
+        retryAfterSec: decision.retryAfterSec,
+      });
       return;
     }
 

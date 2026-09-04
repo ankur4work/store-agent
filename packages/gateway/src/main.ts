@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { loadConfig, loadEnvFile } from './config.js';
 import { createGateway } from './server.js';
 import { createSqliteStores } from './store/sqlite.js';
+import { SqliteSpendStore } from './limits/budget.js';
+import { RateLimiter } from './limits/limiter.js';
 
 // From packages/gateway/dist/src/main.js up to the repo root.
 const envPath = fileURLToPath(new URL('../../../../.env', import.meta.url));
@@ -14,14 +16,22 @@ mkdirSync(dirname(dbPath), { recursive: true });
 
 const { db, sessions, shops, nonces, settings, attribution } = createSqliteStores({ path: dbPath });
 
+// Spend counters are persisted so a crash loop cannot reset the daily budget.
+const spend = new SqliteSpendStore(db);
+const limiter = new RateLimiter(config.rateLimits, spend);
+
 // SQLite does not expire rows; a periodic sweep is what a TTL would be in Redis.
 const sweeper = setInterval(() => {
   sessions.sweep();
   nonces.sweep();
+  // Idle rate-limit buckets are indistinguishable from absent ones, and
+  // reclaiming them is what keeps the limiter from growing under attack.
+  limiter.sweep();
+  spend.prune(Date.now());
 }, 60_000);
 sweeper.unref();
 
-const server = createGateway({ config, sessions, shops, nonces, settings, attribution });
+const server = createGateway({ config, sessions, shops, nonces, settings, attribution, limiter });
 
 server.listen(config.port, () => {
   const mode = config.shopDomain ? `live (${config.shopDomain})` : 'demo (fixture catalog)';
@@ -32,6 +42,14 @@ server.listen(config.port, () => {
   console.log(`  model  : ${config.models.workhorse}`);
   console.log(`  store  : ${dbPath}`);
   console.log(`  install: ${config.shopify ? 'enabled' : 'DISABLED (no Shopify credentials)'}`);
+  console.log(
+    `  limits : ${
+      config.rateLimits.enabled
+        ? `${config.rateLimits.shopDailyUnits}/shop/day, ${config.rateLimits.globalDailyUnits} global, ` +
+          `proxy hops ${config.rateLimits.trustProxyHops}`
+        : 'DISABLED'
+    }`,
+  );
   console.log(`  demo   : http://localhost:${config.port}/`);
   console.log(`  health : http://localhost:${config.port}/healthz\n`);
 });

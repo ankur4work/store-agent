@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { DEFAULT_RATE_LIMITS, type RateLimitOptions } from './limits/limiter.js';
 
 export interface ShopifyAppConfig {
   readonly apiKey: string;
@@ -26,6 +27,7 @@ export interface GatewayConfig {
    * install flow fails in confusing ways at the worst moment.
    */
   readonly shopify: ShopifyAppConfig | undefined;
+  readonly rateLimits: RateLimitOptions;
 }
 
 /** Load `.env` if present. Real deployments use the process environment. */
@@ -57,6 +59,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
   const production = (env['NODE_ENV'] ?? '') === 'production';
   const allowedOrigins = (env['ALLOWED_ORIGINS'] ?? '*').split(',').map((s) => s.trim());
   const shopify = loadShopifyConfig(env);
+  const rateLimits = loadRateLimits(env);
 
   // Fail at startup rather than in front of a merchant. Each of these is a
   // configuration mistake that is invisible in development and damaging in
@@ -79,8 +82,24 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       // ephemeral disk, which loses every install on the next deploy.
       problems.push('STOREAGENT_DB must point at a path on a mounted volume');
     }
+    if (!rateLimits.enabled) {
+      // /api/chat is reachable directly, so ALLOWED_ORIGINS — a browser-side
+      // control — does not stop a script. Without limits the first signal of
+      // abuse is the invoice.
+      problems.push('RATE_LIMIT_ENABLED must not be false in production');
+    }
     if (problems.length > 0) {
       throw new Error(`Refusing to start in production:\n  - ${problems.join('\n  - ')}`);
+    }
+
+    // A warning rather than a failure: running without a proxy is legitimate,
+    // but behind one this is silently wrong in a way that is hard to notice.
+    if (rateLimits.enabled && rateLimits.trustProxyHops === 0) {
+      console.warn(
+        '[config] TRUST_PROXY_HOPS=0. If this runs behind a reverse proxy, every request ' +
+          'appears to come from the proxy, so all shoppers share one rate-limit bucket and ' +
+          'will throttle each other. Set it to the number of proxies in front of this process.',
+      );
     }
   }
 
@@ -99,6 +118,29 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     },
     allowedOrigins,
     shopify,
+    rateLimits,
+  };
+}
+
+function loadRateLimits(env: Record<string, string | undefined>): RateLimitOptions {
+  const num = (key: string, fallback: number): number => {
+    const raw = env[key];
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const n = Number(raw);
+    // A typo must not silently disable a spend ceiling.
+    if (!Number.isFinite(n) || n < 0) throw new Error(`${key} must be a non-negative number`);
+    return n;
+  };
+
+  return {
+    enabled: (env['RATE_LIMIT_ENABLED'] ?? 'true') !== 'false',
+    trustProxyHops: num('TRUST_PROXY_HOPS', DEFAULT_RATE_LIMITS.trustProxyHops),
+    perIp: {
+      burst: num('RATE_LIMIT_BURST', DEFAULT_RATE_LIMITS.perIp.burst),
+      refillPerMin: num('RATE_LIMIT_REFILL_PER_MIN', DEFAULT_RATE_LIMITS.perIp.refillPerMin),
+    },
+    shopDailyUnits: num('DAILY_UNITS_PER_SHOP', DEFAULT_RATE_LIMITS.shopDailyUnits),
+    globalDailyUnits: num('DAILY_UNITS_GLOBAL', DEFAULT_RATE_LIMITS.globalDailyUnits),
   };
 }
 
