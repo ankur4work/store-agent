@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -295,7 +295,7 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
-    if (req.method === 'GET' && serveStatic(url.pathname, res)) return;
+    if (req.method === 'GET' && serveStatic(url.pathname, req, res)) return;
 
     json(res, 404, { error: 'not_found' });
   }
@@ -972,7 +972,26 @@ const MIME: Record<string, string> = {
  * still inside the root. Model- or user-supplied paths never get to touch the
  * filesystem directly.
  */
-function serveStatic(pathname: string, res: ServerResponse): boolean {
+/**
+ * Serve a static file.
+ *
+ * ## Caching, and why it is not `no-cache`
+ *
+ * `widget.js` loads on **every page of every storefront**. Served
+ * `no-cache` it forces a revalidation round trip on each navigation — and
+ * Shopify themes are full-page reloads, so that is every product click. The
+ * bytes come back 304, but the latency does not, and `ARCHITECTURE §12` gates
+ * on not costing the merchant more than 10 Lighthouse points.
+ *
+ * `immutable` would be wrong at a fixed URL: a fix would never reach a
+ * storefront. So assets get a short freshness window plus a long
+ * `stale-while-revalidate` — a repeat visit inside the week paints from cache
+ * with no blocking request, while the update lands on the next fetch. A bad
+ * widget is therefore at most ten minutes from being replaced everywhere.
+ *
+ * HTML stays `no-cache`: the demo page is not worth a stale render.
+ */
+function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse): boolean {
   const root = publicRoot();
   if (root === undefined) return false;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
@@ -981,16 +1000,32 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
 
   try {
     const body = readFileSync(target);
+    const ext = extname(target);
+    const etag = `"${createHash('sha256').update(body).digest('base64url').slice(0, 27)}"`;
+
+    // A matching ETag means the storefront already has these exact bytes.
+    if (header(req, 'if-none-match') === etag) {
+      res.writeHead(304, { etag, 'cache-control': cacheControlFor(ext) });
+      res.end();
+      return true;
+    }
+
     res.writeHead(200, {
-      'content-type': MIME[extname(target)] ?? 'application/octet-stream',
+      'content-type': MIME[ext] ?? 'application/octet-stream',
       'content-length': body.length,
-      'cache-control': 'no-cache',
+      'cache-control': cacheControlFor(ext),
+      etag,
     });
     res.end(body);
     return true;
   } catch {
     return false;
   }
+}
+
+function cacheControlFor(ext: string): string {
+  if (ext === '.html') return 'no-cache';
+  return 'public, max-age=600, stale-while-revalidate=604800';
 }
 
 /**

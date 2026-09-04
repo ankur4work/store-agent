@@ -280,6 +280,7 @@ export function renderAdmin(vm: AdminViewModel): string {
     font:inherit;font-weight:550;cursor:pointer}
   button.primary:hover{background:#1a1a1a}
   .errors{background:#fee9e8;color:#8e1f0b;border-radius:10px;padding:11px 14px;font-size:13.5px}
+  .errors[hidden]{display:none}
   .errors li{margin-left:16px}
 
   code{background:#f1f2f4;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12.5px}
@@ -288,6 +289,15 @@ export function renderAdmin(vm: AdminViewModel): string {
 </style>
 </head>
 <body>
+<!--
+  App Bridge navigation. StoreAgent is a single admin page, so this declares
+  only the home route: the first link (or rel="home") is HIDDEN from the menu,
+  because the app name in Shopify's sidebar already links to it. Inventing
+  extra nav entries to look busier would be worse than having none.
+-->
+<s-app-nav>
+  <s-link href="/admin" rel="home">StoreAgent</s-link>
+</s-app-nav>
 <div class="wrap">
 
   <div class="top">
@@ -326,7 +336,19 @@ export function renderAdmin(vm: AdminViewModel): string {
     <h2>Appearance</h2>
     <p class="hint">The assistant inherits your theme’s fonts. These settings control the rest.</p>
     <div class="body">
-      <form id="settingsForm" method="POST" action="/admin/settings">
+      <!--
+        data-save-bar hands the form to Shopify's Contextual Save Bar: editing
+        a field raises the admin's own save/discard bar rather than leaving a
+        button stranded at the bottom of a card. Required for Built for
+        Shopify, and it also fixes a real problem — a merchant who changes the
+        accent colour and navigates away currently loses the change silently.
+
+        data-discard-confirmation because discarding is destructive and
+        unrecoverable; the confirmation is Shopify's, not a modal of ours.
+      -->
+      <div class="errors" id="formErrors" role="alert" aria-live="polite" hidden></div>
+      <form id="settingsForm" method="POST" action="/admin/settings"
+            data-save-bar data-discard-confirmation>
         <input type="hidden" name="shop" value="${esc(vm.shop)}">
         <input type="hidden" name="host" value="${esc(vm.host)}">
 
@@ -384,6 +406,24 @@ export function renderAdmin(vm: AdminViewModel): string {
             if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(hex.value)) picker.value = hex.value;
           });
 
+          function showErrors(list) {
+            var box = document.getElementById('formErrors');
+            if (!box) return;
+            box.innerHTML = '<strong>Couldn’t save:</strong><ul>' +
+              list.map(function (e) {
+                return '<li>' + String(e).replace(/[<>&]/g, '') + '</li>';
+              }).join('') + '</ul>';
+            box.hidden = false;
+            box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          }
+
+          // Discard: Shopify's save bar fires a reset on the form. Reloading
+          // restores the SAVED values rather than the DOM's defaults, which
+          // drift once the colour picker and its text twin have been edited.
+          form.addEventListener('reset', function () {
+            location.reload();
+          });
+
           form.addEventListener('submit', async function (e) {
             e.preventDefault();
             var data = Object.fromEntries(new FormData(form));
@@ -399,7 +439,10 @@ export function renderAdmin(vm: AdminViewModel): string {
             var body = await res.json().catch(function () { return {}; });
             if (res.ok) location.search = '?shop=' + encodeURIComponent(data.shop) +
               '&host=' + encodeURIComponent(data.host) + '&saved=1';
-            else alert((body.errors || ['Could not save.']).join('\\n'));
+            // Inline, next to the fields, not an alert(). Built for Shopify
+            // asks for contextual errors near the field — and alert() is
+            // itself an unsolicited modal, which the guidelines forbid.
+            else showErrors(body.errors || ['Could not save.']);
           });
 
           // Plan changes. The merchant is sent to Shopify's own approval
@@ -424,7 +467,7 @@ export function renderAdmin(vm: AdminViewModel): string {
               btn.disabled = false;
               if (body.confirmationUrl) window.top.location.href = body.confirmationUrl;
               else if (res.ok) location.reload();
-              else alert((body.errors || ['Could not change plan.']).join('\\n'));
+              else showErrors(body.errors || ['Could not change plan.']);
             });
           });
         })();

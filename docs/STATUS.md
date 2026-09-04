@@ -24,6 +24,7 @@ claims, and this document keeps them apart.
 | **Billing** | Plans, Shopify subscriptions, usage, overage, admin card | built, unverified |
 | **Observability** | Metrics, SLO gates, redacting structured logs | done |
 | **4 — Scale** | Ladder, breaker, chaos tests, Postgres layer | started |
+| **5 — Launch** | Readiness audit, merchant docs, admin compliance | started |
 
 Widget is 11.7 KB gzipped against a 15 KB gate. Grounding runs a 28-case eval.
 Voice is verified live through a TTS → STT round trip.
@@ -114,9 +115,25 @@ Not done:
 - **Row-level security** — schema supports it, policies are a deployment step.
 - **The 10x load test** in the §12 gate has not been run.
 
-### 5. Phase 5 — Launch (unstarted)
+### 5. Phase 5 — Launch (**started**)
 
-Built for Shopify review, merchant-facing docs, pricing page, CWV certification.
+Done: `scripts/check-launch.mjs` (40 mechanical App Store / Built for Shopify
+checks), merchant docs (`LISTING.md`, `PRIVACY.md`, `SUPPORT.md`), the launch
+runbook (`LAUNCH.md`), and the admin gaps the audit exposed — `s-app-nav`,
+Contextual Save Bar, inline errors replacing `alert()`.
+
+**A correction to §12:** it lists "Built for Shopify review" as a Phase 5
+deliverable. BFS requires **50 net paid installs and 5 reviews** — it is a
+post-traction badge, not a launch gate, and cannot be earned before having
+merchants. What Phase 5 actually gates is App Store *distribution* review.
+
+Two real defects the audit found: `widget.js` was served `no-cache` (a
+revalidation round trip on every storefront page load, against the very gate
+that measures it), and the settings form used `alert()` for errors — an
+unsolicited modal, nowhere near the offending field.
+
+Not done: screenshots, a hosted privacy URL, the Lighthouse on/off comparison
+(needs a real theme and Chrome), and submission itself.
 
 ### 6. Smaller gaps inside built phases
 
@@ -165,7 +182,9 @@ and is exactly why it should happen before any merchant sees this.
 2. ~~Rate limiting~~ — **done** (2026-09-04).
 3. ~~Billing~~ — **done** (2026-09-04), but unverified against Shopify.
 4. ~~Observability~~ — **done** (2026-09-04).
-5. Phase 4 (started), then Phase 5.
+5. Phase 4 and Phase 5 — both started; see each section for what remains.
 
-Everything on this list except Phase 4/5 is now built. Step 1 is the one that
+Every numbered item above is now built. What is left is not more code: it is
+installing on a development store, which converts the unverified list below
+into facts. Step 1 is the one that
 tells you whether the rest of the plan survives contact with reality.

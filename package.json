@@ -11,8 +11,10 @@
   "scripts": {
     "bench": "npm run bench --workspace @storeagent/ucp-client",
     "build": "tsc --build",
+    "check-all": "npm run build && node scripts/check-secrets.mjs --all && node scripts/check-deploy.mjs && node scripts/check-limits.mjs && node scripts/check-billing.mjs && node scripts/check-observability.mjs && node scripts/check-launch.mjs",
     "check-billing": "npm run build && node scripts/check-billing.mjs",
     "check-deploy": "npm run build && node scripts/check-deploy.mjs",
+    "check-launch": "npm run build && node scripts/check-launch.mjs",
     "check-limits": "npm run build && node scripts/check-limits.mjs",
     "check-observability": "npm run build && node scripts/check-observability.mjs",
     "check-secrets": "node scripts/check-secrets.mjs",
