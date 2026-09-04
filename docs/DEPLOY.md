@@ -35,6 +35,7 @@ but the transcript is outside its reach.
 | `SHOPIFY_APP_URL` | ✅ in prod | Must be `https://` — enforced |
 | `ALLOWED_ORIGINS` | ✅ in prod | Real storefront origins. `*` is rejected |
 | `NODE_ENV=production` | ✅ | Turns on the checks below |
+| `SHOPIFY_BILLING_TEST` | ✅ in prod | `true` simulates charges, `false` bills for real. No default |
 | `RATE_LIMIT_ENABLED` | ✅ in prod | Must not be `false`; refuses to start |
 | `TRUST_PROXY_HOPS` | ⚠️ | **Set to `1` behind Coolify/Traefik.** See below |
 | `DAILY_UNITS_PER_SHOP` | | Default `5000` |
@@ -190,7 +191,9 @@ matter.
 Being precise, because "deployed" and "working" are different claims:
 
 **Tested and verified live**
-- 626 tests, typecheck clean
+- 688 tests, typecheck clean
+- Billing: verified over real HTTP (`scripts/check-billing.mjs`) — an exhausted
+  shop is refused with 402 before any model call, and usage survives a restart
 - Rate limiting: verified over real HTTP (`scripts/check-limits.mjs`) —
   including that `/healthz` survives a flood, since a 429 there would make the
   orchestrator kill a healthy container

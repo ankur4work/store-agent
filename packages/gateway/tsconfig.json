@@ -11,6 +11,7 @@
     { "path": "../ucp-client" },
     { "path": "../orchestrator" },
     { "path": "../attribution" },
+    { "path": "../billing" },
     { "path": "../voice" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]

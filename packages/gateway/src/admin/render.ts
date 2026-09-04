@@ -43,6 +43,19 @@ export interface AdminViewModel {
   readonly liftSummary: string;
   readonly recommendedHoldout: number;
   readonly unmatchedOrders: number;
+  /** Absent when billing is not configured on this deployment. */
+  readonly billing?: {
+    readonly planName: string;
+    readonly planId: string;
+    readonly status: string;
+    readonly used: number;
+    readonly included: number;
+    readonly remaining: number;
+    readonly overageMinor: number;
+    readonly verdict: string;
+    /** True while charges are simulated — must be visible, not hidden. */
+    readonly test: boolean;
+  };
   readonly saved?: boolean;
   readonly errors?: readonly string[];
 }
@@ -110,6 +123,93 @@ function renderResults(vm: AdminViewModel): string {
            guessed at.</p>`
         : ''
     }`;
+}
+
+
+/**
+ * The plan card.
+ *
+ * Shows usage against the allowance as a bar, because a number alone does not
+ * convey "you are nearly out". The warning appears at 80% rather than at the
+ * wall: a merchant who discovers the limit by the widget stopping is a
+ * merchant who churns.
+ */
+function renderPlan(b: NonNullable<AdminViewModel['billing']>): string {
+  const pctUsed = b.included === 0 ? 0 : Math.min(100, Math.round((b.used / b.included) * 100));
+  const state =
+    b.verdict === 'frozen' || b.verdict === 'quota_exhausted' || b.verdict === 'cap_reached'
+      ? 'over'
+      : pctUsed >= 80
+        ? 'warn'
+        : 'ok';
+
+  const message: Record<string, string> = {
+    frozen: 'Shopify has paused this shop, usually because of an unpaid invoice.',
+    quota_exhausted: 'You have used every conversation included this month. Upgrade to continue.',
+    cap_reached: 'You have reached the spending limit you approved for this month.',
+    overage: 'Beyond your included conversations; extra ones are billed at $0.06 each.',
+  };
+
+  return `
+  <section class="card">
+    <h2>Plan</h2>
+    <div class="body">
+      <div class="rows">
+        <div class="row"><span class="k">Current plan</span>
+          <span class="v"><span class="chip${state === 'over' ? ' grey' : ''}">${esc(b.planName)}</span></span></div>
+        <div class="row"><span class="k">Resolved conversations</span>
+          <span class="v">${b.used.toLocaleString()} <span class="muted">of ${b.included.toLocaleString()} this month</span></span></div>
+        ${
+          b.overageMinor > 0
+            ? `<div class="row"><span class="k">Additional usage</span>
+               <span class="v">${money(b.overageMinor)}</span></div>`
+            : ''
+        }
+      </div>
+
+      <div style="margin-top:12px;height:6px;border-radius:3px;background:#e3e3e3;overflow:hidden">
+        <div style="height:100%;width:${pctUsed}%;background:${
+          state === 'over' ? '#b98900' : state === 'warn' ? '#b98900' : '#1b3a34'
+        }"></div>
+      </div>
+
+      ${
+        message[b.verdict] === undefined
+          ? ''
+          : `<p class="muted" style="margin-top:12px">${esc(message[b.verdict]!)}</p>`
+      }
+
+      ${
+        b.test
+          ? `<p class="muted" style="margin-top:12px"><strong>Test billing is on.</strong>
+             Subscriptions are simulated and no money changes hands.</p>`
+          : ''
+      }
+
+      <p class="muted" style="margin-top:12px">
+        You are only charged for conversations the assistant resolves on its own. Messages
+        within one conversation are never billed separately, and answers we could not ground
+        are free.
+      </p>
+
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        ${['growth', 'scale', 'plus']
+          .filter((id) => id !== b.planId)
+          .map(
+            (id) =>
+              `<button type="button" class="planBtn" data-plan="${esc(id)}">Switch to ${
+                id[0]!.toUpperCase() + id.slice(1)
+              }</button>`,
+          )
+          .join('')}
+        ${
+          b.planId === 'free'
+            ? ''
+            : '<button type="button" class="planBtn" data-plan="free">Cancel subscription</button>'
+        }
+      </div>
+    </div>
+  </section>`;
 }
 
 export function renderAdmin(vm: AdminViewModel): string {
@@ -220,6 +320,8 @@ export function renderAdmin(vm: AdminViewModel): string {
     </div>
   </section>
 
+  ${vm.billing === undefined ? '' : renderPlan(vm.billing)}
+
   <section class="card">
     <h2>Appearance</h2>
     <p class="hint">The assistant inherits your theme’s fonts. These settings control the rest.</p>
@@ -298,6 +400,32 @@ export function renderAdmin(vm: AdminViewModel): string {
             if (res.ok) location.search = '?shop=' + encodeURIComponent(data.shop) +
               '&host=' + encodeURIComponent(data.host) + '&saved=1';
             else alert((body.errors || ['Could not save.']).join('\\n'));
+          });
+
+          // Plan changes. The merchant is sent to Shopify's own approval
+          // screen — nothing is charged here. It must open at the TOP window:
+          // the admin runs in an iframe and Shopify's confirmation page
+          // refuses to render inside one, so a plain redirect shows a blank
+          // frame and the upgrade silently dies.
+          document.querySelectorAll('.planBtn').forEach(function (btn) {
+            btn.addEventListener('click', async function () {
+              var plan = btn.getAttribute('data-plan');
+              if (plan === 'free' &&
+                  !confirm('Cancel your subscription and return to the Free plan?')) return;
+              btn.disabled = true;
+              var token = '';
+              try { token = await window.shopify.idToken(); } catch (err) {}
+              var res = await fetch('/admin/billing/subscribe', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+                body: JSON.stringify({ plan: plan }),
+              });
+              var body = await res.json().catch(function () { return {}; });
+              btn.disabled = false;
+              if (body.confirmationUrl) window.top.location.href = body.confirmationUrl;
+              else if (res.ok) location.reload();
+              else alert((body.errors || ['Could not change plan.']).join('\\n'));
+            });
           });
         })();
       </script>

@@ -133,6 +133,9 @@ try {
     SHOPIFY_API_KEY: 'k',
     SHOPIFY_API_SECRET: 's',
     SHOPIFY_APP_URL: 'https://example.com',
+    // No default in production — both directions of this mistake are silent.
+    // See scripts/check-billing.mjs for the check that this is enforced.
+    SHOPIFY_BILLING_TEST: 'true',
   });
   const h3 = await waitForHealth();
   check('valid production config starts', h3.ok, true);

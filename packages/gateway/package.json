@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@storeagent/attribution": "*",
+    "@storeagent/billing": "*",
     "@storeagent/grounding": "*",
     "@storeagent/orchestrator": "*",
     "@storeagent/ucp-client": "*",

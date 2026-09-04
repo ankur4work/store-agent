@@ -6,6 +6,8 @@ import { createGateway } from './server.js';
 import { createSqliteStores } from './store/sqlite.js';
 import { SqliteSpendStore } from './limits/budget.js';
 import { RateLimiter } from './limits/limiter.js';
+import { SqliteBillingStore } from './billing/store.js';
+import { BillingService } from './billing/service.js';
 
 // From packages/gateway/dist/src/main.js up to the repo root.
 const envPath = fileURLToPath(new URL('../../../../.env', import.meta.url));
@@ -31,7 +33,37 @@ const sweeper = setInterval(() => {
 }, 60_000);
 sweeper.unref();
 
-const server = createGateway({ config, sessions, shops, nonces, settings, attribution, limiter });
+// Billing needs a shop's access token to talk to the Admin API, so it exists
+// only when the app is actually installable. In demo mode there is no shop to
+// bill and the whole subsystem stays absent rather than half-configured.
+const billingStore = new SqliteBillingStore(db);
+const billing =
+  config.shopify === undefined
+    ? undefined
+    : new BillingService({
+        store: billingStore,
+        apiFor: async (shop) => {
+          const record = await shops.get(shop);
+          if (record === undefined) return undefined;
+          return {
+            shop,
+            accessToken: record.accessToken,
+            returnUrl: `${config.shopify!.appUrl}/admin?shop=${encodeURIComponent(shop)}`,
+            test: config.billingTest,
+          };
+        },
+      });
+
+const server = createGateway({
+  config,
+  sessions,
+  shops,
+  nonces,
+  settings,
+  attribution,
+  limiter,
+  ...(billing === undefined ? {} : { billing }),
+});
 
 server.listen(config.port, () => {
   const mode = config.shopDomain ? `live (${config.shopDomain})` : 'demo (fixture catalog)';
@@ -42,6 +74,15 @@ server.listen(config.port, () => {
   console.log(`  model  : ${config.models.workhorse}`);
   console.log(`  store  : ${dbPath}`);
   console.log(`  install: ${config.shopify ? 'enabled' : 'DISABLED (no Shopify credentials)'}`);
+  console.log(
+    `  billing: ${
+      billing === undefined
+        ? 'disabled (no Shopify credentials)'
+        : config.billingTest
+          ? 'TEST MODE — subscriptions are simulated and you will NOT be paid'
+          : 'live charges'
+    }`,
+  );
   console.log(
     `  limits : ${
       config.rateLimits.enabled

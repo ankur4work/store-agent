@@ -5,7 +5,7 @@ Last updated 2026-09-04.
 **Short answer: the product is built; the business around it is not, and none of
 it has ever touched a real Shopify store.**
 
-626 tests pass and typecheck is clean. That means the code does what the tests
+688 tests pass and typecheck is clean. That means the code does what the tests
 say. It does not mean a merchant can use this yet — the two are different
 claims, and this document keeps them apart.
 
@@ -21,24 +21,35 @@ claims, and this document keeps them apart.
 | **3 — Voice** | Voice lane, semantic endpointing, barge-in | done |
 | **Deploy** | SQLite persistence, Dockerfile, config validation | done |
 | **Hardening** | Rate limiting, persisted daily spend ceilings | done |
+| **Billing** | Plans, Shopify subscriptions, usage, overage, admin card | built, unverified |
 
-Widget is 9.09 KB gzipped against a 15 KB gate. Grounding runs a 28-case eval.
+Widget is 11.7 KB gzipped against a 15 KB gate. Grounding runs a 28-case eval.
 Voice is verified live through a TTS → STT round trip.
 
 ---
 
 ## Remaining to develop
 
-### 1. Billing — nothing exists
+### 1. Billing — **built**
 
-`ARCHITECTURE §13` specifies a pricing table. **No part of it is implemented.**
-There is no Shopify Billing API integration, no plan enforcement, no usage
-counting, no trial handling.
+The `ARCHITECTURE §13` plan catalog, Shopify Billing API integration, usage
+counting, overage with an approved cap, trials, and the merchant-facing plan
+card in the admin.
 
-Concretely: **you cannot charge anyone.** Every install would be free and
-unlimited, and every token would be billed to you. This is the largest single
-gap and it is not a Phase 4/5 nicety — it is the difference between a product
-and a hobby.
+Billed per **resolved conversation**, counted once per session — a 20-message
+conversation costs the same as a one-message one. Ungrounded answers and
+handed-off conversations are free, because billing for those would charge most
+for the turns we are worst at.
+
+**Never verified against Shopify.** No subscription has ever been created, no
+merchant has ever approved one, and no usage record has ever been posted. The
+GraphQL request shapes are pinned by tests against a fake transport, which
+proves we send what we intend — not that Shopify accepts it. Treat the first
+real subscription as a test.
+
+**`SHOPIFY_BILLING_TEST` has no default in production.** Both mistakes are
+silent: left on, merchants subscribe and you are never paid; left off during a
+trial run, real cards are charged.
 
 ### 2. Rate limiting and spend control — **built**
 
@@ -108,6 +119,8 @@ and tested against constructed inputs, but have **never run against Shopify**:
   `meta.ucp-agent.profile` encoding, is still open.
 - **No microphone has ever been used.** Widget capture, VAD, and playback are
   unexercised.
+- **No subscription has ever been created.** Billing talks to Shopify's
+  GraphQL Admin API, and not one call has been made against a real store.
 - **The Dockerfile has never been built** — Docker is not installed in the
   development environment.
 
@@ -121,9 +134,9 @@ and is exactly why it should happen before any merchant sees this.
 1. **Install on a development store.** Cheapest way to convert five unknowns
    into facts, and it gates everything else.
 2. ~~Rate limiting~~ — **done** (2026-09-04).
-3. **Billing**, before any merchant could plausibly sign up.
+3. ~~Billing~~ — **done** (2026-09-04), but unverified against Shopify.
 4. **Observability**, before there is traffic worth watching.
 5. Phase 4, then Phase 5.
 
-Steps 3–4 are each small next to what is already built. Step 1 is the one that
+Step 4 is small next to what is already built. Step 1 is the one that
 tells you whether the rest of the plan survives contact with reality.

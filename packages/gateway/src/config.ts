@@ -28,6 +28,14 @@ export interface GatewayConfig {
    */
   readonly shopify: ShopifyAppConfig | undefined;
   readonly rateLimits: RateLimitOptions;
+  /**
+   * Create Shopify subscriptions as test charges (no money moves).
+   *
+   * Both mistakes here are silent, which is why production demands an explicit
+   * value: left true, merchants subscribe and we are never paid while
+   * everything looks healthy; set false while testing, real cards are charged.
+   */
+  readonly billingTest: boolean;
 }
 
 /** Load `.env` if present. Real deployments use the process environment. */
@@ -61,6 +69,11 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
   const shopify = loadShopifyConfig(env);
   const rateLimits = loadRateLimits(env);
 
+  // Defaults to test mode: of the two silent failures, never being paid is
+  // recoverable and charging a real card by accident is not.
+  const billingTestRaw = env['SHOPIFY_BILLING_TEST'];
+  const billingTest = (billingTestRaw ?? 'true') !== 'false';
+
   // Fail at startup rather than in front of a merchant. Each of these is a
   // configuration mistake that is invisible in development and damaging in
   // production, so the check only fires when NODE_ENV=production.
@@ -81,6 +94,16 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       // Defaulting silently would put the database on the container's
       // ephemeral disk, which loses every install on the next deploy.
       problems.push('STOREAGENT_DB must point at a path on a mounted volume');
+    }
+    if (billingTestRaw === undefined && shopify !== undefined) {
+      // Not defaulted in production. Silently shipping test mode means
+      // merchants subscribe and we are never paid, and nothing looks broken;
+      // silently shipping live mode charges real cards during a trial run.
+      // Neither is a decision to make by omission.
+      problems.push(
+        'SHOPIFY_BILLING_TEST must be set explicitly in production — ' +
+          '"true" to simulate charges, "false" to bill merchants for real',
+      );
     }
     if (!rateLimits.enabled) {
       // /api/chat is reachable directly, so ALLOWED_ORIGINS — a browser-side
@@ -119,6 +142,7 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     allowedOrigins,
     shopify,
     rateLimits,
+    billingTest,
   };
 }
 

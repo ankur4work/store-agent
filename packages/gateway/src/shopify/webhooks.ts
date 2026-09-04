@@ -19,6 +19,7 @@ export type WebhookTopic =
   | 'customers/redact'
   | 'customers/data_request'
   | 'orders/create'
+  | 'app_subscriptions/update'
   | string;
 
 export interface WebhookRequest {
@@ -33,6 +34,10 @@ export interface WebhookDeps {
   readonly shops: ShopStore;
   /** Called for orders/create — attribution reconciliation (Phase 2). */
   readonly onOrder?: (shop: string, payload: unknown) => Promise<void> | void;
+  /** Called for app_subscriptions/update — billing state (Phase 5). */
+  readonly onSubscription?: (shop: string, payload: unknown) => Promise<void> | void;
+  /** Called for app/uninstalled and shop/redact, so billing state goes too. */
+  readonly onPurge?: (shop: string) => Promise<void> | void;
   readonly log?: (line: string) => void;
 }
 
@@ -68,8 +73,10 @@ export async function handleWebhook(req: WebhookRequest, deps: WebhookDeps): Pro
       return { status: 200, body: { ok: true } };
 
     case 'shop/redact':
-      // Sent 48h after uninstall. Everything for this shop must be destroyed.
+      // Sent 48h after uninstall. Everything for this shop must be destroyed —
+      // including billing history, which lives outside ShopStore.
       await deps.shops.purge(shop);
+      await deps.onPurge?.(shop);
       deps.log?.(`[webhook] ${shop} redacted`);
       return { status: 200, body: { ok: true } };
 
@@ -90,6 +97,15 @@ export async function handleWebhook(req: WebhookRequest, deps: WebhookDeps): Pro
       await deps.onOrder?.(shop, payload);
       return { status: 200, body: { ok: true } };
 
+    case 'app_subscriptions/update':
+      // Shopify is the authority on subscription state, and this is how we
+      // hear about a merchant approving, declining, cancelling, or being
+      // frozen for non-payment. Without it, local state drifts silently: we
+      // would keep serving a cancelled shop, or keep a frozen one blocked
+      // after they pay.
+      await deps.onSubscription?.(shop, payload);
+      return { status: 200, body: { ok: true } };
+
     default:
       // Unknown topics get a 200. A non-2xx makes Shopify retry and eventually
       // disable the subscription for a topic we simply do not handle yet.
@@ -104,4 +120,29 @@ export const REQUIRED_TOPICS: readonly WebhookTopic[] = [
   'shop/redact',
   'customers/redact',
   'customers/data_request',
+  // Not mandated by review, but billing state is wrong without it.
+  'app_subscriptions/update',
 ];
+
+/**
+ * Pull subscription state out of an `app_subscriptions/update` payload.
+ *
+ * Shopify nests it under `app_subscription`. The admin GraphQL id is the join
+ * key back to the subscription we created.
+ */
+export function parseSubscriptionPayload(payload: unknown): {
+  subscriptionId: string | undefined;
+  name: string | undefined;
+  status: string | undefined;
+} {
+  const root = (payload ?? {}) as Record<string, unknown>;
+  const sub = (root['app_subscription'] ?? root) as Record<string, unknown>;
+  const id = sub['admin_graphql_api_id'] ?? sub['id'];
+  const name = sub['name'];
+  const status = sub['status'];
+  return {
+    subscriptionId: id === undefined || id === null ? undefined : String(id),
+    name: typeof name === 'string' ? name : undefined,
+    status: typeof status === 'string' ? status : undefined,
+  };
+}

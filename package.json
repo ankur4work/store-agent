@@ -9,15 +9,16 @@
     "packages/*"
   ],
   "scripts": {
+    "bench": "npm run bench --workspace @storeagent/ucp-client",
     "build": "tsc --build",
-    "test": "npm run test --workspaces --if-present",
-    "typecheck": "tsc --build",
-    "clean": "tsc --build --clean",
+    "check-billing": "npm run build && node scripts/check-billing.mjs",
     "check-deploy": "npm run build && node scripts/check-deploy.mjs",
     "check-limits": "npm run build && node scripts/check-limits.mjs",
     "check-secrets": "node scripts/check-secrets.mjs",
     "check-secrets:all": "node scripts/check-secrets.mjs --all",
-    "bench": "npm run bench --workspace @storeagent/ucp-client"
+    "clean": "tsc --build --clean",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "tsc --build"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

@@ -701,8 +701,21 @@ textarea::placeholder{color:var(--muted)}
     stream(text);
   }
 
+  // Set when the server returns 402 — the merchant is out of plan allowance.
+  // Deliberately NOT part of persisted state: if they upgrade mid-session the
+  // shopper should recover on the next page load, not stay stuck.
+  var suspended = false;
+
   function stream(text, isVoice) {
     var bubble = addMsg('bot', '');
+
+    if (suspended) {
+      bubble.textContent =
+        'I can’t answer right now, but the team can help — leave an email and someone will follow up.';
+      els.status.textContent = 'Ready';
+      return;
+    }
+
     bubble.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
     els.status.textContent = 'Thinking…';
     skeletons(3);
@@ -740,6 +753,25 @@ textarea::placeholder{color:var(--muted)}
       }),
     })
       .then(function (res) {
+        // 402 means the merchant is out of plan allowance, or their shop is
+        // frozen. That is between us and the merchant — the shopper did
+        // nothing wrong and must never see a billing message, a plan name, or
+        // a number. So the assistant simply steps aside and points at the
+        // channel that still works.
+        if (res.status === 402) {
+          els.rail.hidden = true;
+          bubble.textContent =
+            'I can’t answer right now, but the team can help — leave an email and someone will follow up.';
+          suspended = true;
+          return;
+        }
+        // 429 is the rate limiter, which is temporary by definition, so it
+        // gets a "try shortly" rather than a dead end.
+        if (res.status === 429) {
+          els.rail.hidden = true;
+          bubble.textContent = 'A lot of people are asking at once. Try that again in a few seconds.';
+          return;
+        }
         if (!res.ok || !res.body) throw new Error('http ' + res.status);
         var reader = res.body.getReader();
         var dec = new TextDecoder();

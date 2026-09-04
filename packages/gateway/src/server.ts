@@ -9,9 +9,11 @@ import type { GatewayConfig } from './config.js';
 import { MemorySessionStore, newSession, type SessionStore } from './sessions.js';
 import { createToolExecutor } from './tool-executor.js';
 import { RateLimiter } from './limits/limiter.js';
+import { BillingService } from './billing/service.js';
+import { PLANS, PLAN_ORDER, isPlanId } from '@storeagent/billing';
 import { DEMO_CATALOG } from './catalog-fixture.js';
 import { beginInstall, completeInstall } from './shopify/oauth.js';
-import { handleWebhook } from './shopify/webhooks.js';
+import { handleWebhook, parseSubscriptionPayload } from './shopify/webhooks.js';
 import {
   MemoryNonceStore,
   MemoryShopStore,
@@ -82,6 +84,8 @@ export interface GatewayDeps {
   readonly attribution?: AttributionStore;
   /** Injectable so tests can supply a persisted spend store. */
   readonly limiter?: RateLimiter;
+  /** Absent in demo mode, where there is no shop to bill. */
+  readonly billing?: BillingService;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
@@ -92,6 +96,7 @@ export function createGateway(deps: GatewayDeps): Server {
   const settings = deps.settings ?? new MemorySettingsStore();
   const attribution = deps.attribution ?? new MemoryAttributionStore();
   const limiter = deps.limiter ?? new RateLimiter(config.rateLimits);
+  const billing = deps.billing;
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -280,6 +285,15 @@ export function createGateway(deps: GatewayDeps): Server {
           apiSecret: app.apiSecret,
           shops,
           log: (l) => console.log(l),
+          // Billing data is not in ShopStore, so redaction must reach it too.
+          onPurge: (shopDomain) => billing?.purge(shopDomain),
+          // Shopify is the authority on subscription state. Without this,
+          // local state drifts: we would keep serving a cancelled shop, or
+          // keep a frozen one blocked after they have paid.
+          onSubscription: async (shopDomain, payload) => {
+            const parsed = parseSubscriptionPayload(payload);
+            await billing?.applyWebhook(shopDomain, parsed);
+          },
           // Server-side truth for revenue. Joined to a session by cart token
           // where the agent created the cart; the pixel covers everything else.
           onOrder: async (shopDomain, payload) => {
@@ -352,9 +366,82 @@ export function createGateway(deps: GatewayDeps): Server {
         liftSummary: describeLift(lift),
         recommendedHoldout: recommendedHoldout(totals.exposed.sessions + totals.holdout.sessions),
         unmatchedOrders: await attribution.unmatchedCount(shop),
+        // Read straight from the store rather than reconciling with Shopify:
+        // the page must render fast, and a network call on the critical path
+        // would block it. /admin/billing does the reconciliation.
+        ...(billing === undefined ? {} : { billing: billing.summary(shop) }),
         saved: url.searchParams.get('saved') === '1',
       };
       html(res, 200, renderAdmin(vm), shop);
+      return;
+    }
+
+    // --- billing --------------------------------------------------------
+
+    if (url.pathname === '/admin/billing' && req.method === 'GET') {
+      const verified = verifySessionToken(bearerToken(header(req, 'authorization')), auth);
+      if (!verified.ok) {
+        json(res, 401, { errors: ['Your session expired. Reload the page and try again.'] });
+        return;
+      }
+      if (billing === undefined) {
+        json(res, 503, { errors: ['Billing is not configured on this deployment.'] });
+        return;
+      }
+      // Reconcile against Shopify rather than trusting our row: webhooks get
+      // missed, and a merchant looking at a stale plan is a support ticket.
+      await billing.reconcile(verified.shop).catch(() => undefined);
+      json(res, 200, { billing: billing.summary(verified.shop), plans: PLAN_ORDER.map((id) => PLANS[id]) });
+      return;
+    }
+
+    if (url.pathname === '/admin/billing/subscribe' && req.method === 'POST') {
+      const verified = verifySessionToken(bearerToken(header(req, 'authorization')), auth);
+      if (!verified.ok) {
+        json(res, 401, { errors: ['Your session expired. Reload the page and try again.'] });
+        return;
+      }
+      if (billing === undefined || config.shopify === undefined) {
+        json(res, 503, { errors: ['Billing is not configured on this deployment.'] });
+        return;
+      }
+
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(await readBody(req, 4 * 1024)) as Record<string, unknown>;
+      } catch {
+        json(res, 400, { errors: ['Malformed request.'] });
+        return;
+      }
+
+      const requested = payload['plan'];
+      if (!isPlanId(requested)) {
+        json(res, 422, { errors: ['Unknown plan.'] });
+        return;
+      }
+      if (requested === 'free') {
+        // Downgrading is a cancellation, not a subscription. Creating a
+        // zero-value subscription would send the merchant to an approval
+        // screen to approve nothing.
+        await billing.cancel(verified.shop);
+        json(res, 200, { ok: true, plan: 'free' });
+        return;
+      }
+
+      try {
+        // The shop comes from the VERIFIED token, never the payload — a
+        // merchant must not be able to start a subscription on another store.
+        const confirmationUrl = await billing.beginUpgrade(
+          verified.shop,
+          requested,
+          `${config.shopify.appUrl}/admin?shop=${encodeURIComponent(verified.shop)}&billing=return`,
+        );
+        // The merchant approves on Shopify's screen; nothing is charged here.
+        json(res, 200, { confirmationUrl });
+      } catch (err) {
+        console.error('[billing] subscribe failed', err instanceof Error ? err.message : err);
+        json(res, 502, { errors: ['Could not start the subscription. Please try again.'] });
+      }
       return;
     }
 
@@ -502,6 +589,27 @@ export function createGateway(deps: GatewayDeps): Server {
     const session =
       (await sessions.get(sessionId)) ?? newSession(sessionId, config.shopDomain ?? 'demo.local');
 
+    // Entitlement is checked BEFORE any model work: a shop past its allowance
+    // must cost nothing to refuse. Checking afterwards would mean paying for
+    // the call and then declining to bill for it.
+    //
+    // 402 rather than 429: this is not "too fast", it is "not entitled", and
+    // the widget renders a different, non-alarming message for each. The
+    // `reason` is merchant-facing text and is never shown to a shopper.
+    if (billing !== undefined) {
+      const entitlement = billing.check(session.shopDomain);
+      if (!entitlement.allowed) {
+        json(res, 402, {
+          error: 'billing_required',
+          verdict: entitlement.verdict,
+          plan: entitlement.plan.id,
+          used: entitlement.used,
+          included: entitlement.included,
+        });
+        return;
+      }
+    }
+
     // SSE. Headers go out immediately so the client can start rendering state
     // before the model produces anything.
     res.writeHead(200, {
@@ -616,6 +724,19 @@ export function createGateway(deps: GatewayDeps): Server {
         ms: Date.now() - startedAt,
         usage: result.usage,
       });
+
+      // Count the conversation only now that it actually resolved. A turn we
+      // could not ground, or handed to a human, is not a resolution and is
+      // free — billing for those would charge most for the turns we are worst
+      // at. Idempotent per session, so a long conversation still bills once.
+      if (billing !== undefined) {
+        void billing.settle(session.shopDomain, {
+          sessionId,
+          grounded: result.verdict.ok,
+          handedOff: result.handedOff,
+          arm: await attribution.armOf(session.shopDomain, sessionId),
+        });
+      }
 
       session.history = [
         ...session.history,
