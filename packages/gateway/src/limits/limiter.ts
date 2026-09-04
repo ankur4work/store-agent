@@ -80,8 +80,16 @@ const DEFAULT_COST: RouteCost = { tokens: 1, units: 0 };
  * attribution. Shopify does retry, but dropping order webhooks corrupts the
  * numbers the whole product is sold on. They are HMAC-verified and cheap to
  * serve, so the bucket buys us nothing here.
+ *
+ * `/metrics`, `/api/slo` — **monitoring must not be the first casualty of the
+ * incident it exists to show you.** A scraper polls on a fixed interval from
+ * one address; under an attack that same address is also serving the flood, so
+ * a shared bucket blacks out the dashboard exactly when it is needed. Found by
+ * `scripts/check-observability.mjs`, where a synthetic flood throttled the
+ * scrape that was measuring it. Both routes require a bearer token, so
+ * exempting them opens nothing.
  */
-const EXEMPT = /^\/healthz$|^\/shopify\/webhooks$/;
+const EXEMPT = /^\/healthz$|^\/shopify\/webhooks$|^\/metrics$|^\/api\/slo$/;
 
 export interface RateLimitOptions {
   readonly enabled: boolean;

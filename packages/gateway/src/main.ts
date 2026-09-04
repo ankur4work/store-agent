@@ -8,6 +8,8 @@ import { SqliteSpendStore } from './limits/budget.js';
 import { RateLimiter } from './limits/limiter.js';
 import { SqliteBillingStore } from './billing/store.js';
 import { BillingService } from './billing/service.js';
+import { Telemetry } from './observability/telemetry.js';
+import { createLogger } from './observability/logger.js';
 
 // From packages/gateway/dist/src/main.js up to the repo root.
 const envPath = fileURLToPath(new URL('../../../../.env', import.meta.url));
@@ -33,6 +35,9 @@ const sweeper = setInterval(() => {
 }, 60_000);
 sweeper.unref();
 
+const telemetry = new Telemetry();
+const logger = createLogger(config.production, config.logLevel);
+
 // Billing needs a shop's access token to talk to the Admin API, so it exists
 // only when the app is actually installable. In demo mode there is no shop to
 // bill and the whole subsystem stays absent rather than half-configured.
@@ -42,6 +47,7 @@ const billing =
     ? undefined
     : new BillingService({
         store: billingStore,
+        log: logger,
         apiFor: async (shop) => {
           const record = await shops.get(shop);
           if (record === undefined) return undefined;
@@ -56,6 +62,8 @@ const billing =
 
 const server = createGateway({
   config,
+  telemetry,
+  logger,
   sessions,
   shops,
   nonces,
@@ -90,6 +98,9 @@ server.listen(config.port, () => {
           `proxy hops ${config.rateLimits.trustProxyHops}`
         : 'DISABLED'
     }`,
+  );
+  console.log(
+    `  metrics: ${config.metricsToken === undefined ? 'DISABLED (set METRICS_TOKEN)' : '/metrics, /api/slo'}`,
   );
   console.log(`  demo   : http://localhost:${config.port}/`);
   console.log(`  health : http://localhost:${config.port}/healthz\n`);

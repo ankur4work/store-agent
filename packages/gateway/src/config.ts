@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { DEFAULT_RATE_LIMITS, type RateLimitOptions } from './limits/limiter.js';
+import type { LogLevel } from './observability/logger.js';
 
 export interface ShopifyAppConfig {
   readonly apiKey: string;
@@ -36,6 +37,15 @@ export interface GatewayConfig {
    * everything looks healthy; set false while testing, real cards are charged.
    */
   readonly billingTest: boolean;
+  /**
+   * Bearer token for /metrics and /api/slo.
+   *
+   * Absent disables both routes entirely rather than serving them openly —
+   * they expose conversation volumes, error rates and per-shop token spend, so
+   * forgetting to configure a token must fail closed.
+   */
+  readonly metricsToken: string | undefined;
+  readonly logLevel: LogLevel | undefined;
 }
 
 /** Load `.env` if present. Real deployments use the process environment. */
@@ -115,6 +125,17 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
       throw new Error(`Refusing to start in production:\n  - ${problems.join('\n  - ')}`);
     }
 
+    if (emptyToUndefined(env['METRICS_TOKEN']) === undefined) {
+      // Not fatal — the app runs fine unobserved. But the §12 gates
+      // (validator failure < 1%, p50 TTFT < 400ms) cannot be checked at all
+      // without a scrape, so shipping without this means flying blind on the
+      // product's own promises.
+      console.warn(
+        '[config] METRICS_TOKEN is not set, so /metrics and /api/slo are disabled. ' +
+          'The grounding and latency gates cannot be measured in production without them.',
+      );
+    }
+
     // A warning rather than a failure: running without a proxy is legitimate,
     // but behind one this is silently wrong in a way that is hard to notice.
     if (rateLimits.enabled && rateLimits.trustProxyHops === 0) {
@@ -143,7 +164,20 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     shopify,
     rateLimits,
     billingTest,
+    metricsToken: emptyToUndefined(env['METRICS_TOKEN']),
+    logLevel: parseLogLevel(env['LOG_LEVEL']),
   };
+}
+
+function emptyToUndefined(v: string | undefined): string | undefined {
+  return v === undefined || v.trim() === '' ? undefined : v.trim();
+}
+
+function parseLogLevel(v: string | undefined): LogLevel | undefined {
+  const level = v?.trim().toLowerCase();
+  return level === 'debug' || level === 'info' || level === 'warn' || level === 'error'
+    ? level
+    : undefined;
 }
 
 function loadRateLimits(env: Record<string, string | undefined>): RateLimitOptions {

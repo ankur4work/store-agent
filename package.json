@@ -14,6 +14,7 @@
     "check-billing": "npm run build && node scripts/check-billing.mjs",
     "check-deploy": "npm run build && node scripts/check-deploy.mjs",
     "check-limits": "npm run build && node scripts/check-limits.mjs",
+    "check-observability": "npm run build && node scripts/check-observability.mjs",
     "check-secrets": "node scripts/check-secrets.mjs",
     "check-secrets:all": "node scripts/check-secrets.mjs --all",
     "clean": "tsc --build --clean",

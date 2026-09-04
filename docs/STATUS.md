@@ -5,7 +5,7 @@ Last updated 2026-09-04.
 **Short answer: the product is built; the business around it is not, and none of
 it has ever touched a real Shopify store.**
 
-688 tests pass and typecheck is clean. That means the code does what the tests
+725 tests pass and typecheck is clean. That means the code does what the tests
 say. It does not mean a merchant can use this yet — the two are different
 claims, and this document keeps them apart.
 
@@ -22,6 +22,7 @@ claims, and this document keeps them apart.
 | **Deploy** | SQLite persistence, Dockerfile, config validation | done |
 | **Hardening** | Rate limiting, persisted daily spend ceilings | done |
 | **Billing** | Plans, Shopify subscriptions, usage, overage, admin card | built, unverified |
+| **Observability** | Metrics, SLO gates, redacting structured logs | done |
 
 Widget is 11.7 KB gzipped against a 15 KB gate. Grounding runs a 28-case eval.
 Voice is verified live through a TTS → STT round trip.
@@ -70,14 +71,24 @@ Still open: `ARCHITECTURE §7.4`'s budget *ladder* — degrading to a cheaper
 model as a shop approaches its ceiling, rather than refusing outright — is not
 built. Today the ceiling is a hard stop.
 
-### 3. Observability — nothing beyond stdout
+### 3. Observability — **built**
 
-No metrics, no error tracking, no tracing. `/healthz` reports liveness and
-nothing else. A grounding regression, a rising validator failure rate, or a
-latency cliff would all be invisible until a merchant complained.
+Prometheus metrics at `/metrics`, the §12 gates as JSON at `/api/slo`, and a
+structured logger. Both routes need a bearer token and are disabled entirely
+without one.
 
-The `validator failure < 1%` gate in §12 **cannot be measured** without this, so
-Phase 1's own gate is currently unverifiable in production.
+**The §12 gates are now measurable**, which they were not before: SLO
+thresholds are histogram *bucket edges*, so "what fraction of turns were under
+400 ms" is a subtraction of two exact counters rather than an interpolation.
+Gates read `unknown` below 100 samples — "no data" and "failing" must not look
+alike on a dashboard.
+
+**Shopper messages are never logged.** Redaction is enforced in the logger by
+field name rather than left to call sites, because relying on every future
+call site to remember is how it leaks.
+
+Still open: no external error tracking (Sentry or similar), no tracing, and no
+alerting — `/api/slo` is a thing to poll, not a thing that pages you.
 
 ### 4. Phase 4 — Scale (unstarted)
 
@@ -135,8 +146,8 @@ and is exactly why it should happen before any merchant sees this.
    into facts, and it gates everything else.
 2. ~~Rate limiting~~ — **done** (2026-09-04).
 3. ~~Billing~~ — **done** (2026-09-04), but unverified against Shopify.
-4. **Observability**, before there is traffic worth watching.
+4. ~~Observability~~ — **done** (2026-09-04).
 5. Phase 4, then Phase 5.
 
-Step 4 is small next to what is already built. Step 1 is the one that
+Everything on this list except Phase 4/5 is now built. Step 1 is the one that
 tells you whether the rest of the plan survives contact with reality.

@@ -173,6 +173,14 @@ describe('route costs', () => {
     expect(isExempt('/shopify/webhooks')).toBe(true);
   });
 
+  it('exempts the metrics endpoints', () => {
+    // Monitoring must not be the first casualty of the incident it exists to
+    // show you: under an attack the scraper shares the attacker's bucket.
+    // Both routes require a bearer token, so this opens nothing.
+    expect(isExempt('/metrics')).toBe(true);
+    expect(isExempt('/api/slo')).toBe(true);
+  });
+
   it('does not exempt anything else', () => {
     for (const p of ['/api/chat', '/api/pixel', '/admin/settings', '/shopify/auth', '/']) {
       expect(isExempt(p)).toBe(false);

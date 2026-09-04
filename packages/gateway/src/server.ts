@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +10,8 @@ import { MemorySessionStore, newSession, type SessionStore } from './sessions.js
 import { createToolExecutor } from './tool-executor.js';
 import { RateLimiter } from './limits/limiter.js';
 import { BillingService } from './billing/service.js';
+import { Telemetry } from './observability/telemetry.js';
+import { createLogger, type Logger } from './observability/logger.js';
 import { PLANS, PLAN_ORDER, isPlanId } from '@storeagent/billing';
 import { DEMO_CATALOG } from './catalog-fixture.js';
 import { beginInstall, completeInstall } from './shopify/oauth.js';
@@ -86,6 +88,8 @@ export interface GatewayDeps {
   readonly limiter?: RateLimiter;
   /** Absent in demo mode, where there is no shop to bill. */
   readonly billing?: BillingService;
+  readonly telemetry?: Telemetry;
+  readonly logger?: Logger;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
@@ -97,6 +101,9 @@ export function createGateway(deps: GatewayDeps): Server {
   const attribution = deps.attribution ?? new MemoryAttributionStore();
   const limiter = deps.limiter ?? new RateLimiter(config.rateLimits);
   const billing = deps.billing;
+  const metrics = deps.telemetry ?? new Telemetry();
+  const log = deps.logger ?? createLogger(config.production);
+  const startedAt = Date.now();
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -112,7 +119,8 @@ export function createGateway(deps: GatewayDeps): Server {
   const server = createServer((req, res) => {
     void handle(req, res).catch((err: unknown) => {
       // Never leak a stack trace to a storefront.
-      console.error('[gateway] unhandled', err);
+      metrics.errors.inc({ kind: 'unhandled' });
+      log.error('unhandled', { err });
       if (!res.headersSent) json(res, 500, { error: 'internal_error' });
       else res.end();
     });
@@ -139,6 +147,7 @@ export function createGateway(deps: GatewayDeps): Server {
     const limitShop = url.searchParams.get('shop') ?? config.shopDomain;
     const decision = limiter.check(req, url.pathname, limitShop);
     if (!decision.allowed) {
+      metrics.rateLimited.inc({ reason: decision.reason ?? 'unknown' });
       res.setHeader('retry-after', String(decision.retryAfterSec));
       json(res, 429, {
         error: 'rate_limited',
@@ -158,6 +167,61 @@ export function createGateway(deps: GatewayDeps): Server {
         // Never echo the secret — only whether install is wired up.
         install: config.shopify === undefined ? 'disabled' : 'ready',
         installedShops: await shops.count(),
+      });
+      return;
+    }
+
+    /**
+     * Prometheus scrape endpoint.
+     *
+     * **Requires a bearer token**, unlike /healthz. This is not a liveness
+     * probe: it exposes conversation volumes, error rates and per-shop token
+     * spend — a competitive read on the business and, in aggregate, on each
+     * merchant. When no token is configured the route is disabled outright
+     * rather than served openly, so forgetting to set one fails closed.
+     */
+    if (url.pathname === '/metrics' && req.method === 'GET') {
+      const expected = config.metricsToken;
+      if (expected === undefined) {
+        json(res, 404, { error: 'not_found' });
+        return;
+      }
+      if (!timingSafeEqualStr(bearerToken(header(req, 'authorization')) ?? '', expected)) {
+        res.setHeader('www-authenticate', 'Bearer');
+        json(res, 401, { error: 'unauthorized' });
+        return;
+      }
+
+      metrics.sample(Date.now(), startedAt);
+      metrics.sessions.set(await sessions.size());
+      metrics.installs.set(await shops.count());
+      metrics.trackedClients.set(limiter.trackedClients);
+
+      const body = metrics.render();
+      res.writeHead(200, {
+        'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(body);
+      return;
+    }
+
+    /** The §12 gates as JSON, for a human or an alert rule. */
+    if (url.pathname === '/api/slo' && req.method === 'GET') {
+      const expected = config.metricsToken;
+      if (expected === undefined || !timingSafeEqualStr(bearerToken(header(req, 'authorization')) ?? '', expected)) {
+        json(res, expected === undefined ? 404 : 401, { error: 'unauthorized' });
+        return;
+      }
+      const g = metrics.gates();
+      json(res, 200, {
+        ...g,
+        ttftP50Ms: metrics.ttft.quantile(0.5) ?? null,
+        ttftP95Ms: metrics.ttft.quantile(0.95) ?? null,
+        turnP50Ms: metrics.turnDuration.quantile(0.5) ?? null,
+        tripwireAborts: metrics.tripwireAborts.total(),
+        errors: metrics.errors.total(),
+        uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       });
       return;
     }
@@ -261,11 +325,12 @@ export function createGateway(deps: GatewayDeps): Server {
     if (url.pathname === '/shopify/auth/callback' && req.method === 'GET') {
       const done = await completeInstall(url.searchParams, oauthDeps);
       if (!done.ok) {
-        console.warn(`[shopify] install rejected: ${done.reason}`);
+        metrics.errors.inc({ kind: 'install_rejected' });
+        log.warn('install_rejected', { reason: done.reason });
         json(res, done.status, { error: 'install_failed', detail: done.reason });
         return;
       }
-      console.log(`[shopify] installed ${done.shop.shop} (scopes: ${done.shop.scopes})`);
+      log.info('installed', { shop: done.shop.shop, scopes: done.shop.scopes });
       res.writeHead(302, { location: done.redirectTo }).end();
       return;
     }
@@ -284,7 +349,7 @@ export function createGateway(deps: GatewayDeps): Server {
         {
           apiSecret: app.apiSecret,
           shops,
-          log: (l) => console.log(l),
+          log: (l) => log.info('webhook', { detail: l }),
           // Billing data is not in ShopStore, so redaction must reach it too.
           onPurge: (shopDomain) => billing?.purge(shopDomain),
           // Shopify is the authority on subscription state. Without this,
@@ -439,7 +504,8 @@ export function createGateway(deps: GatewayDeps): Server {
         // The merchant approves on Shopify's screen; nothing is charged here.
         json(res, 200, { confirmationUrl });
       } catch (err) {
-        console.error('[billing] subscribe failed', err instanceof Error ? err.message : err);
+        metrics.errors.inc({ kind: 'billing_subscribe' });
+        log.error('billing_subscribe_failed', { shop: verified.shop, err });
         json(res, 502, { errors: ['Could not start the subscription. Please try again.'] });
       }
       return;
@@ -677,7 +743,8 @@ export function createGateway(deps: GatewayDeps): Server {
       onEvent: (e) => send('trace', e),
     });
 
-    const startedAt = Date.now();
+    const startedTurnAt = Date.now();
+    let firstDeltaAt: number | undefined;
     try {
       const result = await orchestrator.runTurn(
         {
@@ -693,6 +760,14 @@ export function createGateway(deps: GatewayDeps): Server {
         {
           signal: ctl.signal,
           onReplyDelta: (text) => {
+            // Time to FIRST token is the number §12 gates on — the moment the
+            // shopper stops looking at a blank panel. Recorded unlabelled:
+            // this is a system property, and a per-shop label would multiply
+            // the series for no question anyone asks.
+            if (firstDeltaAt === undefined) {
+              firstDeltaAt = Date.now();
+              metrics.ttft.observe(firstDeltaAt - startedTurnAt);
+            }
             send('delta', { text });
             // Voice turns get the same validated text, chunked into whole
             // utterances. The chunker runs HERE rather than in the widget so
@@ -721,8 +796,41 @@ export function createGateway(deps: GatewayDeps): Server {
         escalated: result.escalated,
         grounded: result.verdict.ok,
         attempts: result.attempts,
-        ms: Date.now() - startedAt,
+        ms: Date.now() - startedTurnAt,
         usage: result.usage,
+      });
+
+      // The product's core claim, made measurable. Without this, a grounding
+      // regression would be invisible until a merchant noticed a wrong price.
+      metrics.turns.inc({ shop: session.shopDomain, ok: String(result.verdict.ok) });
+      metrics.turnDuration.observe(Date.now() - startedTurnAt);
+      if (result.events.some((e) => e.type === 'stream_aborted')) {
+        metrics.tripwireAborts.inc({ shop: session.shopDomain });
+      }
+      if (result.escalated) metrics.escalations.inc({ shop: session.shopDomain });
+      if (result.usage !== undefined) {
+        const u = result.usage as Record<string, unknown>;
+        for (const [key, kind] of [
+          ['inputTokens', 'input'],
+          ['outputTokens', 'output'],
+          ['cachedInputTokens', 'cached'],
+        ] as const) {
+          const n = Number(u[key] ?? 0);
+          if (Number.isFinite(n) && n > 0) {
+            metrics.tokens.inc({ shop: session.shopDomain, kind }, n);
+          }
+        }
+      }
+
+      // Never the message or the reply — see observability/logger.ts.
+      log.info('turn_complete', {
+        shop: session.shopDomain,
+        sessionId,
+        grounded: result.verdict.ok,
+        escalated: result.escalated,
+        attempts: result.attempts,
+        ttftMs: firstDeltaAt === undefined ? null : firstDeltaAt - startedTurnAt,
+        ms: Date.now() - startedTurnAt,
       });
 
       // Count the conversation only now that it actually resolved. A turn we
@@ -746,7 +854,10 @@ export function createGateway(deps: GatewayDeps): Server {
       await sessions.put(session);
     } catch (err) {
       if (!ctl.signal.aborted) {
-        console.error('[gateway] turn failed', err);
+        // Labelled by CLASS, never by message: an error string can carry
+        // upstream detail, and an unbounded label set is a memory leak.
+        metrics.errors.inc({ kind: err instanceof Error ? err.name : 'unknown' });
+        log.error('turn_failed', { shop: session.shopDomain, sessionId, err });
         send('error', { message: 'Something went wrong on our side.' });
       }
     } finally {
@@ -874,6 +985,21 @@ function cors(res: ServerResponse, origin: string | undefined, allowed: readonly
   res.setHeader('access-control-allow-headers', 'content-type');
   res.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS');
   res.setHeader('vary', 'origin');
+}
+
+/**
+ * Constant-time string compare for the metrics token.
+ *
+ * A plain `===` leaks the token a character at a time to anyone who can
+ * measure response timing. Lengths are compared first because timingSafeEqual
+ * throws on a mismatch — that check is not itself constant-time, but token
+ * *length* is not the secret.
+ */
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length || ab.length === 0) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {

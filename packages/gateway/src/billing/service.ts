@@ -34,11 +34,18 @@ import {
  * model call and then declining to bill for it, which is the worst of both.
  */
 
+/** Just enough of `Logger` to log a failure, so tests need not build one. */
+export interface BillingLogger {
+  error(event: string, fields?: Record<string, unknown>): void;
+}
+
 export interface BillingServiceDeps {
   readonly store: SqliteBillingStore;
   /** Absent in demo mode, where there is no shop to bill. */
   readonly apiFor: (shop: string) => Promise<BillingApiConfig | undefined>;
   readonly doFetch?: typeof globalThis.fetch;
+  /** Redacting logger. Falls back to stderr so a failure is never silent. */
+  readonly log?: BillingLogger;
 }
 
 export class BillingService {
@@ -122,7 +129,10 @@ export class BillingService {
       // If Shopify refused because the cap is reached, the next `check` returns
       // `cap_reached` on its own — nothing else to do here.
     } catch (err) {
-      console.error('[billing] settle failed', err instanceof Error ? err.message : err);
+      // Through the redacting logger: an upstream error body could otherwise
+      // carry request detail into the logs.
+      if (this.deps.log !== undefined) this.deps.log.error('billing_settle_failed', { shop, err });
+      else process.stderr.write(`billing_settle_failed ${String(err)}\n`);
     }
   }
 

@@ -38,6 +38,8 @@ but the transcript is outside its reach.
 | `SHOPIFY_BILLING_TEST` | ✅ in prod | `true` simulates charges, `false` bills for real. No default |
 | `RATE_LIMIT_ENABLED` | ✅ in prod | Must not be `false`; refuses to start |
 | `TRUST_PROXY_HOPS` | ⚠️ | **Set to `1` behind Coolify/Traefik.** See below |
+| `METRICS_TOKEN` | ⚠️ | Without it `/metrics` and `/api/slo` are **disabled** |
+| `LOG_LEVEL` | | `info` in production |
 | `DAILY_UNITS_PER_SHOP` | | Default `5000` |
 | `DAILY_UNITS_GLOBAL` | | Default `50000` |
 | `SHOPIFY_SCOPES` | | Default `read_products` |
@@ -101,6 +103,38 @@ Both mistakes are silent, in opposite directions:
 
 The default is 0 because the failure it causes is visible; the other is not.
 Startup logs a warning if this is 0 in production.
+
+### Monitoring
+
+```bash
+curl -H "Authorization: Bearer $METRICS_TOKEN" https://your-domain/api/slo
+```
+
+```json
+{ "groundingGate": "pass", "groundingFailureRate": 0.004,
+  "ttftGate": "pass", "ttftUnder400": 0.61, "turns": 1840 }
+```
+
+These are the two `ARCHITECTURE §12` gates, and until now they could not be
+checked in production at all. `groundingGate` is the one that matters: a
+grounding regression is the failure that destroys the product's entire claim,
+and without this it would stay invisible until a merchant noticed a wrong
+price.
+
+A gate reads `unknown` below 100 samples rather than guessing — "no data" and
+"failing" must not look the same on a dashboard.
+
+`/metrics` serves the same data in Prometheus exposition format. Both routes
+require the bearer token and are **disabled entirely** when `METRICS_TOKEN` is
+unset, so forgetting it fails closed rather than publishing your conversation
+volumes and per-shop token spend.
+
+Worth alerting on: `groundingGate == "fail"`, a rising
+`storeagent_tripwire_aborts_total`, and `storeagent_errors_total` by kind.
+
+**Shopper messages are never logged**, at any level. Redaction is enforced in
+the logger by field name, not left to call sites — correlate with `sessionId`
+and `turnId` instead.
 
 ### One node only, for now
 
@@ -191,7 +225,9 @@ matter.
 Being precise, because "deployed" and "working" are different claims:
 
 **Tested and verified live**
-- 688 tests, typecheck clean
+- 725 tests, typecheck clean
+- Observability: verified over real HTTP (`scripts/check-observability.mjs`) —
+  including that the scrape endpoints fail closed without a token
 - Billing: verified over real HTTP (`scripts/check-billing.mjs`) — an exhausted
   shop is refused with 402 before any model call, and usage survives a restart
 - Rate limiting: verified over real HTTP (`scripts/check-limits.mjs`) —
