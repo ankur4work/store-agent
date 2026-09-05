@@ -24,7 +24,18 @@ FROM node:24-slim AS build
 WORKDIR /app
 
 COPY --from=manifests /src/ ./
-RUN npm ci
+
+# `--include=dev` is load-bearing, not belt-and-braces.
+#
+# TypeScript is a devDependency, and npm silently omits devDependencies when
+# NODE_ENV=production — which a host like Coolify injects into the build from
+# the app's own environment. The result is `tsc: not found` at `npm run build`,
+# which reads like a broken image rather than a skipped install.
+#
+# This must not depend on how the host happens to set NODE_ENV, so the build
+# stage states what it needs. The runtime stage below still installs
+# production-only.
+RUN npm ci --include=dev
 
 # tsconfig.base.json is required: every package extends it, so omitting it
 # fails the build with a confusing "file not found" from tsc.

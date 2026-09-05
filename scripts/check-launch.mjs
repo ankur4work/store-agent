@@ -105,6 +105,11 @@ check(
   !/COPY packages\/[a-z-]+\/package\.json/.test(dockerfile),
 );
 check('asserts its build artefacts', /RUN test -f/.test(dockerfile));
+// npm omits devDependencies when NODE_ENV=production, which hosts inject into
+// the build. Without --include=dev there is no tsc and the build dies with a
+// misleading "not found".
+check('build stage installs devDependencies', /npm ci --include=dev/.test(dockerfile));
+check('runtime stage omits them', /npm ci --omit=dev/.test(dockerfile));
 check('mounts a volume for the database', /VOLUME \[/.test(dockerfile));
 check('runs as a non-root user', /^USER (?!root)/m.test(dockerfile));
 check('has a healthcheck', /HEALTHCHECK/.test(dockerfile));
