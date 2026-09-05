@@ -91,6 +91,25 @@ check(
   !/document\.cookie/.test(pixel) && !/(?<!browser\.)localStorage/.test(pixel.replace(/^\s*\*.*$/gm, '')),
 );
 
+// --- container build -------------------------------------------------------
+//
+// These exist because the Dockerfile silently broke the deploy twice: a
+// hand-written per-package COPY list went stale when packages were added, and
+// tsconfig.base.json was never copied at all. Both produced a failed build, no
+// container, and a bare 503 from the proxy with nothing obvious to read.
+console.log('\ncontainer build');
+const dockerfile = read('Dockerfile');
+check('copies tsconfig.base.json', /tsconfig\.base\.json/.test(dockerfile));
+check(
+  'does not hand-enumerate workspace manifests',
+  !/COPY packages\/[a-z-]+\/package\.json/.test(dockerfile),
+);
+check('asserts its build artefacts', /RUN test -f/.test(dockerfile));
+check('mounts a volume for the database', /VOLUME \[/.test(dockerfile));
+check('runs as a non-root user', /^USER (?!root)/m.test(dockerfile));
+check('has a healthcheck', /HEALTHCHECK/.test(dockerfile));
+check('build context excludes secrets', /^\.env$/m.test(read('.dockerignore')));
+
 // --- mandatory webhooks -----------------------------------------------------
 console.log('\nmandatory webhooks');
 for (const topic of ['app/uninstalled', 'shop/redact', 'customers/redact', 'customers/data_request']) {

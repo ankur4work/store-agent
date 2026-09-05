@@ -4,19 +4,23 @@
 # here and must never be: it lives in .env (gitignored) and in the deployment's
 # environment.
 #
-# `application_url` must be your public HTTPS origin. For local development,
-# run a tunnel and paste the URL here AND in SHOPIFY_APP_URL:
+# `application_url` is the public HTTPS origin: https://storeagent.tech
+#
+# It must match SHOPIFY_APP_URL in the deployment exactly — no trailing slash,
+# same scheme and host. A mismatch surfaces as a redirect_uri error mid-install,
+# which is the worst possible moment to discover it.
+#
+# For local development instead, run a tunnel and put its URL in BOTH places:
 #
 #   cloudflared tunnel --url http://localhost:8787
 #
-# A quick tunnel gets a new URL on every restart, so it has to be updated in
-# both places together — a mismatch surfaces as a redirect_uri error at the
-# worst possible moment, mid-install.
+# A quick tunnel gets a new URL on every restart, so both have to change
+# together.
 
 name = "StoreAgent"
 handle = "storeagent"
 client_id = "37c27b85fef223ec4f8b89893af17ac6"
-application_url = "https://REPLACE-WITH-YOUR-TUNNEL.trycloudflare.com"
+application_url = "https://storeagent.tech"
 embedded = true
 
 [access_scopes]
@@ -30,7 +34,7 @@ scopes = "read_products"
 
 [auth]
 redirect_urls = [
-  "https://REPLACE-WITH-YOUR-TUNNEL.trycloudflare.com/shopify/auth/callback"
+  "https://storeagent.tech/shopify/auth/callback"
 ]
 
 [webhooks]
@@ -50,6 +54,13 @@ api_version = "2026-07"
   # whether the agent earned a sale.
   [[webhooks.subscriptions]]
   topics = [ "orders/create" ]
+  uri = "/shopify/webhooks"
+
+  # Billing state. Shopify is the authority on whether a subscription is
+  # active, cancelled or frozen; without this our record drifts silently and we
+  # keep serving a shop that stopped paying — or keep a paid one blocked.
+  [[webhooks.subscriptions]]
+  topics = [ "app_subscriptions/update" ]
   uri = "/shopify/webhooks"
 
 [build]
