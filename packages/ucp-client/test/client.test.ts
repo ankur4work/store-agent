@@ -66,7 +66,8 @@ describe('transport', () => {
     const client = make(server);
     await client.searchCatalog({ query: 'x' });
     const meta = server.callLog[0]!.args['meta'] as Record<string, unknown>;
-    expect(meta['ucp-agent.profile']).toBe('https://storeagent.dev/ucp-profile.json');
+    // Nested, not a literal dotted key — verified against a live store.
+    expect(meta['ucp-agent']).toEqual({ profile: 'https://storeagent.dev/ucp-profile.json' });
   });
 
   it('sends an idempotency key only on cancel_cart', async () => {

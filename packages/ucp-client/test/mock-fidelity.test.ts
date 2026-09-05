@@ -79,7 +79,7 @@ describe('mock fidelity — the trap is armed', () => {
         method: 'tools/call',
         params: {
           name: 'cancel_cart',
-          arguments: { meta: { 'ucp-agent.profile': 'https://storeagent.dev/p.json' }, id: cart.id },
+          arguments: { meta: { 'ucp-agent': { profile: 'https://storeagent.dev/p.json' } }, id: cart.id },
         },
       }),
     });

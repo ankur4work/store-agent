@@ -15,14 +15,14 @@
 /**
  * Every UCP request carries `meta`. The agent profile URI is mandatory.
  *
- * SPIKE-OPEN-QUESTION #1: the docs render this as `meta.ucp-agent.profile`.
- * That is ambiguous between a literal dotted key and a nested object. We encode
- * the dotted-key form (most common in this spec family) and keep it behind
- * `MetaCodec` so switching is a one-line change once verified against a live
- * store. See docs/PHASE-0-FINDINGS.md.
+ * SPIKE-OPEN-QUESTION #1 — **RESOLVED 2026-09-05** against a live store. The
+ * docs render this as `meta.ucp-agent.profile`, which is ambiguous between a
+ * literal dotted key and a path through nested objects. It is **nested**.
+ * Phase 0 guessed the dotted form; it fails on every real store with
+ * "Missing profile uri". See `buildMeta` in transport.ts for the evidence.
  */
 export interface UcpMeta {
-  readonly 'ucp-agent.profile': string;
+  readonly 'ucp-agent': { readonly profile: string };
   readonly 'idempotency-key'?: string;
 }
 

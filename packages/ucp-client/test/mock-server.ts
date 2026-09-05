@@ -111,7 +111,12 @@ export class MockUcpServer {
 
     // --- meta validation: every request must carry the agent profile --------
     const meta = args['meta'] as Record<string, unknown> | undefined;
-    if (!meta || typeof meta['ucp-agent.profile'] !== 'string') {
+    // Nested, matching a real store. This mock previously enforced the DOTTED
+    // key, which is why the Phase 0 spike could not settle OPEN-QUESTION #1:
+    // the mock agreed with the guess. A mock that validates our own assumption
+    // proves only that we are self-consistent.
+    const agent = meta?.['ucp-agent'] as { profile?: unknown } | undefined;
+    if (!meta || typeof agent?.profile !== 'string') {
       return this.rpcError(body.id, -32602, 'meta.ucp-agent.profile is required');
     }
 

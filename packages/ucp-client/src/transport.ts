@@ -58,14 +58,27 @@ export class UcpTransport {
   }
 
   /**
-   * Build the `meta` block. Encoded as dotted keys — see SPIKE-OPEN-QUESTION #1
-   * in types.ts. Isolated here so the alternative nested encoding is a
-   * one-function change.
+   * Build the `meta` block.
+   *
+   * **SPIKE-OPEN-QUESTION #1 is resolved.** The docs write this as
+   * `meta.ucp-agent.profile`, which reads equally as a literal dotted key or as
+   * a path through nested objects. It is the path: `ucp-agent` is an object
+   * with a `profile` field.
+   *
+   * Settled empirically against a live store on 2026-09-05, because the two
+   * encodings fail differently and that difference is the evidence:
+   *
+   *   {"ucp-agent.profile": url}      → "Missing profile uri"  (never found)
+   *   {"ucp-agent": {profile: url}}   → "Http error"           (found, fetched)
+   *
+   * The second reached the fetch, which is only possible if the URI was read.
+   * Phase 0 guessed the dotted form and it would have failed against every
+   * real store — the spike could not settle it because it never had one.
    */
   buildMeta(idempotencyKey?: string): UcpMeta {
     return idempotencyKey === undefined
-      ? { 'ucp-agent.profile': this.agentProfile }
-      : { 'ucp-agent.profile': this.agentProfile, 'idempotency-key': idempotencyKey };
+      ? { 'ucp-agent': { profile: this.agentProfile } }
+      : { 'ucp-agent': { profile: this.agentProfile }, 'idempotency-key': idempotencyKey };
   }
 
   async call<T>(
