@@ -1,3 +1,5 @@
+# DEVELOPMENT TEST ONLY: widget/catalog chat, no order attribution or pixel.
+# Uses the existing Shopify app; restore the full manifest after data access is enabled.
 # Shopify app manifest.
 #
 # `client_id` is public — it is in every OAuth redirect. The API SECRET is not
@@ -18,15 +20,14 @@
 # together.
 
 name = "StoreAgent"
-handle = "storeagent"
 client_id = "37c27b85fef223ec4f8b89893af17ac6"
-application_url = "https://storeagent.tech"
+application_url = "https://storeagent.tech/admin"
 embedded = true
+extension_directories = [ "extensions/storeagent-widget" ]
 
 [access_scopes]
-# Catalog access plus order webhooks for revenue attribution.
-# orders/create requires read_orders; no customer identity fields are used.
-scopes = "read_products,read_orders"
+# Dev-store widget test: catalog only. Order attribution and pixel are disabled.
+scopes = "read_products"
 
 [auth]
 redirect_urls = [
@@ -44,12 +45,6 @@ api_version = "2026-07"
 
   [[webhooks.subscriptions]]
   compliance_topics = [ "shop/redact", "customers/redact", "customers/data_request" ]
-  uri = "/shopify/webhooks"
-
-  # Attribution reconciliation (Phase 2) — the server-side source of truth for
-  # whether the agent earned a sale.
-  [[webhooks.subscriptions]]
-  topics = [ "orders/create" ]
   uri = "/shopify/webhooks"
 
   # Billing state. Shopify is the authority on whether a subscription is

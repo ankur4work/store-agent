@@ -220,6 +220,6 @@ function loadShopifyConfig(env: Record<string, string | undefined>): ShopifyAppC
     apiKey,
     apiSecret,
     appUrl: appUrl.replace(/\/+$/, ''),
-    scopes: env['SHOPIFY_SCOPES'] ?? 'read_products',
+    scopes: env['SHOPIFY_SCOPES'] ?? 'read_products,read_orders',
   };
 }
