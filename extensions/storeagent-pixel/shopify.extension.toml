@@ -22,6 +22,6 @@ runtime_context = "strict"
 
     [extensions.settings.fields.gateway_url]
     name = "Gateway URL"
-    description = "Your StoreAgent origin, e.g. https://api.storeagent.dev"
+    description = "Your StoreAgent origin. Leave as-is unless you self-host."
     type = "single_line_text_field"
     validations = [{ name = "min", value = "8" }]

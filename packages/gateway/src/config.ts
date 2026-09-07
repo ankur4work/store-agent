@@ -154,7 +154,9 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     openaiApiKey: apiKey,
     // Absent → demo mode with the fixture catalog. See tool-executor.ts.
     shopDomain: env['SHOP_DOMAIN'] ?? env['DEV_SHOP_DOMAIN'],
-    agentProfile: env['AGENT_PROFILE'] ?? 'https://storeagent.dev/ucp-profile.json',
+    // Must be a URL Shopify can actually FETCH: it resolves the profile to
+    // negotiate capabilities, and an unreachable one fails discovery outright.
+    agentProfile: env['AGENT_PROFILE'] ?? 'https://storeagent.tech/ucp-profile.json',
     models: {
       classify: env['MODEL_CLASSIFY'] ?? 'gpt-5.6-luna',
       workhorse: env['MODEL_WORKHORSE'] ?? 'gpt-5.6-terra',
