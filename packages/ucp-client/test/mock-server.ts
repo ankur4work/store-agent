@@ -120,14 +120,31 @@ export class MockUcpServer {
       return this.rpcError(body.id, -32602, 'meta.ucp-agent.profile is required');
     }
 
+    // --- envelope validation ------------------------------------------------
+    //
+    // Catalog tools take their arguments nested under `catalog`, not spread
+    // flat. Verified against a live store on 2026-09-07: sending them flat
+    // returns "Missing required arguments: catalog".
+    //
+    // Enforced here for the same reason the meta shape is: a mock that accepts
+    // whatever the client happens to send cannot catch the client being wrong.
+    const CATALOG_TOOLS = ['search_catalog', 'lookup_catalog', 'get_product'];
+    if (CATALOG_TOOLS.includes(tool)) {
+      const catalog = args['catalog'];
+      if (catalog === undefined || typeof catalog !== 'object') {
+        return this.rpcError(body.id, -32602, `Missing required arguments: catalog`);
+      }
+    }
+    const inner = (CATALOG_TOOLS.includes(tool) ? args['catalog'] : args) as Record<string, unknown>;
+
     try {
       switch (tool) {
         case 'search_catalog':
-          return this.ok(body.id, this.searchCatalog(args));
+          return this.ok(body.id, this.searchCatalog(inner));
         case 'lookup_catalog':
-          return this.ok(body.id, this.lookupCatalog(args));
+          return this.ok(body.id, this.lookupCatalog(inner));
         case 'get_product':
-          return this.ok(body.id, this.getProduct(args, body.id));
+          return this.ok(body.id, this.getProduct(inner, body.id));
         case 'create_cart':
           return this.ok(body.id, this.createCart(args));
         case 'get_cart':

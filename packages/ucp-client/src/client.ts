@@ -35,7 +35,7 @@ export class UcpClient {
     if (limit !== undefined && (limit < 1 || limit > SEARCH_MAX_LIMIT)) {
       throw new RangeError(`search_catalog limit must be 1..${SEARCH_MAX_LIMIT}, got ${limit}`);
     }
-    return this.transport.call<SearchCatalogResult>('search_catalog', { ...input }, signal ? { signal } : undefined);
+    return this.transport.call<SearchCatalogResult>('search_catalog', { catalog: input }, signal ? { signal } : undefined);
   }
 
   async lookupCatalog(input: LookupCatalogInput, signal?: AbortSignal): Promise<LookupCatalogResult> {
@@ -43,7 +43,7 @@ export class UcpClient {
     if (input.ids.length > LOOKUP_MAX_IDS) {
       throw new RangeError(`lookup_catalog accepts at most ${LOOKUP_MAX_IDS} ids, got ${input.ids.length}`);
     }
-    return this.transport.call<LookupCatalogResult>('lookup_catalog', { ...input }, signal ? { signal } : undefined);
+    return this.transport.call<LookupCatalogResult>('lookup_catalog', { catalog: input }, signal ? { signal } : undefined);
   }
 
   /** Convenience: chunks >10 ids into parallel compliant calls. */
@@ -61,7 +61,7 @@ export class UcpClient {
   }
 
   async getProduct(input: GetProductInput, signal?: AbortSignal): Promise<GetProductResult> {
-    return this.transport.call<GetProductResult>('get_product', { ...input }, signal ? { signal } : undefined);
+    return this.transport.call<GetProductResult>('get_product', { catalog: input }, signal ? { signal } : undefined);
   }
 
   // --- Cart ---------------------------------------------------------------
