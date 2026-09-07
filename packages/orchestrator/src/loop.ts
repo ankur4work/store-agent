@@ -180,7 +180,16 @@ export class Orchestrator {
       // reached the UI must now be discarded, hence the event.
       if (outcome.kind === 'tripwire') {
         lastVerdict = { ok: false, violations: [outcome.violation] };
-        emit({ type: 'stream_aborted', detail: outcome.violation.code });
+        // Carry the offending value, not just the code. A bare `uncited_price`
+        // says an abort happened but not which number caused it, which is the
+        // one fact needed to tell a hallucination from a gap in the sources.
+        emit({
+          type: 'stream_aborted',
+          detail:
+            outcome.violation.evidence === undefined
+              ? outcome.violation.code
+              : `${outcome.violation.code}: ${outcome.violation.evidence}`,
+        });
         if (attempts === 1) {
           emit({ type: 'grounding_retry', detail: outcome.violation.code });
           continue;

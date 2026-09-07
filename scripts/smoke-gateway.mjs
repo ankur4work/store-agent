@@ -9,23 +9,30 @@
  *   TTFT prose  : when the first validated word of the answer arrives
  *
  *   node scripts/smoke-gateway.mjs ["your question"]
+ *
+ * PAGE_TYPE / PAGE_TITLE override the browsing context the widget would send.
+ * The default is a bare home page: inventing a collection title the store does
+ * not have feeds the agent a false premise and skews the answer.
  */
 const BASE = process.env.GATEWAY ?? 'http://localhost:8787';
 const MESSAGE = process.argv[2] ?? 'do you have a warm wool coat? what sizes and how much?';
+const PAGE = { type: process.env.PAGE_TYPE ?? 'other', ...(process.env.PAGE_TITLE ? { title: process.env.PAGE_TITLE } : {}) };
 
 const health = await fetch(`${BASE}/healthz`).then((r) => r.json());
 console.log(`\n=== gateway smoke (${health.mode} mode, ${health.model}) ===\n`);
+console.log(`page: ${JSON.stringify(PAGE)}`);
 console.log(`> ${MESSAGE}\n`);
 
 const t0 = performance.now();
 const marks = {};
 let prose = '';
+let productCount = 0;
 const trace = [];
 
 const res = await fetch(`${BASE}/api/chat`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ message: MESSAGE, page: { type: 'collection', title: 'Outerwear' } }),
+  body: JSON.stringify({ message: MESSAGE, page: PAGE }),
 });
 
 if (!res.ok || !res.body) {
@@ -57,9 +64,12 @@ for (;;) {
     if (!data) continue;
     const payload = JSON.parse(data);
 
-    if (ev === 'products' && marks.products === undefined) {
-      marks.products = performance.now() - t0;
-      console.log(`[${marks.products.toFixed(0)}ms] products: ${payload.products.map((p) => p.title).join(', ')}\n`);
+    if (ev === 'products') {
+      productCount += payload.products.length;
+      if (marks.products === undefined) {
+        marks.products = performance.now() - t0;
+        console.log(`[${marks.products.toFixed(0)}ms] products: ${payload.products.map((p) => p.title).join(', ')}\n`);
+      }
     } else if (ev === 'delta') {
       if (marks.firstDelta === undefined) marks.firstDelta = performance.now() - t0;
       prose += payload.text;
@@ -81,6 +91,7 @@ for (;;) {
 const total = performance.now() - t0;
 console.log('\n');
 console.log('grounded    :', done?.grounded ? 'PASS' : 'FAIL');
+console.log('products    :', productCount === 0 ? 'FAIL  <- nothing retrieved; answer is a handoff, not a catalog hit' : productCount);
 console.log('escalated   :', done?.escalated);
 console.log('attempts    :', done?.attempts);
 console.log('trace       :', trace.join(' -> '));
@@ -89,6 +100,8 @@ console.log('TT-products :', marks.products === undefined ? 'n/a' : `${marks.pro
 console.log('TTFT prose  :', marks.firstDelta === undefined ? 'n/a' : `${marks.firstDelta.toFixed(0)}ms`);
 console.log('total       :', `${total.toFixed(0)}ms`);
 
-const ok = done !== undefined && done.grounded === true && !done.escalated;
+// productCount matters: a "we don't stock that" reply is grounded and unescalated,
+// so grounded alone lets an empty catalog pass the smoke test.
+const ok = done !== undefined && done.grounded === true && !done.escalated && productCount > 0;
 console.log(`\n${ok ? 'GATEWAY SMOKE PASS' : 'GATEWAY SMOKE FAIL'}\n`);
 process.exit(ok ? 0 : 1);
