@@ -159,6 +159,7 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
 .cards::-webkit-scrollbar{display:none}
 .card{flex:0 0 156px;scroll-snap-align:start;border:1px solid var(--line);border-radius:13px;
   overflow:hidden;background:var(--paper);cursor:pointer;text-align:left;padding:0;
+  display:block;text-decoration:none;color:inherit;font:inherit;
   animation:pop .42s var(--ease) both;transition:transform .22s var(--ease),box-shadow .22s var(--ease),border-color .22s}
 @keyframes pop{from{opacity:0;transform:scale(.95) translateY(8px)}to{opacity:1;transform:none}}
 .card:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--accent) 35%,transparent);
@@ -442,6 +443,23 @@ textarea::placeholder{color:var(--muted)}
     return v == null ? '' : '$' + (v / 100).toFixed(2);
   }
 
+  // Where a card points.
+  //
+  // On a storefront the RELATIVE path is deliberate: `window.Shopify.shop` is
+  // the permanent `*.myshopify.com` domain, which is usually NOT the domain the
+  // shopper is browsing. Sending them to the absolute one would hop domains
+  // mid-session and abandon their cart. A relative path keeps them where they
+  // already are.
+  //
+  // Off-storefront (the demo page) there is no such path to be relative to, so
+  // fall back to the absolute shop domain.
+  function productHref(p) {
+    var handle = p.handle || '';
+    if (!handle) return '';
+    if (window.Shopify && window.Shopify.shop) return '/products/' + handle;
+    return 'https://' + SHOP + '/products/' + handle;
+  }
+
   function renderCards(products, label) {
     els.rail.hidden = false;
     els.railTitle.textContent = label || 'From the store';
@@ -459,9 +477,14 @@ textarea::placeholder{color:var(--muted)}
       // Demo fixtures carry `image`; real UCP payloads carry `media[]`.
       var img = p.image || (p.media && p.media[0] && p.media[0].url) || '';
 
-      var c = document.createElement('button');
+      // An anchor, not a button: clicking a product goes to the product page,
+      // so it must behave like a link — middle-click, ctrl-click and "open in
+      // new tab" all work, and the shopper sees the destination on hover.
+      var href = productHref(p);
+      var c = document.createElement(href ? 'a' : 'button');
       c.className = 'card';
-      c.type = 'button';
+      if (href) c.href = href;
+      else c.type = 'button';
       c.style.animationDelay = i * 55 + 'ms';
       c.innerHTML =
         '<div class="ph">' +
@@ -470,10 +493,19 @@ textarea::placeholder{color:var(--muted)}
         '</div><div class="meta"><div class="t"></div><div class="p"></div></div>';
       c.querySelector('.t').textContent = p.title || '';
       c.querySelector('.p').textContent = money(min);
-      c.addEventListener('click', function () {
-        els.input.value = 'Tell me more about the ' + p.title;
-        submit();
-      });
+      if (href) {
+        // Plain navigation in the same tab. The session lives in
+        // sessionStorage, so the conversation is still there when the panel
+        // reopens on the product page.
+        c.addEventListener('click', function () {
+          persist();
+        });
+      } else {
+        c.addEventListener('click', function () {
+          els.input.value = 'Tell me more about the ' + p.title;
+          submit();
+        });
+      }
       els.cards.appendChild(c);
     });
     state.products = products.slice(0, 8);
