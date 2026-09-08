@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-08.5';
+  var BUILD = '2026-09-08.6';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -73,6 +73,77 @@
 
   var host = document.createElement('div');
   host.id = 'storeagent-root';
+
+  /**
+   * Pin the host's own layout beyond the reach of merchant CSS.
+   *
+   * Shadow DOM protects the INSIDE of the widget. It does not protect the host
+   * element, and a page rule targeting the host beats any `:host` rule in the
+   * cascade — so the isolation that makes the widget safe to embed stops
+   * exactly where it matters most.
+   *
+   * This is not hypothetical. On a live store the theme laid out `<body>` as a
+   * grid and hid unexpected direct children; our host is exactly that, so it
+   * computed `display:none`. The widget still loaded, mounted, and computed a
+   * correct 56px launcher — and generated no box at all. Nothing errored and
+   * nothing logged; the only symptom was a merchant saying the button was not
+   * there, and it took a server-side self-check to find.
+   *
+   * Inline + `!important` is the one declaration a merchant stylesheet cannot
+   * outrank, so the few properties the widget cannot survive losing are pinned
+   * here rather than in the shadow stylesheet.
+   *
+   * The host is fixed at zero size rather than `display:block`. That keeps it
+   * out of flow entirely, so it cannot add a row to a grid body, a child to a
+   * flex row, or a margin anywhere — which is the legitimate reason a theme
+   * hides unexpected children of `<body>` in the first place. A fixed ancestor
+   * does NOT become the containing block for fixed descendants (only
+   * transform/filter/perspective/contain/will-change do, and all are pinned
+   * off), so the launcher and panel still resolve against the viewport.
+   */
+  var PINNED = {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    right: 'auto',
+    bottom: 'auto',
+    width: '0',
+    height: '0',
+    'max-width': 'none',
+    'max-height': 'none',
+    margin: '0',
+    padding: '0',
+    border: '0',
+    display: 'block',
+    visibility: 'visible',
+    opacity: '1',
+    overflow: 'visible',
+    'z-index': '2147483000',
+    float: 'none',
+    clip: 'auto',
+    'clip-path': 'none',
+    transform: 'none',
+    filter: 'none',
+    perspective: 'none',
+    contain: 'none',
+    'will-change': 'auto',
+    // Must be `auto`, not `none`: pointer-events inherits into the shadow tree,
+    // so `none` here would trade an invisible launcher for an unclickable one.
+    // The host is 0x0 and the launcher sits outside it, so this intercepts
+    // nothing the merchant's page needs.
+    'pointer-events': 'auto',
+  };
+  function pinHost() {
+    for (var k in PINNED) {
+      if (Object.prototype.hasOwnProperty.call(PINNED, k)) {
+        try {
+          host.style.setProperty(k, PINNED[k], 'important');
+        } catch (e) {}
+      }
+    }
+  }
+  pinHost();
+
   var root = host.attachShadow({ mode: 'open' });
 
   var CSS = `

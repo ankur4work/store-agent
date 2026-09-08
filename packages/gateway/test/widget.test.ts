@@ -40,7 +40,8 @@ function makeEl(tag: string): StubEl {
     textContent: '',
     id: '',
     dataset: {},
-    style: { setProperty() {}, removeProperty() {} },
+    style: { setProperty(k: string, v: string, pri?: string) { (el['pinned'] as Record<string,string>)[k] = v + (pri ? '!' + pri : ''); }, removeProperty() {} },
+    pinned: {} as Record<string, string>,
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     setAttribute() {},
     getAttribute: () => null,
@@ -89,6 +90,7 @@ interface RunResult {
   calls: string[];
   mounted: boolean;
   said: string[];
+  pinned: Record<string, string>;
 }
 
 async function run(opts: {
@@ -157,7 +159,8 @@ async function run(opts: {
   // Let the mount promise chain settle.
   await new Promise((r) => setTimeout(r, 20));
 
-  return { calls, said, mounted: body.children.length > 0 };
+  const hostEl = body.children[0];
+  return { calls, said, mounted: body.children.length > 0, pinned: (hostEl?.['pinned'] ?? {}) as Record<string, string> };
 }
 
 describe('widget mount: shopper', () => {
@@ -263,5 +266,52 @@ describe('widget diagnostics', () => {
   it('announces the theme editor bypass', async () => {
     const r = await run({ designMode: true, arm: 'holdout' });
     expect(r.said.join(' ')).toMatch(/theme editor/i);
+  });
+});
+
+describe('widget host isolation', () => {
+  /**
+   * The bug that made the widget invisible on a live store: the theme laid out
+   * <body> as a grid and hid unexpected direct children, so the host computed
+   * `display:none`. The widget mounted, computed a correct 56px launcher, and
+   * generated no box. Shadow DOM protects the inside of the widget; the host
+   * is fully exposed to page CSS, and page rules beat :host rules.
+   *
+   * Inline + !important is the only thing a merchant stylesheet cannot outrank.
+   */
+  it('pins the properties a theme could use to hide it', async () => {
+    const r = await run({ arm: 'exposed' });
+    for (const prop of ['display', 'visibility', 'opacity', 'z-index', 'position']) {
+      expect(r.pinned[prop], `${prop} must be pinned`).toBeDefined();
+      expect(r.pinned[prop]).toContain('!important');
+    }
+    expect(r.pinned['display']).toContain('block');
+    expect(r.pinned['visibility']).toContain('visible');
+  });
+
+  it('stays out of flow so it cannot disturb a grid or flex body', async () => {
+    // Hiding stray children of <body> is a legitimate thing for a theme to do.
+    // Being fixed at zero size means we never give it a reason to.
+    const r = await run({ arm: 'exposed' });
+    expect(r.pinned['position']).toContain('fixed');
+    expect(r.pinned['width']).toContain('0');
+    expect(r.pinned['height']).toContain('0');
+  });
+
+  it('never pins a property that would trap the fixed launcher', async () => {
+    // A fixed ancestor is fine; a transformed/contained one becomes the
+    // containing block and would pull the launcher out of the viewport.
+    const r = await run({ arm: 'exposed' });
+    expect(r.pinned['transform']).toContain('none');
+    expect(r.pinned['filter']).toContain('none');
+    expect(r.pinned['contain']).toContain('none');
+    expect(r.pinned['perspective']).toContain('none');
+  });
+
+  it('keeps pointer events on, or the launcher would be unclickable', async () => {
+    // pointer-events inherits into the shadow tree.
+    const r = await run({ arm: 'exposed' });
+    expect(r.pinned['pointer-events']).toContain('auto');
+    expect(r.pinned['pointer-events']).not.toContain('none');
   });
 });
