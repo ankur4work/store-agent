@@ -97,6 +97,7 @@ async function run(opts: {
   designMode?: boolean;
   arm?: string;
   config?: Record<string, unknown>;
+  themeTokens?: Record<string, string>;
 }): Promise<RunResult> {
   const calls: string[] = [];
   const said: string[] = [];
@@ -144,7 +145,7 @@ async function run(opts: {
     addEventListener() {},
     removeEventListener() {},
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
-    getComputedStyle: () => ({ display: 'grid', visibility: 'visible', opacity: '1', zIndex: '2147483000', position: 'fixed', width: '56px', height: '56px', right: '22px', bottom: '22px' }),
+    getComputedStyle: () => ({ display: 'grid', visibility: 'visible', opacity: '1', zIndex: '2147483000', position: 'fixed', width: '56px', height: '56px', right: '22px', bottom: '22px', getPropertyValue: (n: string) => (opts.themeTokens ?? {})[n] ?? '' }),
     innerWidth: 1280,
     innerHeight: 800,
     AbortController,
@@ -336,5 +337,34 @@ describe('widget mobile sheet', () => {
     // leave under 60px of conversation on a 568px-tall device.
     expect(mobile).toMatch(/header\{padding:10px 14px\}/);
     expect(mobile).toMatch(/textarea\{min-height:38px/);
+  });
+});
+
+describe('brand tokens', () => {
+  /**
+   * Two sources set the accent: the app embed block (a page <style> rule) and
+   * the admin settings behind /api/config. render() applied the server value as
+   * an INLINE style, which beats a page rule — so a merchant who picked red in
+   * the theme editor got the built-in green, with their setting saved and
+   * correct the whole time.
+   */
+  it('keeps the theme editor colour instead of the server default', async () => {
+    const r = await run({
+      arm: 'exposed',
+      themeTokens: { '--sa-accent': '#FF0808', '--sa-radius': '16px' },
+      config: { enabled: true, accentColor: '#1b3a34', cornerRadius: 24 },
+    });
+    expect(r.pinned['--sa-accent']).toBeUndefined();
+    expect(r.pinned['--sa-radius']).toBeUndefined();
+  });
+
+  it('falls back to the server value when the theme supplies none', async () => {
+    const r = await run({
+      arm: 'exposed',
+      themeTokens: {},
+      config: { enabled: true, accentColor: '#123456', cornerRadius: 8 },
+    });
+    expect(r.pinned['--sa-accent']).toContain('#123456');
+    expect(r.pinned['--sa-radius']).toContain('8px');
   });
 });

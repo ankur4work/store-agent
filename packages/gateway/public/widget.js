@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-08.7';
+  var BUILD = '2026-09-08.8';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1177,14 +1177,45 @@ textarea::placeholder{color:var(--muted)}
     }
   }
 
+  /**
+   * Read a brand token the app embed block may have set on the host.
+   * Returns '' when the theme did not supply one.
+   */
+  function themeToken(name) {
+    try {
+      return getComputedStyle(host).getPropertyValue(name).trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
   function render(cfg) {
     if (cfg && cfg.enabled === false) {
       say('not shown: disabled in the StoreAgent app settings');
       return;
     }
     if (cfg) {
-      if (cfg.accentColor) host.style.setProperty('--sa-accent', cfg.accentColor);
-      if (cfg.cornerRadius != null) host.style.setProperty('--sa-radius', cfg.cornerRadius + 'px');
+      /**
+       * The theme editor wins over the server default.
+       *
+       * Brand tokens have two sources: the app embed block, which writes
+       * `--sa-accent` into a page <style> rule, and the admin settings behind
+       * /api/config. Applying the server value here as an INLINE style beat the
+       * theme's rule unconditionally, so a merchant who picked red in the theme
+       * editor watched the widget render in our built-in green and had no way
+       * to tell why — their setting was saved and correct, and silently
+       * overwritten a moment later.
+       *
+       * A value already on the host came from the block the merchant is looking
+       * at, so it is the more specific intent and is left alone. The server
+       * value stays as the fallback for themes that do not supply one.
+       */
+      if (cfg.accentColor && themeToken('--sa-accent') === '') {
+        host.style.setProperty('--sa-accent', cfg.accentColor);
+      }
+      if (cfg.cornerRadius != null && themeToken('--sa-radius') === '') {
+        host.style.setProperty('--sa-radius', cfg.cornerRadius + 'px');
+      }
       if (cfg.position === 'left') host.setAttribute('data-position', 'left');
       state.greeting = cfg.greeting || '';
     }
