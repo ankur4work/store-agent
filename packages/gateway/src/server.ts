@@ -3,7 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Orchestrator, OpenAIModelClient, type MerchantPack } from '@storeagent/orchestrator';
+import { Orchestrator, OpenAIModelClient, reachedHuman, type MerchantPack } from '@storeagent/orchestrator';
 import { UcpClient } from '@storeagent/ucp-client';
 import type { GatewayConfig } from './config.js';
 import { MemorySessionStore, newSession, type SessionStore } from './sessions.js';
@@ -16,6 +16,7 @@ import { createLogger, type Logger } from './observability/logger.js';
 import { PLANS, PLAN_ORDER, isPlanId } from '@storeagent/billing';
 import { DEMO_CATALOG } from './catalog-fixture.js';
 import { beginInstall, completeInstall } from './shopify/oauth.js';
+import { parseShopDomain } from './shopify/domain.js';
 import { handleWebhook, parseSubscriptionPayload } from './shopify/webhooks.js';
 import {
   MemoryNonceStore,
@@ -415,7 +416,28 @@ export function createGateway(deps: GatewayDeps): Server {
       const verified = verifySessionToken(token ?? undefined, auth);
 
       if (!verified.ok) {
-        // No frame-ancestors here: we do not know which shop to trust yet.
+        // The session token did not verify, but Shopify still puts `shop` on
+        // the embedded URL, and it goes through the same strict allowlist as
+        // every other untrusted shop input. That is enough to do two things the
+        // bare 401 could not:
+        //
+        //   - let the admin iframe actually DISPLAY this page. Under
+        //     `frame-ancestors 'none'` the browser blocks the frame and
+        //     substitutes its own security warning, so the merchant gets a
+        //     generic scare instead of our explanation. This page carries no
+        //     secrets — it is a static "connect me" prompt — so letting the
+        //     named shop frame it costs nothing.
+        //   - offer the install link, which is the actual remedy in the case
+        //     that produces this 401 almost every time: never connected.
+        // `ShopDomainResult` is not a discriminated union, so `ok` alone does
+        // not narrow `shop` — check both rather than asserting.
+        const named = parseShopDomain(url.searchParams.get('shop'));
+        if (named.ok && named.shop !== undefined) {
+          const installUrl = `/shopify/auth?shop=${encodeURIComponent(named.shop)}`;
+          html(res, 401, renderUnauthenticated(verified.reason, installUrl), named.shop);
+          return;
+        }
+        // No trustworthy shop named: keep the page unframeable.
         html(res, 401, renderUnauthenticated(verified.reason));
         return;
       }
@@ -836,9 +858,15 @@ export function createGateway(deps: GatewayDeps): Server {
       // discard whatever it painted before showing the final text.
       if (result.events.some((e) => e.type === 'stream_aborted')) send('reset', {});
 
+      // A turn reaches a human two ways: the loop gave up (`escalated`) or the
+      // agent chose to hand off (`handedOff`). A client asking "did this reach
+      // a human?" means the union — reporting only the first told the smoke
+      // test a lead-capture handoff was a clean answer, and it passed. Both are
+      // sent so a client that cares which one can still tell them apart.
       send('done', {
         reply: result.reply,
-        escalated: result.escalated,
+        escalated: reachedHuman(result),
+        handedOff: result.handedOff,
         grounded: result.verdict.ok,
         attempts: result.attempts,
         ms: Date.now() - startedTurnAt,
@@ -852,7 +880,12 @@ export function createGateway(deps: GatewayDeps): Server {
       if (result.events.some((e) => e.type === 'stream_aborted')) {
         metrics.tripwireAborts.inc({ shop: session.shopDomain });
       }
-      if (result.escalated) metrics.escalations.inc({ shop: session.shopDomain });
+      // The metric is documented as "escalated to a human or lead capture", so
+      // a deliberate handoff belongs in it. Counting only `escalated` made
+      // every captured lead invisible to the SLO dashboards.
+      if (reachedHuman(result)) {
+        metrics.escalations.inc({ shop: session.shopDomain });
+      }
       if (result.usage !== undefined) {
         const u = result.usage as Record<string, unknown>;
         for (const [key, kind] of [
@@ -873,6 +906,7 @@ export function createGateway(deps: GatewayDeps): Server {
         sessionId,
         grounded: result.verdict.ok,
         escalated: result.escalated,
+        handedOff: result.handedOff,
         attempts: result.attempts,
         ttftMs: firstDeltaAt === undefined ? null : firstDeltaAt - startedTurnAt,
         ms: Date.now() - startedTurnAt,

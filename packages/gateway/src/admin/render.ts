@@ -520,7 +520,25 @@ export function renderAdmin(vm: AdminViewModel): string {
 }
 
 /** Minimal page for an unauthenticated or non-embedded hit. */
-export function renderUnauthenticated(reason: string): string {
+/**
+ * The "we could not authenticate you" page.
+ *
+ * `installUrl` is passed whenever the request named a valid shop. That is the
+ * common case by far: the merchant opened the app from their admin before ever
+ * completing OAuth, so the only useful thing this page can do is start it.
+ * Without the link the page is a dead end that explains nothing the merchant
+ * can act on.
+ *
+ * The link MUST target `_top`. Shopify's own login refuses to be framed, so
+ * running OAuth inside the admin's iframe dead-ends on a blank frame — the
+ * merchant has to be taken out of the iframe to authenticate.
+ */
+export function renderUnauthenticated(reason: string, installUrl?: string): string {
+  const action =
+    installUrl === undefined
+      ? '<p>This page authenticates through Shopify and can’t be opened directly.</p>'
+      : `<p>StoreAgent isn’t connected to this store yet. Connecting takes one click.</p>
+<p><a class="btn" href="${esc(installUrl)}" target="_top" rel="noopener">Connect StoreAgent</a></p>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>StoreAgent</title><style>
 body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -528,9 +546,12 @@ body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif
 .c{background:#fff;border:1px solid #e3e3e3;border-radius:12px;padding:26px 28px;max-width:440px}
 h1{font-size:17px;margin:0 0 8px}p{color:#616161;margin:0 0 6px}
 code{background:#f1f2f4;padding:1px 6px;border-radius:5px;font-size:12.5px}
+.btn{display:inline-block;margin-top:10px;background:#303030;color:#fff;text-decoration:none;
+  padding:9px 16px;border-radius:8px;font-weight:500}
+.btn:hover{background:#1a1a1a}
 </style></head><body><div class="c">
-<h1>Open this from your Shopify admin</h1>
-<p>This page authenticates through Shopify and can’t be opened directly.</p>
+<h1>${installUrl === undefined ? 'Open this from your Shopify admin' : 'Connect StoreAgent'}</h1>
+${action}
 <p class="muted"><code>${esc(reason)}</code></p>
 </div></body></html>`;
 }

@@ -1,4 +1,10 @@
-import { Orchestrator, type MerchantPack, type ModelClient, type ModelTierMap } from '@storeagent/orchestrator';
+import {
+  Orchestrator,
+  reachedHuman,
+  type MerchantPack,
+  type ModelClient,
+  type ModelTierMap,
+} from '@storeagent/orchestrator';
 import { CASES } from './cases.js';
 import { isTainted, scoreReply, summarize } from './score.js';
 import type { CaseResult, EvalCase, EvalReport } from './types.js';
@@ -55,7 +61,7 @@ export async function runCase(c: EvalCase, opts: RunOptions): Promise<CaseResult
     const failures = scoreReply(
       result.reply,
       c.truth,
-      { escalated: result.escalated || result.handedOff },
+      { escalated: reachedHuman(result) },
       c.expect,
     );
     const tainted = isTainted(failures);
@@ -67,7 +73,7 @@ export async function runCase(c: EvalCase, opts: RunOptions): Promise<CaseResult
       tainted,
       failures,
       validatorOk: result.verdict.ok,
-      escalated: result.escalated || result.handedOff,
+      escalated: reachedHuman(result),
       attempts: result.attempts,
       ms: performance.now() - started,
       // The two quadrants that matter. Scorer and validator disagreeing is the

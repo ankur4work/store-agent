@@ -92,6 +92,22 @@ export interface TurnResult {
   readonly attempts: number;
 }
 
+/**
+ * Did this turn end up in front of a human, by either route?
+ *
+ * `escalated` and `handedOff` are deliberately separate — one is a failure, the
+ * other a captured lead — but almost every consumer (metrics, logs, the `done`
+ * event, eval scoring) is asking the single question "did a human have to get
+ * involved?" and wants the union. Answering it by hand is what caused the
+ * conflation bug twice: first the eval reported zero escalations while the
+ * agent handed off correctly, then the gateway reported `escalated: false` on a
+ * handoff and its own smoke test passed a lead-capture as a clean answer.
+ * Keep the union in one place; read the fields directly only to tell them apart.
+ */
+export function reachedHuman(result: Pick<TurnResult, 'escalated' | 'handedOff'>): boolean {
+  return result.escalated || result.handedOff;
+}
+
 export interface OrchestratorDeps {
   readonly model: ModelClient;
   readonly tools: ToolExecutor;

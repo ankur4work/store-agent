@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ESCALATION_REPLY, Orchestrator, parseGrounded } from '../src/loop.js';
+import { ESCALATION_REPLY, Orchestrator, parseGrounded, reachedHuman } from '../src/loop.js';
 import { detectFrustration, route } from '../src/router.js';
 import { OPENAI_MODELS, resolveModels } from '../src/model.js';
 import { planSpeculation, speculationMatches } from '../src/speculate.js';
@@ -293,4 +293,27 @@ describe('parseGrounded', () => {
       expect(parseGrounded(t)).toBeUndefined();
     },
   );
+});
+
+describe('reachedHuman', () => {
+  // Regression guard. This union has been re-derived by hand at four call
+  // sites and got it wrong twice: the eval once reported zero escalations
+  // while the agent was handing off correctly, and the gateway later reported
+  // `escalated: false` on a hand-off, which made its own smoke test print
+  // GATEWAY SMOKE PASS for a turn that never answered the question.
+  it('counts a loop failure', () => {
+    expect(reachedHuman({ escalated: true, handedOff: false })).toBe(true);
+  });
+
+  it('counts a deliberate hand-off — the case both regressions missed', () => {
+    expect(reachedHuman({ escalated: false, handedOff: true })).toBe(true);
+  });
+
+  it('counts a turn that did both', () => {
+    expect(reachedHuman({ escalated: true, handedOff: true })).toBe(true);
+  });
+
+  it('leaves a self-served answer alone', () => {
+    expect(reachedHuman({ escalated: false, handedOff: false })).toBe(false);
+  });
 });

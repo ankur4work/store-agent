@@ -1,4 +1,4 @@
-export { Orchestrator, parseGrounded, ESCALATION_REPLY } from './loop.js';
+export { Orchestrator, parseGrounded, reachedHuman, ESCALATION_REPLY } from './loop.js';
 export type { TurnInput, TurnResult, TurnEvent, OrchestratorDeps, RunTurnOptions } from './loop.js';
 export { ReplyExtractor, SseParser } from './streaming.js';
 export type { SseEvent } from './streaming.js';

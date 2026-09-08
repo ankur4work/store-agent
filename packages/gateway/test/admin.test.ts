@@ -336,6 +336,44 @@ describe('admin http surface', () => {
     expect(r.headers.get('content-security-policy')).toBe("frame-ancestors 'none';");
   });
 
+  /**
+   * The unauthenticated page is only ever seen inside the Shopify admin iframe,
+   * and `frame-ancestors 'none'` meant the browser blocked the frame and showed
+   * its own security warning instead. The merchant got a scary generic error in
+   * place of the one page that could tell them what to do — and the fix for the
+   * usual cause (never connected) was one click they could not reach.
+   */
+  it('lets the named shop frame the unauthenticated page, so it is readable', async () => {
+    const r = await fetch(`${base}/admin?shop=${SHOP}`);
+    expect(r.status).toBe(401);
+    expect(r.headers.get('content-security-policy')).toBe(
+      `frame-ancestors https://${SHOP} https://admin.shopify.com;`,
+    );
+  });
+
+  it('offers an install link that escapes the iframe', async () => {
+    const body = await fetch(`${base}/admin?shop=${SHOP}`).then((x) => x.text());
+    expect(body).toContain(`/shopify/auth?shop=${encodeURIComponent(SHOP)}`);
+    // Shopify's login refuses to be framed, so OAuth must break out of the
+    // admin iframe or it dead-ends on a blank frame.
+    expect(body).toContain('target="_top"');
+  });
+
+  it('still denies framing when the named shop is not a real myshopify domain', async () => {
+    // The relaxation rides entirely on the strict allowlist. If a bogus or
+    // injected value could widen frame-ancestors, this would be clickjacking.
+    for (const bogus of ['evil.com', 'acme.myshopify.com.evil.com', 'a b', '']) {
+      const r = await fetch(`${base}/admin?shop=${encodeURIComponent(bogus)}`);
+      expect(r.status).toBe(401);
+      expect(r.headers.get('content-security-policy')).toBe("frame-ancestors 'none';");
+    }
+  });
+
+  it('never lets a shop value inject a second header or directive', async () => {
+    const r = await fetch(`${base}/admin?shop=${encodeURIComponent('acme.myshopify.com https://evil.com')}`);
+    expect(r.headers.get('content-security-policy')).toBe("frame-ancestors 'none';");
+  });
+
   it('never caches admin html', async () => {
     const r = await fetch(`${base}/admin?id_token=${token()}`);
     expect(r.headers.get('cache-control')).toBe('no-store');
