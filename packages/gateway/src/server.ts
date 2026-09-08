@@ -250,6 +250,16 @@ export function createGateway(deps: GatewayDeps): Server {
     if (url.pathname === '/api/config' && req.method === 'GET') {
       const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
       const s = await settings.get(shop);
+      // Proof of life for the widget bootstrap. This request can ONLY happen if
+      // widget.js was injected into a storefront page and executed, so its
+      // presence or absence in the logs separates "the script never reached the
+      // page" from "the script ran and something else went wrong" — a
+      // distinction that otherwise needs the merchant's browser console.
+      log.info('widget_bootstrap', {
+        shop,
+        enabled: s.enabled,
+        referer: header(req, 'referer') ?? null,
+      });
       json(res, 200, {
         enabled: s.enabled,
         accentColor: s.accentColor,
@@ -632,6 +642,11 @@ export function createGateway(deps: GatewayDeps): Server {
     const s = await settings.get(shop);
     const arm = assignArm(shop, sessionId, s.holdoutFraction);
     await attribution.recordExposure({ shop, sessionId, arm, createdAt: Date.now(), engaged: false });
+    // Same purpose as widget_bootstrap on /api/config: only reachable if
+    // widget.js actually executed. Recording the arm here means a merchant
+    // reporting an invisible widget can be answered from the server, without
+    // needing anything out of their browser.
+    log.info('widget_exposure', { shop, arm, referer: header(req, 'referer') ?? null });
     json(res, 200, { arm });
   }
 
