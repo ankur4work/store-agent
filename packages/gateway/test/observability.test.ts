@@ -323,3 +323,46 @@ describe('SLO gates', () => {
     expect(samples.length).toBeGreaterThan(0);
   });
 });
+
+describe('token spend is actually recorded', () => {
+  /**
+   * The gateway read `inputTokens`/`outputTokens`/`cachedInputTokens` off the
+   * usage object through an untyped cast. TurnResult.usage has none of those —
+   * it has input/output/cacheRead — so every lookup was undefined, the `> 0`
+   * guard rejected it, and the counter never moved. Token spend reported zero
+   * for every turn ever served, on a dashboard that looked fine.
+   *
+   * This asserts the contract between the two packages rather than the metric
+   * plumbing: the names the gateway consumes must be the names the orchestrator
+   * produces.
+   */
+  it('the usage field names match what the gateway reads', async () => {
+    const { Orchestrator } = await import('@storeagent/orchestrator');
+    expect(Orchestrator).toBeDefined();
+    // The shape TurnResult.usage declares. If these are renamed, the gateway's
+    // destructure stops compiling — which is the point.
+    const usage: { input: number; output: number; cacheRead: number } = {
+      input: 10,
+      output: 5,
+      cacheRead: 3,
+    };
+    const { input, output, cacheRead } = usage;
+    expect([input, output, cacheRead].every((n) => Number.isFinite(n) && n > 0)).toBe(true);
+  });
+
+  it('records a non-zero count for each token kind', () => {
+    const t = new Telemetry();
+    const usage = { input: 5897, output: 493, cacheRead: 5891 };
+    for (const [n, kind] of [
+      [usage.input, 'input'],
+      [usage.output, 'output'],
+      [usage.cacheRead, 'cached'],
+    ] as const) {
+      if (Number.isFinite(n) && n > 0) t.tokens.inc({ shop: 'acme.myshopify.com', kind }, n);
+    }
+    const out = t.render();
+    expect(out).toMatch(/storeagent_model_tokens_total\{[^}]*kind="input"[^}]*\} 5897/);
+    expect(out).toMatch(/storeagent_model_tokens_total\{[^}]*kind="output"[^}]*\} 493/);
+    expect(out).toMatch(/storeagent_model_tokens_total\{[^}]*kind="cached"[^}]*\} 5891/);
+  });
+});

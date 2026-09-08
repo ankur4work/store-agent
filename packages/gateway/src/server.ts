@@ -922,14 +922,25 @@ export function createGateway(deps: GatewayDeps): Server {
       if (reachedHuman(result)) {
         metrics.escalations.inc({ shop: session.shopDomain });
       }
+      // Read the fields `TurnResult.usage` actually declares.
+      //
+      // This used to index `inputTokens`/`outputTokens`/`cachedInputTokens`
+      // through a `Record<string, unknown>` cast. The usage object has none of
+      // those keys — it has `input`/`output`/`cacheRead` — so every lookup was
+      // `undefined`, the `> 0` guard rejected it, and the counter never moved.
+      // Token spend is the only metric that says what a conversation costs, and
+      // it had been reporting zero since the day it was added, on a dashboard
+      // that looked healthy.
+      //
+      // Destructured rather than indexed so a future rename is a compile error
+      // instead of another silently empty panel.
       if (result.usage !== undefined) {
-        const u = result.usage as Record<string, unknown>;
-        for (const [key, kind] of [
-          ['inputTokens', 'input'],
-          ['outputTokens', 'output'],
-          ['cachedInputTokens', 'cached'],
+        const { input, output, cacheRead } = result.usage;
+        for (const [n, kind] of [
+          [input, 'input'],
+          [output, 'output'],
+          [cacheRead, 'cached'],
         ] as const) {
-          const n = Number(u[key] ?? 0);
           if (Number.isFinite(n) && n > 0) {
             metrics.tokens.inc({ shop: session.shopDomain, kind }, n);
           }
