@@ -81,6 +81,21 @@
   --sunk:color-mix(in srgb,var(--ink) 5%,transparent);
   --r:var(--sa-radius,16px);
   --ease:cubic-bezier(.22,1,.36,1);
+
+  /* Shadow DOM isolates STYLE, not STACKING. The host still takes part in the
+     page's stacking context, and all:initial above resets it to z-index:auto --
+     so the launcher, despite being position:fixed and last in the body, paints
+     UNDER any theme element with a positive z-index: sticky headers, cart
+     drawers, announcement bars, cookie banners, back-to-top buttons. On such a
+     theme the widget loads, mounts, works, and is invisible, which is
+     indistinguishable from being broken.
+
+     position:relative plus a top-of-range z-index puts the whole widget in its
+     own stacking context above theme content. Neither property creates a
+     containing block, so the fixed launcher and panel still resolve against the
+     viewport -- that is why this is not transform or contain. */
+  position:relative;
+  z-index:2147483000;
 }
 
 /* ---------- launcher: fixed reserved box, present from first paint ------- */

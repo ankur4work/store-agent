@@ -196,3 +196,28 @@ describe('widget mount: theme editor', () => {
     expect(r.mounted).toBe(false);
   });
 });
+
+describe('widget stacking', () => {
+  /**
+   * A string assertion on the stylesheet, not a layout test — the DOM double
+   * cannot compute stacking. It exists because the failure it guards is
+   * invisible: with no z-index the widget still loads, mounts, and answers,
+   * while painting underneath any theme element that has a positive one
+   * (sticky header, cart drawer, cookie banner). Nothing errors, nothing logs,
+   * and the only symptom is a merchant saying they cannot see the button.
+   */
+  it('puts the host in its own stacking context above theme content', () => {
+    const hostRule = SRC.slice(SRC.indexOf(':host{'), SRC.indexOf('.launcher{'));
+    expect(hostRule).toMatch(/z-index:\s*21474\d+/);
+    expect(hostRule).toMatch(/position:\s*relative/);
+  });
+
+  it('does not create a containing block that would trap the fixed launcher', () => {
+    // transform/filter/perspective/contain/will-change on the host would make
+    // position:fixed resolve against the host instead of the viewport.
+    const hostRule = SRC.slice(SRC.indexOf(':host{'), SRC.indexOf('.launcher{'));
+    for (const trap of ['transform:', 'perspective:', 'contain:', 'will-change:']) {
+      expect(hostRule).not.toContain(trap);
+    }
+  });
+});
