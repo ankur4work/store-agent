@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-08.4';
+  var BUILD = '2026-09-08.5';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1051,9 +1051,25 @@ textarea::placeholder{color:var(--muted)}
         var cx = r.left + r.width / 2;
         var cy = r.top + r.height / 2;
         var hit = document.elementFromPoint(cx, cy);
+        // Computed width/height vs the measured rect is the discriminator:
+        // "56px" with a 0x0 rect means the rule applied but an ancestor is not
+        // rendered; "0px"/"auto" would mean the stylesheet never matched.
+        var hs = getComputedStyle(host);
+        var hr = host.getBoundingClientRect();
+        var chain = [];
+        for (var n = host.parentElement, i = 0; n && i < 6; n = n.parentElement, i++) {
+          var ns = getComputedStyle(n);
+          chain.push(n.tagName + ':' + ns.display + (ns.visibility === 'hidden' ? '/hidden' : ''));
+        }
         var diag = {
           build: BUILD,
           rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+          computed: { w: cs.width, h: cs.height, right: cs.right, bottom: cs.bottom },
+          hostStyle: { display: hs.display, visibility: hs.visibility, zIndex: hs.zIndex, position: hs.position },
+          hostRect: { w: Math.round(hr.width), h: Math.round(hr.height) },
+          hostConnected: host.isConnected === true,
+          shadowKids: root.childNodes.length,
+          ancestors: chain,
           viewport: { w: window.innerWidth, h: window.innerHeight },
           style: { display: cs.display, visibility: cs.visibility, opacity: cs.opacity, zIndex: cs.zIndex, position: cs.position },
           onTop: hit === host,

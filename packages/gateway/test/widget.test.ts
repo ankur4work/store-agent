@@ -32,6 +32,9 @@ function makeEl(tag: string): StubEl {
   const el: StubEl = {
     tagName: tag,
     children: [],
+    childNodes: [],
+    parentElement: null,
+    isConnected: true,
     className: '',
     innerHTML: '',
     textContent: '',
@@ -139,7 +142,7 @@ async function run(opts: {
     addEventListener() {},
     removeEventListener() {},
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
-    getComputedStyle: () => ({ display: 'grid', visibility: 'visible', opacity: '1', zIndex: '2147483000', position: 'fixed' }),
+    getComputedStyle: () => ({ display: 'grid', visibility: 'visible', opacity: '1', zIndex: '2147483000', position: 'fixed', width: '56px', height: '56px', right: '22px', bottom: '22px' }),
     innerWidth: 1280,
     innerHeight: 800,
     AbortController,
