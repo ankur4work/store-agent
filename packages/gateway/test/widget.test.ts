@@ -131,6 +131,7 @@ async function run(opts: {
       querySelector: () => null,
       querySelectorAll: () => [],
       documentElement: makeEl('html'),
+      elementFromPoint: () => null,
       hidden: false,
     },
     navigator: { userAgent: 'test', language: 'en' },
@@ -138,6 +139,9 @@ async function run(opts: {
     addEventListener() {},
     removeEventListener() {},
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
+    getComputedStyle: () => ({ display: 'grid', visibility: 'visible', opacity: '1', zIndex: '2147483000', position: 'fixed' }),
+    innerWidth: 1280,
+    innerHeight: 800,
     AbortController,
   };
   sandbox['window'] = sandbox;

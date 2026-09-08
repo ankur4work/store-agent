@@ -1026,6 +1026,53 @@ textarea::placeholder{color:var(--muted)}
       });
   }
 
+  /**
+   * Measure the mounted launcher and report it.
+   *
+   * "It mounted" and "the merchant can see it" are different claims, and the
+   * gap between them is where this failure lives: the widget can be in the DOM,
+   * correct, and painted off-screen, at zero size, transparent, or underneath
+   * something. None of that is visible from the server, and asking a merchant
+   * to read DevTools has a poor success rate.
+   *
+   * elementFromPoint at the launcher's own centre is the decisive test: if it
+   * returns anything other than our host, something is covering us, and the
+   * reply names the thing.
+   *
+   * Theme editor only — this is a merchant looking at their own preview. It is
+   * never sent from a shopper's page.
+   */
+  function selfCheck() {
+    if (!inThemeEditor()) return;
+    try {
+      requestAnimationFrame(function () {
+        var r = launcher.getBoundingClientRect();
+        var cs = getComputedStyle(launcher);
+        var cx = r.left + r.width / 2;
+        var cy = r.top + r.height / 2;
+        var hit = document.elementFromPoint(cx, cy);
+        var diag = {
+          build: BUILD,
+          rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+          viewport: { w: window.innerWidth, h: window.innerHeight },
+          style: { display: cs.display, visibility: cs.visibility, opacity: cs.opacity, zIndex: cs.zIndex, position: cs.position },
+          onTop: hit === host,
+          covering: hit === host ? null : (hit ? (hit.tagName + (hit.id ? '#' + hit.id : '') + (hit.className && typeof hit.className === 'string' ? '.' + hit.className.split(' ')[0] : '')) : 'nothing'),
+          inViewport: r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth,
+        };
+        say('self-check ' + JSON.stringify(diag));
+        fetch(API + '/api/diag', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ shop: SHOP, diag: diag }),
+          keepalive: true,
+        }).catch(function () {});
+      });
+    } catch (e) {
+      say('self-check failed: ' + e.message);
+    }
+  }
+
   function render(cfg) {
     if (cfg && cfg.enabled === false) {
       say('not shown: disabled in the StoreAgent app settings');
@@ -1043,6 +1090,7 @@ textarea::placeholder{color:var(--muted)}
     // — a different problem from "never rendered", and previously they were
     // indistinguishable.
     say('ready (' + BUILD + ') — launcher mounted bottom-' + (host.getAttribute('data-position') === 'left' ? 'left' : 'right'));
+    selfCheck();
     if (state.open) open();
     else if (!state.messages.length) {
       // A single, quiet invitation after real dwell. Never on load, never twice.

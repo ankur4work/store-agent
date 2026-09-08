@@ -271,6 +271,27 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
+    /**
+     * Layout self-check from the widget, sent only from a merchant's theme
+     * editor preview. "It mounted" and "the merchant can see it" are different
+     * claims; this carries the measurements that tell them apart — position,
+     * size, computed style, and what is on top at the launcher's own centre.
+     * Diagnostic only: nothing here is stored or used for anything else.
+     */
+    if (url.pathname === '/api/diag' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req, 4 * 1024)) as { shop?: unknown; diag?: unknown };
+        log.info('widget_selfcheck', {
+          shop: typeof body.shop === 'string' ? body.shop : null,
+          diag: body.diag,
+        });
+      } catch {
+        // A malformed diagnostic is not worth an error response.
+      }
+      json(res, 204, {});
+      return;
+    }
+
     // Exposure beacon. Fired once per session by the widget — in BOTH arms,
     // including holdout, where nothing renders. Without the holdout half there
     // is no control group and no incrementality.
