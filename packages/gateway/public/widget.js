@@ -912,10 +912,51 @@ textarea::placeholder{color:var(--muted)}
   }
 
   // ---------- mount -------------------------------------------------------
+
+  /**
+   * Is this the merchant previewing their own theme, rather than a shopper?
+   *
+   * Shopify sets `Shopify.designMode` inside the theme editor and nowhere else.
+   */
+  function inThemeEditor() {
+    try {
+      return !!(window.Shopify && window.Shopify.designMode);
+    } catch (e) {
+      return false;
+    }
+  }
+
   function mount() {
     var sid = sessionId();
     state.sessionId = state.sessionId || sid;
     var shop = SHOP;
+
+    // The theme editor is the merchant looking at their own store. They are
+    // not a shopper, and putting them in the experiment breaks two things:
+    //
+    //   - A merchant who draws the holdout installs the app, enables it, and
+    //     sees NOTHING — silently, permanently (the arm is sticky per browser),
+    //     with no way to tell that from a broken install. One in five merchants
+    //     would conclude the app does not work on their first run.
+    //   - Their sessions land in the control group, so the incrementality
+    //     number is computed partly from people who were never shopping.
+    //
+    // So: no exposure beacon at all from here — nothing about a preview should
+    // reach the experiment — and render unconditionally. The merchant's own
+    // on/off setting is still honoured, because `render` bails on
+    // `enabled: false`. Only the RANDOM assignment is bypassed, never an
+    // explicit choice.
+    if (inThemeEditor()) {
+      fetch(API + '/api/config?shop=' + encodeURIComponent(shop))
+        .then(function (r) {
+          return r.json();
+        })
+        .then(render)
+        .catch(function () {
+          render({ enabled: true });
+        });
+      return;
+    }
 
     fetch(API + '/api/exposure', {
       method: 'POST',
