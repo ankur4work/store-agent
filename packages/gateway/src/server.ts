@@ -17,6 +17,7 @@ import { PLANS, PLAN_ORDER, isPlanId } from '@storeagent/billing';
 import { DEMO_CATALOG } from './catalog-fixture.js';
 import { beginInstall, completeInstall } from './shopify/oauth.js';
 import { parseShopDomain } from './shopify/domain.js';
+import { exchangeSessionToken } from './shopify/token-exchange.js';
 import { handleWebhook, parseSubscriptionPayload } from './shopify/webhooks.js';
 import {
   MemoryNonceStore,
@@ -475,6 +476,51 @@ export function createGateway(deps: GatewayDeps): Server {
       }
 
       const shop = verified.shop;
+
+      /**
+       * Provision the shop on first authenticated load.
+       *
+       * Under Shopify managed installation the OAuth callback never fires, so
+       * an app can be fully installed — theme extension rendering, admin page
+       * loading, a subscription paid for — while the server holds no access
+       * token and every server-side call silently short-circuits. Exchanging
+       * the session token we just VERIFIED for an offline token closes that
+       * gap, and works whichever way the merchant installed.
+       *
+       * The token is exchanged once and stored; a shop we already know is left
+       * alone. A failure here is logged and ignored rather than blocking the
+       * page: the dashboard is still readable without a token, and the next
+       * load tries again.
+       */
+      if (app.apiSecret !== '' && (await shops.get(shop)) === undefined) {
+        const idToken = url.searchParams.get('id_token') ?? bearerToken(header(req, 'authorization'));
+        if (idToken !== undefined && idToken !== null && idToken !== '') {
+          const exchanged = await exchangeSessionToken(shop, idToken, {
+            apiKey: app.apiKey,
+            apiSecret: app.apiSecret,
+          });
+          if (exchanged.ok) {
+            await shops.put(exchanged.shop);
+            log.info('installed', { shop, scopes: exchanged.shop.scopes, via: 'token_exchange' });
+          } else {
+            log.warn('token_exchange_failed', { shop, reason: exchanged.reason });
+          }
+        }
+      }
+
+      /**
+       * Returning from a plan change, so the local record is known-stale:
+       * Shopify has just created or cancelled the subscription and our copy
+       * still says whatever it said before. Managed pricing sends the merchant
+       * back with `charge_id`, and showing them "Free" on the page they land on
+       * after paying is the one moment the cached value is certainly wrong.
+       */
+      const returningFromBilling =
+        url.searchParams.has('charge_id') || url.searchParams.get('billing') === 'return';
+      if (billing !== undefined && returningFromBilling) {
+        await billing.reconcile(shop).catch(() => undefined);
+      }
+
       const totals = await attribution.totals(shop);
       const lift = analyze(totals.exposed, totals.holdout);
       const vm = {
