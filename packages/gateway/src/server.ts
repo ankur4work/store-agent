@@ -43,6 +43,7 @@ import {
 } from './voice/service.js';
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
+import { pricingPlansUrl } from './billing/managed.js';
 import {
   MemorySettingsStore,
   accentIsAccessible,
@@ -543,6 +544,33 @@ export function createGateway(deps: GatewayDeps): Server {
         json(res, 422, { errors: ['Unknown plan.'] });
         return;
       }
+
+      /**
+       * Under Shopify App Pricing, Shopify owns plan selection and creates the
+       * subscription. This app must not — a subscription we create that
+       * managed pricing did not expect leaves the two disagreeing about the
+       * merchant's plan, which is what Shopify's readiness checklist is asking
+       * an app to confirm it has stopped doing.
+       *
+       * Every plan change, including dropping to free, goes to Shopify's
+       * picker: it is the one screen that can move a merchant between plans.
+       * Returned as `confirmationUrl` — the same field the approval URL used —
+       * so the admin UI, which just assigns it to window.top.location, needs no
+       * change and cannot end up half-migrated.
+       */
+      if (config.shopify.managedPricing) {
+        const handle = config.shopify.appHandle;
+        if (handle === undefined || handle === '') {
+          log.error('managed_pricing_misconfigured', { shop: verified.shop });
+          json(res, 503, {
+            errors: ['Billing is not fully configured. Set SHOPIFY_APP_HANDLE on the deployment.'],
+          });
+          return;
+        }
+        json(res, 200, { confirmationUrl: pricingPlansUrl(verified.shop, handle) });
+        return;
+      }
+
       if (requested === 'free') {
         // Downgrading is a cancellation, not a subscription. Creating a
         // zero-value subscription would send the merchant to an approval

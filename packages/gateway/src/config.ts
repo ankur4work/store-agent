@@ -7,6 +7,18 @@ export interface ShopifyAppConfig {
   readonly apiSecret: string;
   readonly scopes: string;
   readonly appUrl: string;
+  /**
+   * The app's handle in the Partner dashboard — the `<handle>` in
+   * `admin.shopify.com/store/<store>/apps/<handle>`, not the client id.
+   * Only managed pricing needs it, to build Shopify's plan-picker URL.
+   */
+  readonly appHandle: string | undefined;
+  /**
+   * Shopify App Pricing is ON: Shopify owns plan selection and subscription
+   * creation, and this app must NOT call `appSubscriptionCreate`. Reading
+   * subscription state is unaffected by the mode.
+   */
+  readonly managedPricing: boolean;
 }
 
 export interface GatewayConfig {
@@ -221,5 +233,10 @@ function loadShopifyConfig(env: Record<string, string | undefined>): ShopifyAppC
     apiSecret,
     appUrl: appUrl.replace(/\/+$/, ''),
     scopes: env['SHOPIFY_SCOPES'] ?? 'read_products,read_orders',
+    appHandle: env['SHOPIFY_APP_HANDLE'],
+    // Off unless explicitly enabled. Turning this on while the app still
+    // creates its own subscriptions is the exact conflict managed pricing
+    // forbids, so it must be a deliberate switch, never a default.
+    managedPricing: env['SHOPIFY_MANAGED_PRICING'] === 'true',
   };
 }

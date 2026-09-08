@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { loadConfig } from '../src/config.js';
+import { pricingPlansUrl, storeHandle } from '../src/billing/managed.js';
 import { PLANS, overageCapMinor, periodKey } from '@storeagent/billing';
 import { openDatabase } from '../src/store/sqlite.js';
 import { SqliteBillingStore } from '../src/billing/store.js';
@@ -433,5 +435,39 @@ describe('subscription webhook', () => {
     await svc.applyWebhook(SHOP, { subscriptionId: 'gid://sub/1', name: 'Plus', status: 'FROZEN' });
     expect(svc.check(SHOP, T0).allowed).toBe(false);
     expect(svc.check(SHOP, T0).verdict).toBe('frozen');
+  });
+});
+
+describe('Shopify App Pricing (managed pricing)', () => {
+  /**
+   * Only one system may create subscriptions. Under managed pricing that is
+   * Shopify, and an app that also calls appSubscriptionCreate leaves the two
+   * disagreeing about the merchant's plan — which is what the readiness
+   * checklist for the switch is really asking about.
+   */
+  it('builds the plan-picker URL from the store handle', () => {
+    expect(pricingPlansUrl('test-ankur-grxxuhm3.myshopify.com', 'store-agent-35')).toBe(
+      'https://admin.shopify.com/store/test-ankur-grxxuhm3/charges/store-agent-35/pricing_plans',
+    );
+  });
+
+  it('strips only the myshopify suffix', () => {
+    expect(storeHandle('acme.myshopify.com')).toBe('acme');
+    expect(storeHandle('ACME.MyShopify.com')).toBe('ACME');
+    // Not a myshopify domain: returned unchanged rather than guessed at.
+    expect(storeHandle('shop.example.com')).toBe('shop.example.com');
+  });
+
+  it('does not mistake a myshopify substring for the suffix', () => {
+    expect(storeHandle('my.myshopify.com.evil.test')).toBe('my.myshopify.com.evil.test');
+  });
+
+  it('is off unless explicitly enabled', () => {
+    // Enabling it while the app still creates subscriptions is the conflict
+    // managed pricing forbids, so it must never default on.
+    const base = { OPENAI_API_KEY: 'sk-x', SHOPIFY_API_KEY: 'k', SHOPIFY_API_SECRET: 's', SHOPIFY_APP_URL: 'https://app.test' };
+    expect(loadConfig(base).shopify?.managedPricing).toBe(false);
+    expect(loadConfig({ ...base, SHOPIFY_MANAGED_PRICING: 'yes' }).shopify?.managedPricing).toBe(false);
+    expect(loadConfig({ ...base, SHOPIFY_MANAGED_PRICING: 'true' }).shopify?.managedPricing).toBe(true);
   });
 });
