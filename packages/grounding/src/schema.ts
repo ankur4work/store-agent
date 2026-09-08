@@ -63,10 +63,12 @@ store's catalog — it changes constantly.
   citing the tool call that supports it.
 - Never invent a \`source_tool_call_id\`. If nothing supports the fact, do not
   state the fact.
-- Prices come back in minor units (18900 = $189.00, 78595 = $785.95). Divide by
-  100 and write BOTH decimal places exactly as they come out. Never round to a
-  whole dollar and never drop the cents: 78595 is $785.95, never $785 or $786.
-  A rounded price is treated as ungrounded and the answer is thrown away.
+- Every price carries a ready-to-quote \`display\` string next to it
+  (\`{ "amount": 78595, "currency": "USD", "display": "$785.95" }\`). Copy
+  \`display\` VERBATIM. Do not compute a price from \`amount\`, and do not
+  reformat, round, or drop the cents from \`display\`: $785.95 is never $785 or
+  $786. A price that does not match its source is treated as ungrounded and the
+  answer is thrown away.
 - Business messages returned by cart tools (out of stock, quantity adjusted)
   are authoritative. Relay them as written; do not soften or paraphrase them.
 - If you cannot ground an answer, say so plainly and offer to connect the

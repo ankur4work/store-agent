@@ -287,3 +287,44 @@ describe('shopify install routes — configured', () => {
     expect(() => loadConfig({ ...env, SHOPIFY_APP_URL: 'http://app.test' })).toThrow(/https/);
   });
 });
+
+describe('catalog money is pre-formatted for the model', () => {
+  /**
+   * The model was handed minor units and asked to divide by 100 itself. On the
+   * live catalog it wrote $785.00 for a $785.95 board on ~3 turns in 5. The
+   * tripwire caught every one, so no shopper saw a wrong price — but each catch
+   * discarded the generation and re-ran the turn (~5.6k -> ~7.2k input tokens),
+   * and one run in five escalated a question the store could answer.
+   *
+   * Prompting reduced it without fixing it, because the instruction was still
+   * "do this arithmetic correctly every time". These assert the arithmetic is
+   * gone: the exact string to quote is in the payload.
+   */
+  const exec = createToolExecutor({ session: newSession('s', 'demo.local') });
+
+  it('attaches a display string to every price', async () => {
+    const r = (await exec.execute('search_catalog', { query: 'wool' })) as {
+      products: { price_range: { min: { amount: number; display?: string } } }[];
+    };
+    const money = r.products[0]!.price_range.min;
+    expect(money.display).toBe('$189.00');
+    // Minor units survive: grounding validates claims against them.
+    expect(money.amount).toBe(18900);
+  });
+
+  it('keeps both decimal places on a non-round price', async () => {
+    // 78595 -> $785.95 is the exact value the model kept rounding to $785.
+    const { formatMinor } = await import('@storeagent/grounding');
+    expect(formatMinor(78595)).toBe('785.95');
+  });
+
+  it('formats every money object it can find, not just the first', async () => {
+    const r = (await exec.execute('search_catalog', { query: '' })) as {
+      products: { price_range: { min: { display?: string }; max: { display?: string } } }[];
+    };
+    for (const p of r.products) {
+      expect(p.price_range.min.display).toMatch(/^\$\d+\.\d{2}$/);
+      expect(p.price_range.max.display).toMatch(/^\$\d+\.\d{2}$/);
+    }
+  });
+});
