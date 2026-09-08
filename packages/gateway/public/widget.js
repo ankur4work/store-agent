@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-08.6';
+  var BUILD = '2026-09-08.7';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -326,10 +326,27 @@ textarea::placeholder{color:var(--muted)}
 :host([data-position=left]) .panel{right:auto;left:22px;transform-origin:0 100%}
 
 @media (max-width:540px){
-  .panel{right:0;left:0;bottom:0;width:100%;height:88dvh;border-radius:20px 20px 0 0;
+  /* A third of the viewport, not the whole phone. The panel is a sheet the
+     shopper consults while still seeing the product they were looking at —
+     covering the page is what makes an assistant feel like an interruption.
+     dvh, not vh, so the mobile URL bar collapsing does not resize it. */
+  .panel{right:0;left:0;bottom:0;width:100%;height:33dvh;border-radius:20px 20px 0 0;
     transform-origin:50% 100%}
   .launcher{right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px))}
-  .card{flex-basis:142px}
+
+  /* At a third of the viewport the chrome is the constraint, not the content:
+     the default header, composer and intro come to ~128px, which on a short
+     phone leaves under 60px of actual conversation. Everything below is a
+     tighter version of the same layout so the sheet stays usable at this size
+     rather than technically correct and unreadable. */
+  header{padding:10px 14px}
+  .avatar{width:26px;height:26px;border-radius:8px}
+  .intro{padding:14px 16px 6px}
+  .intro h2{font-size:17px}
+  .intro p{font-size:12.5px}
+  form{padding:9px 12px;padding-bottom:calc(9px + env(safe-area-inset-bottom,0px))}
+  textarea{min-height:38px;max-height:72px;padding:9px 12px}
+  .card{flex-basis:120px}
 }
 @media (prefers-color-scheme:dark){
   :host{--paper:var(--sa-bg,#141619);--ink:var(--sa-fg,#eef1f3);

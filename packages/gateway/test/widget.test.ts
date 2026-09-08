@@ -315,3 +315,26 @@ describe('widget host isolation', () => {
     expect(r.pinned['pointer-events']).not.toContain('none');
   });
 });
+
+describe('widget mobile sheet', () => {
+  // String assertions on the stylesheet — the DOM double cannot do media
+  // queries or layout. They guard the intent: on a phone the panel is a sheet
+  // over a third of the viewport, not a takeover of the whole screen.
+  const mobile = SRC.slice(SRC.indexOf('@media (max-width:540px)'), SRC.indexOf('@media (prefers-color-scheme'));
+
+  it('takes a third of the viewport, not the whole phone', () => {
+    expect(mobile).toMatch(/height:\s*33dvh/);
+    expect(mobile).not.toMatch(/height:\s*88dvh/);
+  });
+
+  it('uses dvh so a collapsing URL bar does not resize it mid-conversation', () => {
+    expect(mobile).not.toMatch(/height:\s*\d+vh\b/);
+  });
+
+  it('compacts the chrome, or a third of a short phone is all header', () => {
+    // header + composer + intro at desktop sizes come to ~128px, which would
+    // leave under 60px of conversation on a 568px-tall device.
+    expect(mobile).toMatch(/header\{padding:10px 14px\}/);
+    expect(mobile).toMatch(/textarea\{min-height:38px/);
+  });
+});
