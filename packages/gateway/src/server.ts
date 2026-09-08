@@ -1039,7 +1039,7 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
 
     // A matching ETag means the storefront already has these exact bytes.
     if (header(req, 'if-none-match') === etag) {
-      res.writeHead(304, { etag, 'cache-control': cacheControlFor(ext) });
+      res.writeHead(304, { etag, 'cache-control': cacheControlFor(ext, pathname) });
       res.end();
       return true;
     }
@@ -1047,7 +1047,7 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
     res.writeHead(200, {
       'content-type': MIME[ext] ?? 'application/octet-stream',
       'content-length': body.length,
-      'cache-control': cacheControlFor(ext),
+      'cache-control': cacheControlFor(ext, pathname),
       etag,
     });
     res.end(body);
@@ -1057,8 +1057,17 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
   }
 }
 
-function cacheControlFor(ext: string): string {
+function cacheControlFor(ext: string, pathname?: string): string {
   if (ext === '.html') return 'no-cache';
+
+  // widget.js is the whole product and is unversioned: every storefront asks
+  // for the same URL forever. Under the shared policy below, a browser may
+  // serve a copy up to a WEEK old while it revalidates — so a merchant can keep
+  // running a bug for days after it is fixed, and "I deployed a fix" and "you
+  // are still on the old code" are indistinguishable. It has an ETag, so
+  // revalidation is a 304 and costs almost nothing.
+  if (pathname === '/widget.js') return 'public, max-age=300, must-revalidate';
+
   return 'public, max-age=600, stale-while-revalidate=604800';
 }
 

@@ -43,6 +43,12 @@
     location.hostname;
   var KEY = 'storeagent.session';
 
+  // Printed on mount. widget.js is unversioned and cached, so without this
+  // there is no way to tell a stale copy in a merchant's browser from current
+  // code — which makes "I deployed a fix" and "you are still running the bug"
+  // look the same.
+  var BUILD = '2026-09-08.4';
+
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
     var saved = sessionStorage.getItem(KEY);
@@ -941,6 +947,23 @@ textarea::placeholder{color:var(--muted)}
     }
   }
 
+  /**
+   * Say out loud what the widget decided.
+   *
+   * Every path that ends in "render nothing" used to be silent: holdout,
+   * disabled, and a mount that never ran all looked identical from the outside
+   * — an empty corner and an empty console. That is indistinguishable from a
+   * broken install, and it cost a full debugging session to tell apart states
+   * the widget already knew. One line each is a rounding error next to the
+   * theme's own console noise, and it is the difference between "I can't see
+   * the button" and a diagnosis.
+   */
+  function say(msg) {
+    try {
+      console.info('[StoreAgent] ' + msg);
+    } catch (e) {}
+  }
+
   function mount() {
     var sid = sessionId();
     state.sessionId = state.sessionId || sid;
@@ -962,6 +985,7 @@ textarea::placeholder{color:var(--muted)}
     // `enabled: false`. Only the RANDOM assignment is bypassed, never an
     // explicit choice.
     if (inThemeEditor()) {
+      say('theme editor detected — always shown here, and not counted in the experiment');
       fetch(API + '/api/config?shop=' + encodeURIComponent(shop))
         .then(function (r) {
           return r.json();
@@ -985,7 +1009,10 @@ textarea::placeholder{color:var(--muted)}
       .then(function (d) {
         // Held back: record nothing on screen, leave the session id in place
         // for the pixel, and stop.
-        if (d && d.arm === 'holdout') return;
+        if (d && d.arm === 'holdout') {
+          say('not shown: this browser is in the holdout (experiment control group)');
+          return;
+        }
         return fetch(API + '/api/config?shop=' + encodeURIComponent(shop))
           .then(function (r) {
             return r.json();
@@ -1000,7 +1027,10 @@ textarea::placeholder{color:var(--muted)}
   }
 
   function render(cfg) {
-    if (cfg && cfg.enabled === false) return;
+    if (cfg && cfg.enabled === false) {
+      say('not shown: disabled in the StoreAgent app settings');
+      return;
+    }
     if (cfg) {
       if (cfg.accentColor) host.style.setProperty('--sa-accent', cfg.accentColor);
       if (cfg.cornerRadius != null) host.style.setProperty('--sa-radius', cfg.cornerRadius + 'px');
@@ -1008,6 +1038,11 @@ textarea::placeholder{color:var(--muted)}
       state.greeting = cfg.greeting || '';
     }
     document.body.appendChild(host);
+    // Confirms the launcher is in the DOM. If this prints and the corner still
+    // looks empty, the widget mounted and something is covering or clipping it
+    // — a different problem from "never rendered", and previously they were
+    // indistinguishable.
+    say('ready (' + BUILD + ') — launcher mounted bottom-' + (host.getAttribute('data-position') === 'left' ? 'left' : 'right'));
     if (state.open) open();
     else if (!state.messages.length) {
       // A single, quiet invitation after real dwell. Never on load, never twice.

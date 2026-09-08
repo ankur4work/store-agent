@@ -85,6 +85,7 @@ function storage(): Record<string, unknown> {
 interface RunResult {
   calls: string[];
   mounted: boolean;
+  said: string[];
 }
 
 async function run(opts: {
@@ -93,10 +94,11 @@ async function run(opts: {
   config?: Record<string, unknown>;
 }): Promise<RunResult> {
   const calls: string[] = [];
+  const said: string[] = [];
   const body = makeEl('body');
 
   const sandbox: Record<string, unknown> = {
-    console,
+    console: { ...console, info: (m: string) => said.push(String(m)) },
     fetch: (url: unknown) => {
       calls.push(String(url));
       const u = String(url);
@@ -148,7 +150,7 @@ async function run(opts: {
   // Let the mount promise chain settle.
   await new Promise((r) => setTimeout(r, 20));
 
-  return { calls, mounted: body.children.length > 0 };
+  return { calls, said, mounted: body.children.length > 0 };
 }
 
 describe('widget mount: shopper', () => {
@@ -219,5 +221,40 @@ describe('widget stacking', () => {
     for (const trap of ['transform:', 'perspective:', 'contain:', 'will-change:']) {
       expect(hostRule).not.toContain(trap);
     }
+  });
+});
+
+describe('widget diagnostics', () => {
+  /**
+   * Every non-render path used to be silent, so holdout, disabled, and
+   * never-mounted all presented as an empty corner and an empty console —
+   * indistinguishable from a broken install, and from each other. Diagnosing
+   * one merchant's "I can't see the button" took a full session precisely
+   * because the widget knew the answer and never said it.
+   */
+  it('says why it is hidden in the holdout', async () => {
+    const r = await run({ arm: 'holdout' });
+    expect(r.mounted).toBe(false);
+    expect(r.said.join(' ')).toMatch(/holdout/i);
+  });
+
+  it('says why it is hidden when switched off', async () => {
+    const r = await run({ designMode: true, config: { enabled: false } });
+    expect(r.mounted).toBe(false);
+    expect(r.said.join(' ')).toMatch(/disabled|settings/i);
+  });
+
+  it('says it is ready, and stamps the build, when it does mount', async () => {
+    // Without the build stamp there is no way to tell a stale cached copy in a
+    // merchant's browser from current code.
+    const r = await run({ arm: 'exposed' });
+    expect(r.mounted).toBe(true);
+    expect(r.said.join(' ')).toMatch(/ready/i);
+    expect(r.said.join(' ')).toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
+  it('announces the theme editor bypass', async () => {
+    const r = await run({ designMode: true, arm: 'holdout' });
+    expect(r.said.join(' ')).toMatch(/theme editor/i);
   });
 });
