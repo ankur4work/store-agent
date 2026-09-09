@@ -1,5 +1,9 @@
 import { isExpired, isLegacyToken, type Shop, type ShopStore } from './shops.js';
-import { refreshAccessToken, type TokenExchangeDeps } from './token-exchange.js';
+import {
+  cycleLegacyToken,
+  refreshAccessToken,
+  type TokenExchangeDeps,
+} from './token-exchange.js';
 
 /**
  * Keeping an expiring offline token usable.
@@ -44,16 +48,23 @@ export async function freshShop(
   const record = await deps.shops.get(shopDomain);
   if (record === undefined) return undefined;
 
-  // A legacy non-expiring token. It cannot be refreshed — there is no refresh
-  // token — and the Admin API refuses it, so it is worth nothing. Returning it
-  // would produce a 403 the caller cannot act on. Re-provisioning needs a
-  // session token, so it happens on the next admin load.
+  // A legacy non-expiring token: refused by the Admin API, and with no refresh
+  // token there is nothing to renew. It can still be traded for an expiring
+  // pair using itself as the subject, which needs no merchant — so repair it
+  // here rather than waiting for someone to open the app, which for a shop
+  // whose merchant never visits is waiting forever.
   if (isLegacyToken(record)) {
-    deps.log?.warn('token_needs_reprovisioning', {
-      shop: shopDomain,
-      reason: 'non-expiring token, no longer accepted by the Admin API',
-    });
-    return undefined;
+    const cycled = await cycleLegacyToken(shopDomain, record.accessToken, deps, now);
+    if (!cycled.ok) {
+      deps.log?.warn('token_cycle_failed', { shop: shopDomain, reason: cycled.reason });
+      return undefined;
+    }
+    // Persisted before it is used: Shopify has already destroyed the old token,
+    // so losing this response would leave the shop with no token at all.
+    const migrated: Shop = { ...cycled.shop, installedAt: record.installedAt };
+    await deps.shops.put(migrated);
+    deps.log?.info('token_cycled', { shop: shopDomain, expiresAt: migrated.expiresAt });
+    return migrated;
   }
 
   if (!isExpired(record, now)) return record;

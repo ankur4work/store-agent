@@ -98,6 +98,46 @@ export async function exchangeSessionToken(
 }
 
 /**
+ * Trade a legacy non-expiring token for an expiring one.
+ *
+ * The migration path for a shop that installed before Shopify required
+ * expiring tokens. It authenticates with the stored token ITSELF rather than a
+ * session token, which is the whole point: there is no merchant, no browser
+ * and no ID token involved, so a wedged install can be repaired server-side
+ * instead of waiting for someone to open the app.
+ *
+ * **Irreversible, and unsafe to replay.** Shopify destroys the non-expiring
+ * token in the same transaction that issues the expiring pair. If the response
+ * is lost, that shop has no usable token at all and the merchant must
+ * reauthorize. So the result is persisted before anything else happens, and a
+ * failure leaves the old record untouched.
+ */
+export async function cycleLegacyToken(
+  shopDomain: string,
+  nonExpiringToken: string,
+  deps: TokenExchangeDeps,
+  now: number = Date.now(),
+): Promise<TokenExchangeResult> {
+  return postForToken(
+    shopDomain,
+    {
+      client_id: deps.apiKey,
+      client_secret: deps.apiSecret,
+      grant_type: GRANT_TYPE,
+      subject_token: nonExpiringToken,
+      // The subject is an offline token, not an id_token — this is what makes
+      // the call possible without a merchant session.
+      subject_token_type: REQUESTED_TOKEN_TYPE,
+      requested_token_type: REQUESTED_TOKEN_TYPE,
+      expiring: EXPIRING,
+    },
+    deps,
+    now,
+    'token cycle',
+  );
+}
+
+/**
  * Renew an expiring offline token, with no merchant present.
  *
  * This is what makes hour-long tokens workable: webhooks, billing

@@ -96,24 +96,51 @@ describe('keeping an expiring offline token usable', () => {
     expect(r?.installedAt).toBe(installedAt);
   });
 
-  it('refuses a legacy non-expiring token rather than making a call that cannot work', async () => {
+  it('trades a legacy non-expiring token for an expiring one, with no merchant present', async () => {
     // This is the state production was wedged in: a stored token the Admin API
     // answers with 403 "Non-expiring access tokens are no longer accepted".
+    // The repair authenticates with that dead token itself, so it needs no
+    // session token — otherwise a shop whose merchant never opens the app
+    // stays broken indefinitely.
     const shops = new MemoryShopStore();
     await shops.put({
       shop: SHOP,
       accessToken: 'shpat_legacy',
       scopes: 'read_products',
-      installedAt: NOW,
+      installedAt: NOW - 30 * 24 * HOUR,
     });
     const { doFetch, calls } = refreshEndpoint();
 
     const r = await freshShop(SHOP, { ...DEPS, shops, doFetch }, NOW);
 
-    // Treated as "no usable token" — the caller behaves as for an uninstalled
-    // shop instead of retrying a request Shopify will always refuse.
-    expect(r).toBeUndefined();
-    expect(calls).toHaveLength(0);
+    expect(r?.accessToken).toBe('shpat_renewed');
+    expect(calls[0]?.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:token-exchange');
+    expect(calls[0]?.get('subject_token')).toBe('shpat_legacy');
+    expect(calls[0]?.get('subject_token_type')).toBe(
+      'urn:shopify:params:oauth:token-type:offline-access-token',
+    );
+    expect(calls[0]?.get('expiring')).toBe('1');
+
+    // Shopify destroys the old token in the same transaction, so the new pair
+    // must be persisted, not just returned.
+    const persisted = await shops.get(SHOP);
+    expect(persisted?.refreshToken).toBe('shprt_renewed');
+    expect(persisted?.installedAt).toBe(NOW - 30 * 24 * HOUR);
+  });
+
+  it('leaves the record alone when cycling fails', async () => {
+    const shops = new MemoryShopStore();
+    const legacy = {
+      shop: SHOP,
+      accessToken: 'shpat_legacy',
+      scopes: 'read_products',
+      installedAt: NOW,
+    };
+    await shops.put(legacy);
+    const { doFetch } = refreshEndpoint({}, 400);
+
+    expect(await freshShop(SHOP, { ...DEPS, shops, doFetch }, NOW)).toBeUndefined();
+    expect(await shops.get(SHOP)).toEqual(legacy);
   });
 
   it('gives up when the refresh token itself has expired', async () => {
