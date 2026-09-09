@@ -143,13 +143,23 @@ describe('keeping an expiring offline token usable', () => {
 });
 
 describe('token classification', () => {
+  // Built without the key rather than with `expiresAt: undefined` — under
+  // exactOptionalPropertyTypes those are different types, and only the absent
+  // one is what a legacy row actually deserialises to.
+  const legacy: Shop = {
+    shop: SHOP,
+    accessToken: 'shpat_legacy',
+    scopes: 'read_products',
+    installedAt: NOW,
+  };
+
   it('recognises a legacy token by its missing expiry, not by its value', () => {
     // The two kinds are indistinguishable as strings.
-    expect(isLegacyToken(stored({ expiresAt: undefined }))).toBe(true);
+    expect(isLegacyToken(legacy)).toBe(true);
     expect(isLegacyToken(stored())).toBe(false);
   });
 
   it('does not treat a legacy token as expired, which would imply it is refreshable', () => {
-    expect(isExpired(stored({ expiresAt: undefined }), NOW)).toBe(false);
+    expect(isExpired(legacy, NOW)).toBe(false);
   });
 });
