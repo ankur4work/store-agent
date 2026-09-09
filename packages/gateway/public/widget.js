@@ -718,8 +718,27 @@ textarea::placeholder{color:var(--muted)}
     return '';
   }
 
-  // Energy-based endpointing. The server-side endpointer uses the transcript to
-  // vary this threshold; here we only have loudness, so it stays conservative.
+  // Energy-based endpointing — deciding the shopper has stopped talking.
+  //
+  // This used to compare loudness against a hard-coded `level > 12`. That
+  // number is only meaningful in a silent room. On a storefront with music
+  // playing, a fan, traffic, or a busy shop, the ambient level sits ABOVE 12
+  // permanently — so silence was never detected, the recorder never stopped,
+  // and the shopper finished speaking to an assistant that just kept
+  // listening. Nothing errored; it simply never answered.
+  //
+  // So the threshold is measured rather than assumed. The quietest recent
+  // level is the room's noise floor, and speech is what rises clearly above
+  // it. A room being loud no longer means the shopper is talking.
+  //
+  // Silence windows mirror packages/voice/src/endpoint.ts. That module varies
+  // the wait by what was actually said — 260ms after a finished question,
+  // 1100ms after "something warm and" — but it needs a transcript, and here
+  // there is only loudness. `base` is the right choice when nothing is known.
+  var ENDPOINT_SILENCE_MS = 550; // THRESHOLDS.base
+  var MIN_SPEECH_MS = 250;       // shorter than this is a cough, not a turn
+  var MAX_UTTERANCE_MS = 20000;  // a hard stop, so noise cannot record forever
+
   function monitorSilence() {
     if (!voice.ctx) {
       voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -727,10 +746,18 @@ textarea::placeholder{color:var(--muted)}
       voice.analyser.fftSize = 512;
       voice.ctx.createMediaStreamSource(voice.stream).connect(voice.analyser);
     }
+    // Resume matters on iOS/Safari, where the context starts suspended and
+    // every level reads 0 — which looks exactly like silence forever.
+    if (voice.ctx.state === 'suspended' && voice.ctx.resume) voice.ctx.resume();
+
     var buf = new Uint8Array(voice.analyser.frequencyBinCount);
-    voice.silenceSince = performance.now();
+    var startedAt = performance.now();
+    voice.silenceSince = startedAt;
     voice.spokeMs = 0;
-    var last = performance.now();
+    // Seeded high so the first genuinely quiet frame pulls it down fast,
+    // rather than a loud first frame pinning the floor up.
+    voice.floor = 255;
+    var last = startedAt;
 
     function tick() {
       if (!voice.on) return;
@@ -742,7 +769,17 @@ textarea::placeholder{color:var(--muted)}
       var dt = now - last;
       last = now;
 
-      if (level > 12) {
+      // Track the noise floor: drop to a new quiet level immediately, drift
+      // back up slowly. Fast down/slow up means a pause between words resets
+      // the floor honestly, while a passing truck does not raise it for good.
+      if (level < voice.floor) voice.floor = level;
+      else voice.floor += (level - voice.floor) * 0.0005;
+
+      // Speech has to clear the room by a real margin, with an absolute floor
+      // so a perfectly silent room doesn't make every tiny sound "speech".
+      var speaking = level > Math.max(6, voice.floor + 6 + voice.floor * 0.5);
+
+      if (speaking) {
         voice.silenceSince = now;
         voice.spokeMs += dt;
         // Barge-in: talking over playback cancels audio AND the generation.
@@ -750,12 +787,16 @@ textarea::placeholder{color:var(--muted)}
           stopPlayback();
           if (inflight) inflight.abort();
         }
-      } else if (
-        voice.spokeMs > 250 &&
-        now - voice.silenceSince > 700 &&
-        voice.recorder &&
-        voice.recorder.state === 'recording'
-      ) {
+      }
+
+      var recording = voice.recorder && voice.recorder.state === 'recording';
+      var quietLongEnough =
+        voice.spokeMs > MIN_SPEECH_MS && now - voice.silenceSince > ENDPOINT_SILENCE_MS;
+      // The safety net for the case this whole function exists to fix: if the
+      // level never falls, stop anyway rather than recording indefinitely.
+      var tooLong = now - startedAt > MAX_UTTERANCE_MS && voice.spokeMs > MIN_SPEECH_MS;
+
+      if (recording && (quietLongEnough || tooLong)) {
         voice.recorder.stop();
         return;
       }

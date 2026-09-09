@@ -235,6 +235,49 @@ describe('widget stacking', () => {
   });
 });
 
+/**
+ * Endpointing — the decision that the shopper has stopped talking.
+ *
+ * Source assertions rather than behaviour: the VAD loop runs on
+ * requestAnimationFrame against a live AudioContext, neither of which the DOM
+ * double provides. They guard a failure that produces no error at all — the
+ * shopper finishes their sentence and the assistant simply keeps listening
+ * forever, which reads as "voice is broken" and logs nothing.
+ */
+describe('widget voice endpointing', () => {
+  const vad = () => SRC.slice(SRC.indexOf('function monitorSilence'), SRC.indexOf('async function transcribeAndSend'));
+
+  it('measures the room instead of assuming a fixed loudness', () => {
+    // `level > 12` only means "someone is talking" in a silent room. On a
+    // storefront with music or traffic the ambient level never drops below it,
+    // so silence is never detected and the recorder never stops.
+    expect(vad()).not.toMatch(/level\s*>\s*\d+\s*\)/);
+    expect(vad()).toContain('voice.floor');
+  });
+
+  it('adapts the floor down fast and up slowly', () => {
+    // A pause between words should reset the floor honestly; a passing truck
+    // should not raise it permanently.
+    expect(vad()).toMatch(/if \(level < voice\.floor\) voice\.floor = level/);
+  });
+
+  it('stops recording even if the level never falls', () => {
+    // The backstop for the exact bug: unbounded recording in a noisy room.
+    expect(vad()).toContain('MAX_UTTERANCE_MS');
+    expect(vad()).toMatch(/tooLong/);
+  });
+
+  it('resumes a suspended AudioContext, or every level reads as silence', () => {
+    // iOS/Safari start the context suspended.
+    expect(SRC).toMatch(/state === 'suspended'/);
+  });
+
+  it('waits the shared base silence window, not an invented number', () => {
+    // Mirrors THRESHOLDS.base in packages/voice/src/endpoint.ts.
+    expect(SRC).toMatch(/ENDPOINT_SILENCE_MS = 550/);
+  });
+});
+
 describe('widget diagnostics', () => {
   /**
    * Every non-render path used to be silent, so holdout, disabled, and
