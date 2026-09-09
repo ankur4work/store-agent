@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { exchangeSessionToken } from '../src/shopify/token-exchange.js';
+import { exchangeSessionToken, refreshAccessToken } from '../src/shopify/token-exchange.js';
 
 /**
  * Token exchange is how the app gets an access token under Shopify managed
@@ -13,6 +13,19 @@ import { exchangeSessionToken } from '../src/shopify/token-exchange.js';
 
 const DEPS = { apiKey: 'client-id', apiSecret: 'shpss_secret' };
 const SHOP = 'acme.myshopify.com';
+
+/** A successful expiring-offline-token response, as Shopify returns it. */
+const EXPIRING = {
+  access_token: 'shpat_x',
+  scope: 'read_products',
+  expires_in: 3600,
+  refresh_token: 'shprt_y',
+  refresh_token_expires_in: 7_776_000,
+};
+
+/** The request body, which is form-encoded rather than JSON. */
+const sent = (cap: { init?: RequestInit | undefined }) =>
+  new URLSearchParams(String(cap.init?.body));
 
 function fetchReturning(status: number, body: unknown, capture?: { url?: string | undefined; init?: RequestInit | undefined }) {
   return (async (url: string | URL, init?: RequestInit) => {
@@ -29,11 +42,11 @@ function fetchReturning(status: number, body: unknown, capture?: { url?: string 
 }
 
 describe('token exchange', () => {
-  it('returns a shop record with the offline token', async () => {
+  it('returns a shop record with the offline token and its refresh pair', async () => {
     const r = await exchangeSessionToken(
       SHOP,
       'session-token',
-      { ...DEPS, doFetch: fetchReturning(200, { access_token: 'shpat_x', scope: 'read_products' }) },
+      { ...DEPS, doFetch: fetchReturning(200, EXPIRING) },
       1_700_000_000_000,
     );
     expect(r).toEqual({
@@ -43,6 +56,9 @@ describe('token exchange', () => {
         accessToken: 'shpat_x',
         scopes: 'read_products',
         installedAt: 1_700_000_000_000,
+        refreshToken: 'shprt_y',
+        expiresAt: 1_700_000_000_000 + 3600 * 1000,
+        refreshTokenExpiresAt: 1_700_000_000_000 + 7_776_000 * 1000,
       },
     });
   });
@@ -53,19 +69,45 @@ describe('token exchange', () => {
     const cap: { url?: string | undefined; init?: RequestInit | undefined } = {};
     await exchangeSessionToken(SHOP, 'session-token', {
       ...DEPS,
-      doFetch: fetchReturning(200, { access_token: 'shpat_x' }, cap),
+      doFetch: fetchReturning(200, EXPIRING, cap),
     });
-    const body = JSON.parse(String(cap.init?.body));
-    expect(body.requested_token_type).toBe('urn:shopify:params:oauth:token-type:offline-access-token');
-    expect(body.subject_token_type).toBe('urn:ietf:params:oauth:token-type:id_token');
-    expect(body.grant_type).toBe('urn:ietf:params:oauth:grant-type:token-exchange');
+    const body = sent(cap);
+    expect(body.get('requested_token_type')).toBe(
+      'urn:shopify:params:oauth:token-type:offline-access-token',
+    );
+    expect(body.get('subject_token_type')).toBe('urn:ietf:params:oauth:token-type:id_token');
+    expect(body.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:token-exchange');
+  });
+
+  it('asks for an EXPIRING token, which the Admin API now requires', async () => {
+    // Without `expiring=1` Shopify mints a non-expiring token that looks
+    // entirely valid and is refused by every Admin API call:
+    // "Non-expiring access tokens are no longer accepted for the Admin API."
+    const cap: { url?: string | undefined; init?: RequestInit | undefined } = {};
+    await exchangeSessionToken(SHOP, 'session-token', {
+      ...DEPS,
+      doFetch: fetchReturning(200, EXPIRING, cap),
+    });
+    expect(sent(cap).get('expiring')).toBe('1');
+  });
+
+  it('refuses a non-expiring response instead of storing a token that cannot work', async () => {
+    // Shopify answering without expires_in/refresh_token means a non-expiring
+    // token. Storing it would look like a successful install and then fail
+    // every API call, with nothing pointing back here.
+    const r = await exchangeSessionToken(SHOP, 's', {
+      ...DEPS,
+      doFetch: fetchReturning(200, { access_token: 'shpat_x', scope: 'read_products' }),
+    });
+    expect(r).toMatchObject({ ok: false });
+    expect((r as { reason: string }).reason).toMatch(/non-expiring/);
   });
 
   it('posts to the shop from the verified token, not an arbitrary host', async () => {
     const cap: { url?: string | undefined; init?: RequestInit | undefined } = {};
     await exchangeSessionToken(SHOP, 'session-token', {
       ...DEPS,
-      doFetch: fetchReturning(200, { access_token: 'shpat_x' }, cap),
+      doFetch: fetchReturning(200, EXPIRING, cap),
     });
     expect(cap.url).toBe(`https://${SHOP}/admin/oauth/access_token`);
   });
@@ -74,10 +116,28 @@ describe('token exchange', () => {
     const cap: { url?: string | undefined; init?: RequestInit | undefined } = {};
     await exchangeSessionToken(SHOP, 'session-token', {
       ...DEPS,
-      doFetch: fetchReturning(200, { access_token: 'shpat_x' }, cap),
+      doFetch: fetchReturning(200, EXPIRING, cap),
     });
     expect(cap.url?.startsWith(`https://${SHOP}/`)).toBe(true);
-    expect(JSON.parse(String(cap.init?.body)).client_secret).toBe('shpss_secret');
+    expect(sent(cap).get('client_secret')).toBe('shpss_secret');
+  });
+
+  it('renews with the refresh grant, carrying no session token', async () => {
+    // This is what keeps webhooks and billing working on an hour-long token
+    // with no merchant present.
+    const cap: { url?: string | undefined; init?: RequestInit | undefined } = {};
+    const r = await refreshAccessToken(
+      SHOP,
+      'shprt_old',
+      { ...DEPS, doFetch: fetchReturning(200, { ...EXPIRING, refresh_token: 'shprt_new' }, cap) },
+      1_700_000_000_000,
+    );
+    const body = sent(cap);
+    expect(body.get('grant_type')).toBe('refresh_token');
+    expect(body.get('refresh_token')).toBe('shprt_old');
+    expect(body.get('subject_token')).toBeNull();
+    // Shopify retires the old refresh token, so the new one must be kept.
+    expect((r as { shop: { refreshToken: string } }).shop.refreshToken).toBe('shprt_new');
   });
 
   it('reports a rejection rather than throwing', async () => {

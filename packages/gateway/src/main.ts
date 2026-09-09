@@ -10,6 +10,7 @@ import { SqliteBillingStore } from './billing/store.js';
 import { BillingService } from './billing/service.js';
 import { Telemetry } from './observability/telemetry.js';
 import { createLogger } from './observability/logger.js';
+import { freshShop } from './shopify/token-lifecycle.js';
 
 // From packages/gateway/dist/src/main.js up to the repo root.
 const envPath = fileURLToPath(new URL('../../../../.env', import.meta.url));
@@ -48,8 +49,16 @@ const billing =
     : new BillingService({
         store: billingStore,
         log: logger,
+        // Through `freshShop`, not `shops.get`: an offline token now lives an
+        // hour, so the stored one is routinely stale and billing runs with no
+        // merchant present to re-authorize. This refreshes it in place.
         apiFor: async (shop) => {
-          const record = await shops.get(shop);
+          const record = await freshShop(shop, {
+            shops,
+            apiKey: config.shopify!.apiKey,
+            apiSecret: config.shopify!.apiSecret,
+            log: logger,
+          });
           if (record === undefined) return undefined;
           return {
             shop,

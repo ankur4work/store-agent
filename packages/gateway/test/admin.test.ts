@@ -302,7 +302,15 @@ describe('recovering from a rejected access token', () => {
         exchanges++;
         const fresh = exchanges > 1 && everRecovers;
         return new Response(
-          JSON.stringify({ access_token: fresh ? 'shpat_live' : 'shpat_dead', scope: 'read_products' }),
+          JSON.stringify({
+            access_token: fresh ? 'shpat_live' : 'shpat_dead',
+            scope: 'read_products',
+            // Expiring, as the Admin API now requires. A response without
+            // these is rejected rather than stored.
+            expires_in: 3600,
+            refresh_token: 'shprt_r',
+            refresh_token_expires_in: 7_776_000,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }

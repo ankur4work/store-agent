@@ -22,6 +22,7 @@ import { handleWebhook, parseSubscriptionPayload } from './shopify/webhooks.js';
 import {
   MemoryNonceStore,
   MemoryShopStore,
+  isLegacyToken,
   type NonceStore,
   type ShopStore,
 } from './shopify/shops.js';
@@ -574,8 +575,16 @@ export function createGateway(deps: GatewayDeps): Server {
        * the dashboard is still readable without a token, and the next load
        * tries again.
        */
-      if (app.apiSecret !== '' && (await shops.get(shop)) === undefined) {
-        await provisionShop(shop, sessionTokenFrom(url, req), 'first load');
+      if (app.apiSecret !== '') {
+        const existing = await shops.get(shop);
+        // A legacy non-expiring token is worth no more than no token at all:
+        // Shopify refuses it on every Admin API call. Replacing it needs a
+        // session token, and this is the one place we reliably have one.
+        if (existing === undefined) {
+          await provisionShop(shop, sessionTokenFrom(url, req), 'first load');
+        } else if (isLegacyToken(existing)) {
+          await provisionShop(shop, sessionTokenFrom(url, req), 'non-expiring token');
+        }
       }
 
       /**

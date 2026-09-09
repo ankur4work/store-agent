@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS shops (
   installed_at   BIGINT NOT NULL,
   uninstalled_at BIGINT
 );
+-- Expiring offline tokens. NULL on rows written before Shopify required them,
+-- which is how those rows are recognised and replaced. Added separately
+-- because CREATE TABLE IF NOT EXISTS does nothing to an existing table, so a
+-- deployed database would never see these columns.
+-- (No semicolons in this comment: migrate() splits SCHEMA on them.)
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS refresh_token TEXT;
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS expires_at BIGINT;
+ALTER TABLE shops ADD COLUMN IF NOT EXISTS refresh_token_expires_at BIGINT;
 
 CREATE TABLE IF NOT EXISTS nonces (
   state   TEXT PRIMARY KEY,
@@ -154,17 +162,33 @@ export class PgShopStore implements ShopStore {
       accessToken: String(row['access_token']),
       scopes: String(row['scopes']),
       installedAt: num(row['installed_at']),
+      ...(row['refresh_token'] == null ? {} : { refreshToken: String(row['refresh_token']) }),
+      ...(row['expires_at'] == null ? {} : { expiresAt: num(row['expires_at']) }),
+      ...(row['refresh_token_expires_at'] == null
+        ? {}
+        : { refreshTokenExpiresAt: num(row['refresh_token_expires_at']) }),
     };
   }
 
   async put(shop: Shop): Promise<void> {
     await this.sql.query(
-      `INSERT INTO shops (shop, access_token, scopes, installed_at, uninstalled_at)
-       VALUES ($1, $2, $3, $4, NULL)
+      `INSERT INTO shops (shop, access_token, scopes, installed_at, uninstalled_at,
+                          refresh_token, expires_at, refresh_token_expires_at)
+       VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)
        ON CONFLICT (shop) DO UPDATE SET
          access_token = EXCLUDED.access_token, scopes = EXCLUDED.scopes,
-         installed_at = EXCLUDED.installed_at, uninstalled_at = NULL`,
-      [shop.shop, shop.accessToken, shop.scopes, shop.installedAt],
+         installed_at = EXCLUDED.installed_at, uninstalled_at = NULL,
+         refresh_token = EXCLUDED.refresh_token, expires_at = EXCLUDED.expires_at,
+         refresh_token_expires_at = EXCLUDED.refresh_token_expires_at`,
+      [
+        shop.shop,
+        shop.accessToken,
+        shop.scopes,
+        shop.installedAt,
+        shop.refreshToken ?? null,
+        shop.expiresAt ?? null,
+        shop.refreshTokenExpiresAt ?? null,
+      ],
     );
   }
 

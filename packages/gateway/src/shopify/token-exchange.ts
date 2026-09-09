@@ -36,6 +36,26 @@ const SUBJECT_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:id_token';
  */
 const REQUESTED_TOKEN_TYPE = 'urn:shopify:params:oauth:token-type:offline-access-token';
 
+/**
+ * EXPIRING, and not optional.
+ *
+ * Offline used to mean permanent. It no longer does: Shopify rejects
+ * non-expiring tokens on the Admin API outright —
+ *
+ *   403 [API] Non-expiring access tokens are no longer accepted for the
+ *       Admin API. Start using expiring offline tokens.
+ *
+ * — and a token minted without this reads as perfectly valid right up to the
+ * point every API call fails. That is precisely how it failed here: the
+ * exchange succeeded, the token looked fine, and nothing worked. Public apps
+ * must be on expiring tokens for the Admin API; the deadline for existing apps
+ * is 2027-01-01, but new apps are already past it.
+ *
+ * The cost is a token that lives an hour and a `refresh_token` that must be
+ * stored and rotated. See `refreshAccessToken`.
+ */
+const EXPIRING = '1';
+
 export interface TokenExchangeDeps {
   readonly apiKey: string;
   readonly apiSecret: string;
@@ -60,43 +80,115 @@ export async function exchangeSessionToken(
   deps: TokenExchangeDeps,
   now: number = Date.now(),
 ): Promise<TokenExchangeResult> {
+  return postForToken(
+    shopDomain,
+    {
+      client_id: deps.apiKey,
+      client_secret: deps.apiSecret,
+      grant_type: GRANT_TYPE,
+      subject_token: sessionToken,
+      subject_token_type: SUBJECT_TOKEN_TYPE,
+      requested_token_type: REQUESTED_TOKEN_TYPE,
+      expiring: EXPIRING,
+    },
+    deps,
+    now,
+    'token exchange',
+  );
+}
+
+/**
+ * Renew an expiring offline token, with no merchant present.
+ *
+ * This is what makes hour-long tokens workable: webhooks, billing
+ * reconciliation and background jobs run with nobody logged in, and none of
+ * them can send a merchant through authorization.
+ *
+ * Shopify returns a NEW refresh token each time and retires the old one, so
+ * the result must be stored whole. Keeping the previous refresh token — the
+ * obvious shortcut, since it "still looks valid" — breaks the next renewal and
+ * strands the shop until a merchant happens to open the app.
+ */
+export async function refreshAccessToken(
+  shopDomain: string,
+  refreshToken: string,
+  deps: TokenExchangeDeps,
+  now: number = Date.now(),
+): Promise<TokenExchangeResult> {
+  return postForToken(
+    shopDomain,
+    {
+      client_id: deps.apiKey,
+      client_secret: deps.apiSecret,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+    },
+    deps,
+    now,
+    'token refresh',
+  );
+}
+
+/**
+ * Form-encoded, matching Shopify's documented contract for this endpoint.
+ */
+async function postForToken(
+  shopDomain: string,
+  params: Record<string, string>,
+  deps: TokenExchangeDeps,
+  now: number,
+  what: string,
+): Promise<TokenExchangeResult> {
   const doFetch = deps.doFetch ?? fetch;
 
   let res: Response;
   try {
     res = await doFetch(`https://${shopDomain}/admin/oauth/access_token`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({
-        client_id: deps.apiKey,
-        client_secret: deps.apiSecret,
-        grant_type: GRANT_TYPE,
-        subject_token: sessionToken,
-        subject_token_type: SUBJECT_TOKEN_TYPE,
-        requested_token_type: REQUESTED_TOKEN_TYPE,
-      }),
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+      },
+      body: new URLSearchParams(params).toString(),
     });
   } catch {
     // A network failure must not read as "this shop is not installed" — the
     // caller keeps whatever record it already had.
-    return { ok: false, reason: 'token exchange request failed' };
+    return { ok: false, reason: `${what} request failed` };
   }
 
   if (!res.ok) {
-    return { ok: false, reason: `token exchange rejected with ${res.status}` };
+    return { ok: false, reason: `${what} rejected with ${res.status}` };
   }
 
-  let body: { access_token?: unknown; scope?: unknown };
+  let body: {
+    access_token?: unknown;
+    scope?: unknown;
+    expires_in?: unknown;
+    refresh_token?: unknown;
+    refresh_token_expires_in?: unknown;
+  };
   try {
     body = (await res.json()) as typeof body;
   } catch {
-    return { ok: false, reason: 'token exchange returned malformed JSON' };
+    return { ok: false, reason: `${what} returned malformed JSON` };
   }
 
   const accessToken = body.access_token;
   if (typeof accessToken !== 'string' || accessToken === '') {
-    return { ok: false, reason: 'token exchange returned no access token' };
+    return { ok: false, reason: `${what} returned no access token` };
   }
+
+  // A response without these is a NON-EXPIRING token, which the Admin API
+  // refuses. Better to fail here, where the reason is legible, than to store it
+  // and have every later call fail with nothing pointing back to this moment.
+  const expiresIn = seconds(body.expires_in);
+  const refresh = body.refresh_token;
+  if (expiresIn === undefined || typeof refresh !== 'string' || refresh === '') {
+    return { ok: false, reason: `${what} returned a non-expiring token` };
+  }
+
+  const refreshExpiresIn = seconds(body.refresh_token_expires_in);
 
   return {
     ok: true,
@@ -105,6 +197,16 @@ export async function exchangeSessionToken(
       accessToken,
       scopes: typeof body.scope === 'string' ? body.scope : '',
       installedAt: now,
+      refreshToken: refresh,
+      expiresAt: now + expiresIn * 1000,
+      ...(refreshExpiresIn === undefined
+        ? {}
+        : { refreshTokenExpiresAt: now + refreshExpiresIn * 1000 }),
     },
   };
+}
+
+function seconds(value: unknown): number | undefined {
+  const n = typeof value === 'string' ? Number(value) : value;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : undefined;
 }

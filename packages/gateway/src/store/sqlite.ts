@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS shops (
   access_token   TEXT NOT NULL,
   scopes         TEXT NOT NULL,
   installed_at   INTEGER NOT NULL,
-  uninstalled_at INTEGER
+  uninstalled_at INTEGER,
+  -- Expiring offline tokens. NULL on rows written before Shopify required
+  -- them, which is how those rows are recognised and replaced.
+  refresh_token             TEXT,
+  expires_at                INTEGER,
+  refresh_token_expires_at  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS nonces (
@@ -119,7 +124,32 @@ const { DatabaseSync: Database } = nodeRequire('node:sqlite') as typeof import('
 export function openDatabase(opts: SqliteOptions): DatabaseSync {
   const db = new Database(opts.path) as DatabaseSync;
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/**
+ * Bring an existing database up to the current schema.
+ *
+ * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so
+ * a column added to `SCHEMA` never reaches a deployed database — the app then
+ * fails at runtime on a column the source says is there. Adding them here is
+ * idempotent: SQLite has no `ADD COLUMN IF NOT EXISTS`, so an existing column
+ * raises, and that is the success case.
+ */
+function migrate(db: DatabaseSync): void {
+  const columns: [table: string, column: string, type: string][] = [
+    ['shops', 'refresh_token', 'TEXT'],
+    ['shops', 'expires_at', 'INTEGER'],
+    ['shops', 'refresh_token_expires_at', 'INTEGER'],
+  ];
+  for (const [table, column, type] of columns) {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    } catch {
+      // Already present.
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,21 +167,38 @@ export class SqliteShopStore implements ShopStore {
       accessToken: String(row['access_token']),
       scopes: String(row['scopes']),
       installedAt: Number(row['installed_at']),
+      ...(row['refresh_token'] == null ? {} : { refreshToken: String(row['refresh_token']) }),
+      ...(row['expires_at'] == null ? {} : { expiresAt: Number(row['expires_at']) }),
+      ...(row['refresh_token_expires_at'] == null
+        ? {}
+        : { refreshTokenExpiresAt: Number(row['refresh_token_expires_at']) }),
     };
   }
 
   async put(shop: Shop): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO shops (shop, access_token, scopes, installed_at, uninstalled_at)
-         VALUES (?, ?, ?, ?, NULL)
+        `INSERT INTO shops (shop, access_token, scopes, installed_at, uninstalled_at,
+                            refresh_token, expires_at, refresh_token_expires_at)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
          ON CONFLICT(shop) DO UPDATE SET
            access_token = excluded.access_token,
            scopes = excluded.scopes,
            installed_at = excluded.installed_at,
-           uninstalled_at = NULL`,
+           uninstalled_at = NULL,
+           refresh_token = excluded.refresh_token,
+           expires_at = excluded.expires_at,
+           refresh_token_expires_at = excluded.refresh_token_expires_at`,
       )
-      .run(shop.shop, shop.accessToken, shop.scopes, shop.installedAt);
+      .run(
+        shop.shop,
+        shop.accessToken,
+        shop.scopes,
+        shop.installedAt,
+        shop.refreshToken ?? null,
+        shop.expiresAt ?? null,
+        shop.refreshTokenExpiresAt ?? null,
+      );
   }
 
   async markUninstalled(shop: string): Promise<void> {

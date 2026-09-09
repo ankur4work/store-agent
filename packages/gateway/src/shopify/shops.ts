@@ -15,6 +15,35 @@ export interface Shop {
   readonly scopes: string;
   readonly installedAt: number;
   uninstalledAt?: number;
+  /**
+   * Renews `accessToken` without the merchant present. Secret.
+   *
+   * Absent on a legacy NON-EXPIRING token. Shopify no longer accepts those on
+   * the Admin API — it answers 403 "Non-expiring access tokens are no longer
+   * accepted" — so a record without this is not a working record, and the
+   * absence is what marks it for re-provisioning.
+   */
+  readonly refreshToken?: string;
+  /** Epoch ms. Absent means a legacy non-expiring token, not "never expires". */
+  readonly expiresAt?: number;
+  /** Epoch ms. Past this, only a merchant visit can re-provision. */
+  readonly refreshTokenExpiresAt?: number;
+}
+
+/**
+ * Whether this record predates expiring tokens.
+ *
+ * Shopify rejects non-expiring tokens on the Admin API, so these must be
+ * replaced rather than used. Checked on `expiresAt` rather than the token
+ * string, because the two token kinds are indistinguishable by value.
+ */
+export function isLegacyToken(shop: Shop): boolean {
+  return shop.expiresAt === undefined;
+}
+
+/** Expired, or close enough that a call started now might land after it. */
+export function isExpired(shop: Shop, now: number, skewMs = 60_000): boolean {
+  return shop.expiresAt !== undefined && shop.expiresAt - skewMs <= now;
 }
 
 export interface ShopStore {
