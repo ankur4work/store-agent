@@ -438,3 +438,91 @@ describe('admin http surface', () => {
     expect((await fetch(`${base}/admin/nope?id_token=${token()}`)).status).toBe(404);
   });
 });
+
+describe('plan chooser', () => {
+  const billing = {
+    planName: 'Free',
+    planId: 'free',
+    status: 'none',
+    used: 18,
+    included: 100,
+    remaining: 82,
+    overageMinor: 0,
+    verdict: 'ok',
+    test: true,
+  };
+  const vm = () => ({
+    shop: SHOP,
+    apiKey: API_KEY,
+    host: 'abc',
+    settings: {
+      shop: SHOP,
+      enabled: true,
+      accentColor: '#1b3a34',
+      cornerRadius: 16,
+      position: 'right' as const,
+      greeting: '',
+      holdoutFraction: 0.2,
+      updatedAt: 0,
+    },
+    stats: { activeSessions: 8, mode: 'live' as const, model: 'gpt-5.6-terra' },
+    lift: analyze({ sessions: 0, conversions: 0, revenueMinor: 0 }, { sessions: 0, conversions: 0, revenueMinor: 0 }),
+    liftSummary: '',
+    recommendedHoldout: 0.2,
+    unmatchedOrders: 0,
+    billing,
+  });
+
+  /**
+   * The chooser used to be three bare "Switch to Growth/Scale/Plus" buttons.
+   * A merchant deciding whether to upgrade had to leave the page to find out
+   * what a plan cost or included — the two facts the decision is made on.
+   */
+  it('shows the price and allowance at the point of choice', () => {
+    const html = renderAdmin(vm());
+    expect(html).toContain('$49.00');
+    expect(html).toContain('$199.00');
+    expect(html).toContain('$599.00');
+    expect(html).toMatch(/500 conversations/);
+    expect(html).toMatch(/2,500 conversations/);
+    expect(html).toMatch(/10,000 conversations/);
+  });
+
+  it('marks the current plan and offers no button to re-buy it', () => {
+    const html = renderAdmin(vm());
+    expect(html).toContain('plan-current');
+    expect(html).toContain('Your plan');
+    // The current plan must not also appear as a purchasable option.
+    expect(html).not.toMatch(/data-plan="free"[^>]*>Cancel/);
+  });
+
+  it('offers cancellation only when there is a subscription to cancel', () => {
+    const paid = renderAdmin({ ...vm(), billing: { ...billing, planId: 'plus', planName: 'Plus' } });
+    expect(paid).toContain('Cancel subscription');
+    // On Free there is nothing to cancel.
+    expect(renderAdmin(vm())).not.toContain('Cancel subscription');
+  });
+
+  it('states the overage rate next to the plans that charge it', () => {
+    const html = renderAdmin(vm());
+    expect(html).toMatch(/then \$0\.06 each/);
+  });
+
+  it('reports usage as a labelled meter, not a bare bar', () => {
+    const html = renderAdmin(vm());
+    expect(html).toContain('meter-ok');
+    expect(html).toMatch(/18 of 100 conversations used/);
+    expect(html).toMatch(/18% used/);
+    expect(html).toMatch(/82 left/);
+  });
+
+  it('turns the meter amber before the merchant hits the wall', () => {
+    // Discovering the limit by the widget going quiet is how merchants churn.
+    const html = renderAdmin({ ...vm(), billing: { ...billing, used: 85, remaining: 15 } });
+    expect(html).toContain('meter-warn');
+  });
+
+  it('keeps test-billing visible rather than hiding it', () => {
+    expect(renderAdmin(vm())).toContain('Test billing is on');
+  });
+});

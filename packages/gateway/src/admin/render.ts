@@ -1,4 +1,5 @@
 import type { Incrementality } from '@storeagent/attribution';
+import { PLANS, PLAN_ORDER } from '@storeagent/billing';
 import { accentIsAccessible, contrastWithWhite, type ShopSettings } from './settings.js';
 
 /**
@@ -167,10 +168,13 @@ function renderPlan(b: NonNullable<AdminViewModel['billing']>): string {
         }
       </div>
 
-      <div style="margin-top:12px;height:6px;border-radius:3px;background:#e3e3e3;overflow:hidden">
-        <div style="height:100%;width:${pctUsed}%;background:${
-          state === 'over' ? '#b98900' : state === 'warn' ? '#b98900' : '#1b3a34'
-        }"></div>
+      <div class="meter meter-${state}" role="img"
+           aria-label="${b.used} of ${b.included} conversations used this month">
+        <div class="meter-fill" style="width:${pctUsed}%"></div>
+      </div>
+      <div class="meter-legend">
+        <span>${pctUsed}% used</span>
+        <span>${b.remaining.toLocaleString()} left</span>
       </div>
 
       ${
@@ -192,21 +196,35 @@ function renderPlan(b: NonNullable<AdminViewModel['billing']>): string {
         are free.
       </p>
 
-      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
-        ${['growth', 'scale', 'plus']
-          .filter((id) => id !== b.planId)
-          .map(
-            (id) =>
-              `<button type="button" class="planBtn" data-plan="${esc(id)}">Switch to ${
-                id[0]!.toUpperCase() + id.slice(1)
-              }</button>`,
-          )
-          .join('')}
-        ${
-          b.planId === 'free'
-            ? ''
-            : '<button type="button" class="planBtn" data-plan="free">Cancel subscription</button>'
-        }
+      <div class="plans">
+        ${PLAN_ORDER.map((id) => {
+          const plan = PLANS[id];
+          const current = id === b.planId;
+          return `
+          <div class="plan${current ? ' plan-current' : ''}">
+            <div class="plan-head">
+              <span class="plan-name">${esc(plan.name)}</span>
+              ${current ? '<span class="chip">Current</span>' : ''}
+            </div>
+            <div class="plan-price">${
+              plan.priceMinor === 0
+                ? 'Free'
+                : `${money(plan.priceMinor)}<span class="plan-per">/mo</span>`
+            }</div>
+            <div class="plan-meta">${plan.included.toLocaleString()} conversations${
+              plan.overageMinor === null ? '' : `, then ${money(plan.overageMinor)} each`
+            }</div>
+            ${
+              current
+                ? '<button type="button" class="btn btn-quiet" disabled>Your plan</button>'
+                : `<button type="button" class="btn${
+                    id === 'free' ? ' btn-quiet' : ' btn-primary'
+                  } planBtn" data-plan="${esc(id)}">${
+                    id === 'free' ? 'Cancel subscription' : `Choose ${esc(plan.name)}`
+                  }</button>`
+            }
+          </div>`;
+        }).join('')}
       </div>
     </div>
   </section>`;
@@ -228,7 +246,7 @@ export function renderAdmin(vm: AdminViewModel): string {
 <style>
   :root{
     --bg:#f1f2f4; --card:#fff; --ink:#303030; --sub:#616161;
-    --line:#e3e3e3; --accent:#303030; --ok:#0c5132; --okbg:#cdfee1;
+    --line:#e3e3e3; --accent:#303030; --accentbar:#1b3a34; --ok:#0c5132; --okbg:#cdfee1;
     --warn:#5e4200; --warnbg:#ffd799;
     --r:12px;
   }
@@ -262,6 +280,47 @@ export function renderAdmin(vm: AdminViewModel): string {
   .chip{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;
     background:var(--okbg);color:var(--ok)}
   .chip.grey{background:#f1f2f4;color:var(--sub)}
+
+  /* ---------- usage meter -------------------------------------------------
+     A number alone does not convey "nearly out". The legend gives both halves
+     the merchant actually asks: how far in, and how much is left. */
+  .meter{margin-top:14px;height:8px;border-radius:999px;background:#e3e3e3;overflow:hidden}
+  .meter-fill{height:100%;border-radius:999px;background:var(--accentbar);
+    transition:width .4s cubic-bezier(.22,1,.36,1)}
+  .meter-ok .meter-fill{background:#1b3a34}
+  .meter-warn .meter-fill{background:#b98900}
+  .meter-over .meter-fill{background:#8e1f0b}
+  .meter-legend{display:flex;justify-content:space-between;margin-top:6px;
+    font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums}
+
+  /* ---------- plan chooser ------------------------------------------------
+     Three bare "Switch to X" buttons made the merchant leave the page to find
+     out what a plan costs. Price and allowance belong at the point of choice. */
+  .plans{display:grid;gap:10px;margin-top:16px;
+    grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .plan{border:1px solid var(--line);border-radius:10px;padding:13px 14px;
+    display:flex;flex-direction:column;gap:5px;background:#fff}
+  .plan-current{border-color:#1b3a34;box-shadow:0 0 0 1px #1b3a34 inset;background:#fbfdfc}
+  .plan-head{display:flex;align-items:center;gap:8px;min-height:20px}
+  .plan-name{font-size:13.5px;font-weight:650}
+  .plan-price{font-size:19px;font-weight:650;letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums}
+  .plan-per{font-size:12.5px;font-weight:500;color:var(--sub);letter-spacing:0}
+  .plan-meta{font-size:12px;color:var(--sub);line-height:1.45;min-height:34px}
+  .plan .btn{width:100%;margin-top:4px}
+
+  /* ---------- buttons ----------------------------------------------------- */
+  .btn{font:inherit;font-size:13px;font-weight:600;padding:8px 13px;border-radius:8px;
+    border:1px solid #b5b5b5;background:#fff;color:var(--ink);cursor:pointer;
+    transition:background .15s,border-color .15s,transform .08s}
+  .btn:hover{background:#f7f7f7}
+  .btn:active{transform:translateY(1px)}
+  .btn:focus-visible{outline:2px solid #005bd3;outline-offset:1px}
+  .btn-primary{background:#303030;border-color:#303030;color:#fff}
+  .btn-primary:hover{background:#1a1a1a;border-color:#1a1a1a}
+  .btn-quiet{color:var(--sub)}
+  .btn[disabled]{opacity:.55;cursor:default;transform:none}
+  .btn[disabled]:hover{background:#fff}
 
   form{display:flex;flex-direction:column;gap:16px}
   .field{display:flex;flex-direction:column;gap:6px}
