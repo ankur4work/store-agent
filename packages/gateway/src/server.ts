@@ -1101,6 +1101,13 @@ export function createGateway(deps: GatewayDeps): Server {
       }
 
       // Never the message or the reply — see observability/logger.ts.
+      //
+      // `violations` is the codes only, deliberately. `grounded: false` said
+      // that a shopper got an escalation instead of an answer and gave no way
+      // to find out why: the verdict carried the reason and it was discarded
+      // here, so every grounding failure looked identical in production. The
+      // codes are a closed vocabulary from the validator, so they carry no
+      // shopper text — the evidence field does, which is why it stays out.
       log.info('turn_complete', {
         shop: session.shopDomain,
         sessionId,
@@ -1110,6 +1117,14 @@ export function createGateway(deps: GatewayDeps): Server {
         attempts: result.attempts,
         ttftMs: firstDeltaAt === undefined ? null : firstDeltaAt - startedTurnAt,
         ms: Date.now() - startedTurnAt,
+        ...(result.verdict.violations.length === 0
+          ? {}
+          : {
+              violations: result.verdict.violations.map((v) => `${v.severity}:${v.code}`),
+              toolsCalled: result.events
+                .filter((e) => e.type === 'tool_end')
+                .map((e) => e.detail ?? 'unknown'),
+            }),
       });
 
       // Count the conversation only now that it actually resolved. A turn we
