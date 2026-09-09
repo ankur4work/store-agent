@@ -76,9 +76,106 @@ const CURRENCY_SYMBOL: Record<string, string> = {
   JPY: '¥',
 };
 
+/**
+ * Words that carry no catalog signal.
+ *
+ * Catalog search matches words against product text. A shopper's sentence is
+ * mostly words that describe the *asking*, not the product — "do you have any
+ * boards for my kid he's 12" is one useful token and eleven that match
+ * nothing. Passed through whole, the search returns nothing and the assistant
+ * truthfully reports it has no boards, in a store full of boards.
+ */
+const NOISE = new Set([
+  'a', 'an', 'the', 'any', 'some', 'this', 'that', 'these', 'those',
+  'i', 'im', 'me', 'my', 'we', 'our', 'you', 'your', 'u', 'ur', 'he', 'she', 'his', 'her', 'they',
+  'do', 'does', 'did', 'is', 'are', 'was', 'were', 'be', 'been', 'am',
+  'have', 'has', 'had', 'got', 'get', 'want', 'need', 'looking', 'look', 'find', 'show', 'tell',
+  'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might',
+  'what', 'whats', 'which', 'who', 'where', 'when', 'why', 'how',
+  'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with', 'about', 'from', 'and', 'or', 'but', 'if',
+  'please', 'hi', 'hey', 'hello', 'yo', 'thanks', 'thank',
+  'good', 'best', 'nice', 'cool', 'great', 'something', 'anything', 'stuff', 'thing', 'things',
+  'much', 'many', 'cost', 'costs', 'price', 'priced', 'pricing',
+  'stock', 'available', 'availability', 'sell', 'sells', 'buy', 'order', 'store', 'shop',
+  'old', 'year', 'years', 'kid', 'kids', 'son', 'daughter', 'wife', 'husband', 'friend',
+  'rn', 'now', 'today', 'deal', 'deals', 'sale', 'discount', 'cheap', 'cheapest', 'expensive',
+  'difference', 'between', 'compare', 'vs', 'versus', 'like', 'it', 'one', 'ones',
+]);
+
+/**
+ * The shopper's words reduced to the ones a catalog can match.
+ * Returns '' when nothing survives, which is the signal to browse instead.
+ */
+export function catalogTerms(query: string): string {
+  return query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .split(/\s+/)
+    // Contractions are checked on their stem too, so "he's" is dropped for the
+    // same reason "he" is rather than being searched for as a product word.
+    .filter((w) => {
+      if (w === '' || /^\d+$/.test(w)) return false;
+      const stem = w.replace(/'(?:s|re|m|ve|ll|d)$/, '');
+      return !NOISE.has(w) && !NOISE.has(stem);
+    })
+    .join(' ');
+}
+
 export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   const { session, ucp } = deps;
   const safeCart = ucp ? new SafeCart(ucp) : undefined;
+
+  /**
+   * Search, and if it finds nothing, ask a broader question.
+   *
+   * A single miss used to end the turn: the model asked for exactly what the
+   * shopper said, got zero products, and reported honestly that the store had
+   * none. That is the correct response to an empty result and the wrong answer
+   * to the shopper — "what's your most expensive product", "a board for my
+   * kid", "what do you sell" all returned nothing while the catalog was full.
+   *
+   * So an empty result is retried with the noise stripped, and then with no
+   * query at all, which lists the catalog. Every fallback is labelled: the
+   * model is told the search was broadened and what it actually ran, so it
+   * says "I didn't find X — here's what we do have" instead of presenting a
+   * browse as a match. Grounding is unaffected either way, since the products
+   * are real catalog rows whichever query produced them.
+   */
+  async function searchBroadening(
+    query: string,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const attempts = [query];
+    const terms = catalogTerms(query);
+    if (terms !== '' && terms !== query.trim().toLowerCase()) attempts.push(terms);
+    // Last resort: no query lists the catalog, so a vague or unmatchable ask
+    // still gets real products to talk about rather than a dead end.
+    attempts.push('');
+
+    let last: { products?: readonly unknown[] } = { products: [] };
+    for (const attempt of attempts) {
+      const result = (await ucp!.searchCatalog(
+        { query: attempt, pagination: { limit } },
+        signal,
+      )) as unknown as { products?: readonly unknown[] };
+      last = result;
+      if ((result.products?.length ?? 0) > 0) {
+        if (attempt === query) return result as Record<string, unknown>;
+        return {
+          ...(result as Record<string, unknown>),
+          broadened: true,
+          requested_query: query,
+          query_used: attempt,
+          note:
+            attempt === ''
+              ? 'No product matched the shopper\'s wording. These are products from the catalog, NOT matches — say you could not find what they asked for before offering them.'
+              : `No product matched "${query}". These matched the broader search "${attempt}".`,
+        };
+      }
+    }
+    return last as Record<string, unknown>;
+  }
 
   return {
     async execute(name, input, signal) {
@@ -86,7 +183,7 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
         case 'search_catalog': {
           const query = String(input['query'] ?? '');
           const limit = typeof input['limit'] === 'number' ? input['limit'] : 6;
-          if (ucp) return withDisplayPrices(await ucp.searchCatalog({ query, pagination: { limit } }, signal));
+          if (ucp) return withDisplayPrices(await searchBroadening(query, limit, signal));
           return withDisplayPrices(searchDemoCatalog(query, limit));
         }
 
