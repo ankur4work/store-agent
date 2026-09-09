@@ -529,6 +529,35 @@ export function renderAdmin(vm: AdminViewModel): string {
               else showErrors(body.errors || ['Could not change plan.']);
             });
           });
+
+          // Self-heal a stale plan.
+          //
+          // The page renders from our stored row, which is fast but can be
+          // wrong: /admin only reconciled when the merchant came back with a
+          // charge_id, so a missed webhook, a plan changed from Shopify's own
+          // pricing page, or simply opening the app from the Apps menu left a
+          // paying merchant looking at "Free" indefinitely.
+          //
+          // /admin/billing reconciles against Shopify. Run it AFTER paint so
+          // nothing blocks on the network, and reload only if the plan actually
+          // moved. That cannot loop: the reconcile persisted the new plan, so
+          // the reloaded page renders it and the next comparison matches.
+          (async function () {
+            var rendered = ${JSON.stringify(vm.billing?.planId ?? null)};
+            if (rendered === null) return;
+            try {
+              var token = await window.shopify.idToken();
+              var res = await fetch('/admin/billing', {
+                headers: { authorization: 'Bearer ' + token },
+              });
+              if (!res.ok) return;
+              var body = await res.json();
+              if (body.billing && body.billing.planId !== rendered) location.reload();
+            } catch (err) {
+              // Offline, or Shopify is down. The cached plan is still shown,
+              // which is the right outcome — never blank the page over this.
+            }
+          })();
         })();
       </script>
     </div>

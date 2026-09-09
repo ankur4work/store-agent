@@ -233,6 +233,43 @@ function viewModel(settingsOver: Partial<ShopSettings> = {}, liftOver?: Paramete
   };
 }
 
+describe('stale plan self-heal', () => {
+  const withBilling = (planId: string) => ({
+    ...viewModel(),
+    billing: {
+      planId,
+      planName: planId === 'plus' ? 'Plus' : 'Free',
+      status: 'active',
+      used: 18,
+      included: 100,
+      remaining: 82,
+      overageMinor: 0,
+      verdict: 'ok',
+      test: true,
+      history: [],
+    },
+  });
+
+  it('asks the server to reconcile after paint', () => {
+    // Without this the page only ever reconciled when the merchant returned
+    // with a charge_id, so opening the app normally showed a stale plan.
+    const out = renderAdmin(withBilling('free') as Parameters<typeof renderAdmin>[0]);
+    expect(out).toContain("fetch('/admin/billing'");
+  });
+
+  it('compares against the plan it actually rendered, so it cannot reload forever', () => {
+    // The rendered plan is embedded; a reload only happens when it differs
+    // from the reconciled one, and the reconcile has already persisted that.
+    const out = renderAdmin(withBilling('plus') as Parameters<typeof renderAdmin>[0]);
+    expect(out).toContain('var rendered = "plus"');
+  });
+
+  it('does nothing when billing is not configured', () => {
+    const out = renderAdmin(viewModel() as Parameters<typeof renderAdmin>[0]);
+    expect(out).toContain('var rendered = null');
+  });
+});
+
 /**
  * The whole product rests on not overclaiming. These assert the admin refuses
  * to show a lift figure the sample cannot support — no greyed-out placeholder,
