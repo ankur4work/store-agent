@@ -290,7 +290,7 @@ describe('recovering from a rejected access token', () => {
    * Shopify, with a token that has been invalidated. The first exchange hands
    * back the dead token the app already had; the second hands back a live one.
    */
-  function stubShopify({ everRecovers = true } = {}) {
+  function stubShopify({ everRecovers = true, refuseWith = 401 } = {}) {
     exchanges = 0;
     graphqlCalls = [];
     globalThis.fetch = (async (input: any, init: any) => {
@@ -311,7 +311,10 @@ describe('recovering from a rejected access token', () => {
         const sent = String((init.headers ?? {})['x-shopify-access-token']);
         graphqlCalls.push(sent);
         if (sent !== 'shpat_live') {
-          return new Response('unauthorized', { status: 401 });
+          return new Response(
+            JSON.stringify({ errors: '[api] This action requires merchant approval.' }),
+            { status: refuseWith },
+          );
         }
         return new Response(JSON.stringify(subscription), {
           status: 200,
@@ -371,6 +374,18 @@ describe('recovering from a rejected access token', () => {
     expect(r.status).toBe(200); // the dashboard still renders
     expect(exchanges).toBe(2);
     expect(graphqlCalls).toHaveLength(2);
+  });
+
+  it('does not re-mint on a 403, because a fresh token has the same permissions', async () => {
+    // 403 means the token is valid and the app is not allowed to do this.
+    // Re-minting burns an exchange and fails identically — which is exactly
+    // what production did, three times per page load, while the real cause
+    // (a permission, not a token) went unnamed.
+    stubShopify({ everRecovers: false, refuseWith: 403 });
+    await realFetch(`${base}/admin?id_token=${token()}&charge_id=1`);
+
+    expect(exchanges).toBe(1); // provisioning only
+    expect(graphqlCalls).toHaveLength(1); // no pointless retry
   });
 });
 

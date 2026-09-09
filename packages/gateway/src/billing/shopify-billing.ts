@@ -58,6 +58,29 @@ interface GraphQLResponse<T> {
   errors?: { message: string }[];
 }
 
+/**
+ * Shopify's explanation for a refusal, made safe to log.
+ *
+ * Truncated because an error string ends up in logs and alerts, and redacted
+ * because a body echoed back into an exception is exactly where a credential
+ * leaks without anyone deciding it should.
+ */
+async function safeDetail(res: Response): Promise<string> {
+  let body: string;
+  try {
+    body = await res.text();
+  } catch {
+    return 'no body';
+  }
+  return (
+    body
+      .replace(/sh[a-z]at_[A-Za-z0-9_-]+/gi, '[redacted]')
+      .replace(/\b[A-Fa-f0-9]{32,}\b/g, '[redacted]')
+      .slice(0, 300)
+      .trim() || 'empty body'
+  );
+}
+
 export async function graphql<T>(
   cfg: BillingApiConfig,
   query: string,
@@ -80,10 +103,22 @@ export async function graphql<T>(
   if (res.status === 401 || res.status === 403) {
     // The token is dead, not the request. Says so, so the caller can mint a
     // fresh one instead of failing every call from here on.
+    //
+    // 401 and 403 are NOT the same problem and the distinction is the whole
+    // diagnosis: 401 means the token is not valid, 403 means it is valid and
+    // the app is not permitted to do this. Only 401 is worth re-minting for —
+    // a fresh token has exactly the same permissions as the one it replaced,
+    // so re-minting on 403 just burns an exchange and reports the same error.
+    //
+    // Shopify says which in the body ("This action requires merchant approval
+    // for the read_orders scope"). Reporting only the status threw that away
+    // and left the cause to guesswork, so it is included — truncated, and with
+    // anything token-shaped stripped, because an error string travels further
+    // than the request that produced it.
     throw new BillingApiError(
-      `Shopify rejected the access token (${res.status})`,
+      `Shopify rejected the access token (${res.status}): ${await safeDetail(res)}`,
       false,
-      true,
+      res.status === 401,
     );
   }
   if (!res.ok) {
