@@ -13,6 +13,10 @@ import {
 import { esc, renderAdmin } from '../src/admin/render.js';
 import { analyze, describe as describeLift } from '@storeagent/attribution';
 import type { ShopSettings } from '../src/admin/settings.js';
+import { MemoryShopStore } from '../src/shopify/shops.js';
+import { BillingService } from '../src/billing/service.js';
+import { SqliteBillingStore } from '../src/billing/store.js';
+import { openDatabase } from '../src/store/sqlite.js';
 
 const API_KEY = 'test-client-id';
 const SECRET = 'shpss_admin_secret';
@@ -232,6 +236,143 @@ function viewModel(settingsOver: Partial<ShopSettings> = {}, liftOver?: Paramete
     unmatchedOrders: 0,
   };
 }
+
+/**
+ * A stored offline token dies whenever the app is reinstalled or its scopes
+ * change. Provisioning only ran when no shop row existed, so the first dead
+ * token was permanent: every Admin API call 401'd, the subscription could
+ * never be read, and a merchant who had paid was shown "Free" for good —
+ * reinstalling did not help, because the row still existed.
+ */
+describe('recovering from a rejected access token', () => {
+  let server: Server;
+  let base: string;
+  let realFetch: typeof globalThis.fetch;
+  let graphqlCalls: string[];
+  let exchanges: number;
+
+  const env = {
+    OPENAI_API_KEY: 'sk-test',
+    SHOPIFY_API_KEY: API_KEY,
+    SHOPIFY_API_SECRET: SECRET,
+    SHOPIFY_APP_URL: 'https://app.test',
+  };
+
+  const subscription = {
+    data: {
+      currentAppInstallation: {
+        activeSubscriptions: [
+          {
+            id: 'gid://shopify/AppSubscription/1',
+            name: 'StoreAgent Plus',
+            status: 'ACTIVE',
+            test: true,
+            currentPeriodEnd: '2026-10-09T08:00:00Z',
+            trialDays: 0,
+            lineItems: [
+              {
+                id: 'gid://shopify/AppSubscriptionLineItem/1',
+                plan: {
+                  pricingDetails: {
+                    __typename: 'AppRecurringPricing',
+                    price: { amount: '599.00', currencyCode: 'USD' },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  /**
+   * Shopify, with a token that has been invalidated. The first exchange hands
+   * back the dead token the app already had; the second hands back a live one.
+   */
+  function stubShopify({ everRecovers = true } = {}) {
+    exchanges = 0;
+    graphqlCalls = [];
+    globalThis.fetch = (async (input: any, init: any) => {
+      const target = String(typeof input === 'string' ? input : input.url);
+      // The test's own requests to the gateway must not be intercepted.
+      if (target.includes('127.0.0.1')) return realFetch(input, init);
+
+      if (target.includes('/admin/oauth/access_token')) {
+        exchanges++;
+        const fresh = exchanges > 1 && everRecovers;
+        return new Response(
+          JSON.stringify({ access_token: fresh ? 'shpat_live' : 'shpat_dead', scope: 'read_products' }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      if (target.includes('/graphql.json')) {
+        const sent = String((init.headers ?? {})['x-shopify-access-token']);
+        graphqlCalls.push(sent);
+        if (sent !== 'shpat_live') {
+          return new Response('unauthorized', { status: 401 });
+        }
+        return new Response(JSON.stringify(subscription), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof globalThis.fetch;
+  }
+
+  beforeEach(async () => {
+    realFetch = globalThis.fetch;
+    // Wired as main.ts wires it: apiFor reads the token from the shop store on
+    // every call, so a re-provisioned token is the one the retry uses.
+    const shops = new MemoryShopStore();
+    const billing = new BillingService({
+      store: new SqliteBillingStore(openDatabase({ path: ':memory:' })),
+      apiFor: async (s) => {
+        const record = await shops.get(s);
+        if (record === undefined) return undefined;
+        return {
+          shop: s,
+          accessToken: record.accessToken,
+          returnUrl: 'https://app.test/admin',
+          test: true,
+        };
+      },
+    });
+    server = createGateway({ config: loadConfig(env), shops, billing });
+    await new Promise<void>((r) => server.listen(0, r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterEach(async () => {
+    globalThis.fetch = realFetch;
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('re-mints the token when Shopify rejects it, and reads the real plan', async () => {
+    stubShopify();
+    const body = await realFetch(`${base}/admin?id_token=${token()}&charge_id=1`).then((r) =>
+      r.text(),
+    );
+
+    // Exchanged once to provision, then again because the token was refused.
+    expect(exchanges).toBe(2);
+    expect(graphqlCalls).toEqual(['shpat_dead', 'shpat_live']);
+    // And the merchant is finally shown what they are paying for.
+    expect(body).toContain('Plus');
+    expect(body).not.toMatch(/<span class="chip">Free<\/span>/);
+  });
+
+  it('gives up after one re-mint rather than exchanging forever', async () => {
+    // If the fresh token is refused too, the problem is not the token.
+    stubShopify({ everRecovers: false });
+    const r = await realFetch(`${base}/admin?id_token=${token()}&charge_id=1`);
+
+    expect(r.status).toBe(200); // the dashboard still renders
+    expect(exchanges).toBe(2);
+    expect(graphqlCalls).toHaveLength(2);
+  });
+});
 
 describe('stale plan self-heal', () => {
   const withBilling = (planId: string) => ({

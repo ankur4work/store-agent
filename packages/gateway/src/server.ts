@@ -45,6 +45,7 @@ import {
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
+import { BillingApiError } from './billing/shopify-billing.js';
 import {
   MemorySettingsStore,
   accentIsAccessible,
@@ -442,6 +443,88 @@ export function createGateway(deps: GatewayDeps): Server {
     }
     const auth = { apiKey: app.apiKey, apiSecret: app.apiSecret };
 
+    /** Shopify puts `id_token` on the embedded URL; fetches send a bearer. */
+    function sessionTokenFrom(u: URL, r: IncomingMessage): string | undefined {
+      const t = u.searchParams.get('id_token') ?? bearerToken(header(r, 'authorization'));
+      return t === null || t === '' ? undefined : t;
+    }
+
+    /**
+     * Mint and store an offline access token from a VERIFIED session token.
+     *
+     * Returns whether a token was stored. Never throws: a dashboard that
+     * renders without a token is better than one that 500s.
+     */
+    async function provisionShop(
+      shopDomain: string,
+      sessionToken: string | undefined,
+      why: string,
+    ): Promise<boolean> {
+      if (sessionToken === undefined || app === undefined || app.apiSecret === '') return false;
+      const exchanged = await exchangeSessionToken(shopDomain, sessionToken, {
+        apiKey: app.apiKey,
+        apiSecret: app.apiSecret,
+      });
+      if (!exchanged.ok) {
+        log.warn('token_exchange_failed', { shop: shopDomain, reason: exchanged.reason, why });
+        return false;
+      }
+      await shops.put(exchanged.shop);
+      log.info('installed', {
+        shop: shopDomain,
+        scopes: exchanged.shop.scopes,
+        via: 'token_exchange',
+        why,
+      });
+      return true;
+    }
+
+    /**
+     * Reconcile, and re-mint the access token if Shopify rejects it.
+     *
+     * A stored offline token stops working whenever the app is reinstalled or
+     * its scopes change — Shopify issues a new one and invalidates the old.
+     * Provisioning only ran when NO shop row existed, so the first dead token
+     * became permanent: every Admin API call 401'd forever, `reconcile` could
+     * never read the subscription, and a merchant on a paid plan was shown
+     * "Free" with no way back. Reinstalling did not help, because the row
+     * still existed and the stale token was never replaced.
+     *
+     * A 401 is not a failure to retry, it is a token to replace. The embedded
+     * admin carries a verified session token on every request, so a fresh
+     * offline token is always one exchange away — and the retry is bounded to
+     * one attempt, because if the new token is refused too the problem is not
+     * the token.
+     *
+     * Swallowed at the end, because a Shopify outage must not stop the
+     * dashboard rendering — but never silently.
+     */
+    async function reconcileRepairingToken(
+      shopDomain: string,
+      sessionToken: string | undefined,
+    ): Promise<void> {
+      if (billing === undefined) return;
+      try {
+        await billing.reconcile(shopDomain);
+      } catch (err) {
+        if (!(err instanceof BillingApiError && err.unauthorized)) {
+          log.error('billing_reconcile_failed', { shop: shopDomain, err });
+          return;
+        }
+        log.warn('access_token_rejected', { shop: shopDomain, action: 'reprovisioning' });
+        if (!(await provisionShop(shopDomain, sessionToken, 'token rejected'))) return;
+        try {
+          await billing.reconcile(shopDomain);
+        } catch (retryErr) {
+          log.error('billing_reconcile_failed', {
+            shop: shopDomain,
+            err: retryErr,
+            afterReprovision: true,
+          });
+        }
+      }
+    }
+
     if (url.pathname === '/admin' && req.method === 'GET') {
       // Shopify puts `id_token` on the embedded app URL. Fall back to a bearer
       // header for direct fetches.
@@ -487,25 +570,12 @@ export function createGateway(deps: GatewayDeps): Server {
        * the session token we just VERIFIED for an offline token closes that
        * gap, and works whichever way the merchant installed.
        *
-       * The token is exchanged once and stored; a shop we already know is left
-       * alone. A failure here is logged and ignored rather than blocking the
-       * page: the dashboard is still readable without a token, and the next
-       * load tries again.
+       * A failure here is logged and ignored rather than blocking the page:
+       * the dashboard is still readable without a token, and the next load
+       * tries again.
        */
       if (app.apiSecret !== '' && (await shops.get(shop)) === undefined) {
-        const idToken = url.searchParams.get('id_token') ?? bearerToken(header(req, 'authorization'));
-        if (idToken !== undefined && idToken !== null && idToken !== '') {
-          const exchanged = await exchangeSessionToken(shop, idToken, {
-            apiKey: app.apiKey,
-            apiSecret: app.apiSecret,
-          });
-          if (exchanged.ok) {
-            await shops.put(exchanged.shop);
-            log.info('installed', { shop, scopes: exchanged.shop.scopes, via: 'token_exchange' });
-          } else {
-            log.warn('token_exchange_failed', { shop, reason: exchanged.reason });
-          }
-        }
+        await provisionShop(shop, sessionTokenFrom(url, req), 'first load');
       }
 
       /**
@@ -518,12 +588,7 @@ export function createGateway(deps: GatewayDeps): Server {
       const returningFromBilling =
         url.searchParams.has('charge_id') || url.searchParams.get('billing') === 'return';
       if (billing !== undefined && returningFromBilling) {
-        // Swallowed, because a Shopify outage must not stop the dashboard from
-        // rendering — but never silently. This catch used to be the last place
-        // a merchant's paid plan could disappear without leaving a trace.
-        await billing.reconcile(shop).catch((err: unknown) => {
-          log.error('billing_reconcile_failed', { shop, err });
-        });
+        await reconcileRepairingToken(shop, sessionTokenFrom(url, req));
       }
 
       const totals = await attribution.totals(shop);
@@ -566,9 +631,7 @@ export function createGateway(deps: GatewayDeps): Server {
       }
       // Reconcile against Shopify rather than trusting our row: webhooks get
       // missed, and a merchant looking at a stale plan is a support ticket.
-      await billing.reconcile(verified.shop).catch((err: unknown) => {
-        log.error('billing_reconcile_failed', { shop: verified.shop, err });
-      });
+      await reconcileRepairingToken(verified.shop, bearerToken(header(req, 'authorization')));
       json(res, 200, { billing: billing.summary(verified.shop), plans: PLAN_ORDER.map((id) => PLANS[id]) });
       return;
     }

@@ -37,6 +37,16 @@ export class BillingApiError extends Error {
   constructor(
     message: string,
     readonly retryable: boolean,
+    /**
+     * Shopify rejected the access token itself.
+     *
+     * Distinct from `retryable` because retrying with the same token is
+     * pointless — the caller has to get a NEW token. A stored token stops
+     * working whenever the app is reinstalled or its scopes change, and
+     * without this flag that is indistinguishable from any other 4xx, so the
+     * app sits wedged on a dead token forever.
+     */
+    readonly unauthorized: boolean = false,
   ) {
     super(message);
     this.name = 'BillingApiError';
@@ -66,6 +76,15 @@ export async function graphql<T>(
 
   if (res.status === 429 || res.status >= 500) {
     throw new BillingApiError(`Shopify billing API unavailable (${res.status})`, true);
+  }
+  if (res.status === 401 || res.status === 403) {
+    // The token is dead, not the request. Says so, so the caller can mint a
+    // fresh one instead of failing every call from here on.
+    throw new BillingApiError(
+      `Shopify rejected the access token (${res.status})`,
+      false,
+      true,
+    );
   }
   if (!res.ok) {
     // The body can echo request detail; report the status only.
