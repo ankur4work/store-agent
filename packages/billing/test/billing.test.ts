@@ -11,6 +11,7 @@ import {
   overageCapMinor,
   periodKey,
   planByName,
+  resolvePlan,
   usageWarning,
   type BillingState,
   type SubscriptionStatus,
@@ -66,6 +67,26 @@ describe('plan catalog', () => {
     expect(planByName('  scale ')?.id).toBe('scale');
     // An unknown name must not guess — either direction is a real error.
     expect(planByName('Enterprise')).toBeUndefined();
+  });
+
+  it('resolves a managed-pricing subscription by price when the name is the merchant’s', () => {
+    // The case that left a paying merchant on Free: Shopify App Pricing sends
+    // back the plan name from the Partner dashboard, not the one we ship.
+    expect(resolvePlan({ name: 'StoreAgent Plus', priceMinor: 59_900 })?.id).toBe('plus');
+    expect(resolvePlan({ name: 'Plus — monthly', priceMinor: 59_900 })?.id).toBe('plus');
+    // Name still wins when it does match, so a renamed price cannot override it.
+    expect(resolvePlan({ name: 'Growth', priceMinor: 59_900 })?.id).toBe('growth');
+    // The internal plan handle is what Shopify calls the plan in code.
+    expect(resolvePlan({ name: 'plus' })?.id).toBe('plus');
+  });
+
+  it('refuses to resolve a plan it cannot identify', () => {
+    // A $0 line is a trial or a development-store grant, not a paid plan —
+    // resolving it would hand out Plus for free.
+    expect(resolvePlan({ name: 'Anything', priceMinor: 0 })).toBeUndefined();
+    expect(resolvePlan({ name: 'Anything' })).toBeUndefined();
+    // A price matching no plan must not round to the nearest one.
+    expect(resolvePlan({ name: 'Anything', priceMinor: 29_900 })).toBeUndefined();
   });
 
   it('validates plan ids', () => {

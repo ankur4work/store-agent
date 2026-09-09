@@ -49,6 +49,112 @@ function store(): SqliteBillingStore {
   return new SqliteBillingStore(openDatabase({ path: ':memory:' }));
 }
 
+/**
+ * A subscription as Shopify App Pricing returns it: the name comes from the
+ * plan defined in the Partner dashboard, so it is the merchant-facing string,
+ * not the one this app ships.
+ */
+function activeSubscriptionBody(name: string, amount: string) {
+  return {
+    data: {
+      currentAppInstallation: {
+        activeSubscriptions: [
+          {
+            id: 'gid://shopify/AppSubscription/28209152052',
+            name,
+            status: 'ACTIVE',
+            test: true,
+            currentPeriodEnd: '2026-10-09T08:00:00Z',
+            trialDays: 0,
+            lineItems: [
+              {
+                id: 'gid://shopify/AppSubscriptionLineItem/1',
+                plan: {
+                  pricingDetails: {
+                    __typename: 'AppRecurringPricing',
+                    price: { amount, currencyCode: 'USD' },
+                  },
+                },
+              },
+              {
+                id: 'gid://shopify/AppSubscriptionLineItem/2',
+                plan: { pricingDetails: { __typename: 'AppUsagePricing' } },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+describe('reconcile under Shopify App Pricing', () => {
+  function serviceWith(body: unknown) {
+    const s = store();
+    const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const service = new BillingService({
+      store: s,
+      log,
+      apiFor: async () => api,
+      doFetch: fakeFetch(body).fn,
+    });
+    return { s, service, log };
+  }
+
+  it('promotes the merchant when the plan name is the one from the Partner dashboard', async () => {
+    // The exact failure: a paid Plus subscription named "StoreAgent Plus"
+    // resolved to nothing, so the merchant kept seeing Free after paying.
+    const { s, service } = serviceWith(activeSubscriptionBody('StoreAgent Plus', '599.00'));
+    await service.reconcile(SHOP);
+
+    const record = s.get(SHOP);
+    expect(record.planId).toBe('plus');
+    expect(record.status).toBe('active');
+    expect(record.usageLineItemId).toBe('gid://shopify/AppSubscriptionLineItem/2');
+  });
+
+  it('still resolves by name, so price is only the fallback', async () => {
+    const { s, service } = serviceWith(activeSubscriptionBody('Growth', '49.00'));
+    await service.reconcile(SHOP);
+    expect(s.get(SHOP).planId).toBe('growth');
+  });
+
+  it('keeps the stored plan and says so loudly when it cannot identify one', async () => {
+    // Granting a plan on a guess is worse than not granting one, but doing it
+    // silently is what made the original bug cost an afternoon.
+    const { s, service, log } = serviceWith(activeSubscriptionBody('Enterprise', '999.00'));
+    await service.reconcile(SHOP);
+
+    expect(s.get(SHOP).planId).toBe('free');
+    expect(log.warn).toHaveBeenCalledWith(
+      'billing_plan_unresolved',
+      expect.objectContaining({ subscriptionName: 'Enterprise', priceMinor: 99_900 }),
+    );
+  });
+
+  it('does not confer a paid plan on a zero-priced subscription', async () => {
+    // A development-store grant or a fully discounted trial bills nothing.
+    const { s, service } = serviceWith(activeSubscriptionBody('Plus for dev stores', '0.00'));
+    await service.reconcile(SHOP);
+    expect(s.get(SHOP).planId).toBe('free');
+  });
+
+  it('reports a missing access token instead of returning as if reconciled', async () => {
+    const log = { error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const service = new BillingService({
+      store: store(),
+      log,
+      apiFor: async () => undefined,
+      doFetch: fakeFetch({}).fn,
+    });
+    await service.reconcile(SHOP);
+    expect(log.warn).toHaveBeenCalledWith(
+      'billing_reconcile_skipped',
+      expect.objectContaining({ shop: SHOP }),
+    );
+  });
+});
+
 describe('billing store', () => {
   it('treats the absence of a subscription as the free plan', () => {
     const s = store();

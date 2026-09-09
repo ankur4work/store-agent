@@ -99,7 +99,44 @@ export function planOf(id: PlanId): Plan {
  */
 export function planByName(name: string): Plan | undefined {
   const needle = name.trim().toLowerCase();
-  return PLAN_ORDER.map((id) => PLANS[id]).find((p) => p.name.toLowerCase() === needle);
+  return PLAN_ORDER.map((id) => PLANS[id]).find(
+    (p) => p.name.toLowerCase() === needle || p.id === needle,
+  );
+}
+
+/**
+ * Resolve the plan a Shopify subscription corresponds to.
+ *
+ * `planByName` alone was enough while the app created every subscription
+ * itself — it passed `plan.name`, so the name came back exactly as sent. Under
+ * **Shopify App Pricing** the plan is defined in the Partner dashboard and the
+ * subscription carries whatever the merchant-facing plan name is there
+ * ("StoreAgent Plus", "Plus Plan", "Plus — monthly"). None of those match, and
+ * the caller then silently keeps the merchant on Free after they have paid.
+ *
+ * So the name is tried first and the **price** second. The price is the amount
+ * Shopify says the merchant is actually being charged, which is a far better
+ * claim to a plan than a display string an admin can retype at will. It is only
+ * consulted when it is unambiguous: two plans priced the same resolve to
+ * neither, and a zero or absent price never resolves, so a trial or a $0 line
+ * cannot silently confer a paid plan.
+ *
+ * Returning `undefined` remains meaningful — the caller must not guess, because
+ * a wrong guess either grants entitlement nobody paid for or withdraws one they
+ * did.
+ */
+export function resolvePlan(subscription: {
+  readonly name?: string | undefined;
+  readonly priceMinor?: number | undefined;
+}): Plan | undefined {
+  const byName = subscription.name === undefined ? undefined : planByName(subscription.name);
+  if (byName !== undefined) return byName;
+
+  const price = subscription.priceMinor;
+  if (price === undefined || price <= 0) return undefined;
+
+  const matches = PLAN_ORDER.map((id) => PLANS[id]).filter((p) => p.priceMinor === price);
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function formatPrice(minor: number, currency = 'USD'): string {

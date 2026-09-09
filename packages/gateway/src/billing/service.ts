@@ -4,6 +4,7 @@ import {
   periodKey,
   planByName,
   planOf,
+  resolvePlan,
   type BillingState,
   type Entitlement,
   type PlanId,
@@ -37,6 +38,9 @@ import {
 /** Just enough of `Logger` to log a failure, so tests need not build one. */
 export interface BillingLogger {
   error(event: string, fields?: Record<string, unknown>): void;
+  /** Optional so existing callers and tests need no change. */
+  info?(event: string, fields?: Record<string, unknown>): void;
+  warn?(event: string, fields?: Record<string, unknown>): void;
 }
 
 export interface BillingServiceDeps {
@@ -170,16 +174,36 @@ export class BillingService {
    *
    * Webhooks get missed. This is the repair path, and it is what the admin
    * page calls rather than trusting a cached row.
+   *
+   * ## Why this logs at every outcome
+   *
+   * This method used to be able to leave a paying merchant on Free in three
+   * different ways — no token, no active subscription, and an unresolvable
+   * plan name — and say nothing about any of them. Callers wrap it in
+   * `.catch(() => undefined)`, so a thrown API error vanished too. That is
+   * exactly the state this store was in: a paid Plus subscription, a merchant
+   * looking at "Free", and not one line anywhere saying why.
+   *
+   * Every branch now says what Shopify reported. None of it is merchant
+   * facing; it is what turns "still not updated" into a five-second answer.
    */
   async reconcile(shop: string, now: number = Date.now()): Promise<void> {
     const api = await this.deps.apiFor(shop);
-    if (api === undefined) return;
+    if (api === undefined) {
+      this.deps.log?.warn?.('billing_reconcile_skipped', { shop, reason: 'no access token' });
+      return;
+    }
 
     const active = await fetchActiveSubscription(api, this.deps.doFetch);
     const record = this.deps.store.get(shop);
 
     if (active === undefined) {
       // Shopify says there is no active subscription, so there is not one.
+      // Worth logging when we thought otherwise: that is a cancellation, an
+      // expired trial, or a plan the merchant never actually approved.
+      if (record.planId !== 'free') {
+        this.deps.log?.info?.('billing_no_active_subscription', { shop, was: record.planId });
+      }
       this.deps.store.put({
         ...record,
         subscriptionId: undefined,
@@ -191,7 +215,31 @@ export class BillingService {
       return;
     }
 
-    const plan = planByName(active.name);
+    const plan = resolvePlan({ name: active.name, priceMinor: active.recurringPriceMinor });
+
+    if (plan === undefined) {
+      // Shopify has an active subscription we cannot map to a plan, so the
+      // merchant is paying for something we will not grant. Keeping the stored
+      // plan is still right — guessing would grant entitlement nobody bought —
+      // but this is a misconfiguration, not a routine outcome, and it must be
+      // loud enough to find. The name and price are what identify the plan in
+      // the Partner dashboard, so both are reported.
+      this.deps.log?.warn?.('billing_plan_unresolved', {
+        shop,
+        subscriptionName: active.name,
+        priceMinor: active.recurringPriceMinor,
+        keeping: record.planId,
+      });
+    } else if (plan.id !== record.planId) {
+      this.deps.log?.info?.('billing_plan_changed', {
+        shop,
+        from: record.planId,
+        to: plan.id,
+        status: active.status,
+        test: active.test,
+      });
+    }
+
     this.deps.store.put({
       ...record,
       subscriptionId: active.id,

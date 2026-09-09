@@ -518,7 +518,12 @@ export function createGateway(deps: GatewayDeps): Server {
       const returningFromBilling =
         url.searchParams.has('charge_id') || url.searchParams.get('billing') === 'return';
       if (billing !== undefined && returningFromBilling) {
-        await billing.reconcile(shop).catch(() => undefined);
+        // Swallowed, because a Shopify outage must not stop the dashboard from
+        // rendering — but never silently. This catch used to be the last place
+        // a merchant's paid plan could disappear without leaving a trace.
+        await billing.reconcile(shop).catch((err: unknown) => {
+          log.error('billing_reconcile_failed', { shop, err });
+        });
       }
 
       const totals = await attribution.totals(shop);
@@ -561,7 +566,9 @@ export function createGateway(deps: GatewayDeps): Server {
       }
       // Reconcile against Shopify rather than trusting our row: webhooks get
       // missed, and a merchant looking at a stale plan is a support ticket.
-      await billing.reconcile(verified.shop).catch(() => undefined);
+      await billing.reconcile(verified.shop).catch((err: unknown) => {
+        log.error('billing_reconcile_failed', { shop: verified.shop, err });
+      });
       json(res, 200, { billing: billing.summary(verified.shop), plans: PLAN_ORDER.map((id) => PLANS[id]) });
       return;
     }

@@ -181,7 +181,17 @@ query Active {
   currentAppInstallation {
     activeSubscriptions {
       id name status test currentPeriodEnd trialDays
-      lineItems { id plan { pricingDetails { __typename } } }
+      lineItems {
+        id
+        plan {
+          pricingDetails {
+            __typename
+            # The recurring amount is what identifies the plan when the name
+            # was chosen in the Partner dashboard rather than sent by us.
+            ... on AppRecurringPricing { price { amount currencyCode } }
+          }
+        }
+      }
     }
   }
 }`;
@@ -194,6 +204,12 @@ export interface ActiveSubscription {
   readonly currentPeriodEnd: number | undefined;
   /** Line item id for usage records; absent when the plan has no usage line. */
   readonly usageLineItemId?: string;
+  /**
+   * The recurring price in cents, as Shopify reports it. Absent when the
+   * subscription carries no recurring line. Used to identify the plan when the
+   * subscription name was set in the Partner dashboard and does not match ours.
+   */
+  readonly recurringPriceMinor?: number;
 }
 
 /**
@@ -216,7 +232,15 @@ export async function fetchActiveSubscription(
         test: boolean;
         currentPeriodEnd: string | null;
         trialDays: number | null;
-        lineItems: { id: string; plan: { pricingDetails: { __typename: string } } }[];
+        lineItems: {
+          id: string;
+          plan: {
+            pricingDetails: {
+              __typename: string;
+              price?: { amount: string; currencyCode: string } | null;
+            };
+          };
+        }[];
       }[];
     } | null;
   }>(cfg, ACTIVE, {}, doFetch);
@@ -227,7 +251,16 @@ export async function fetchActiveSubscription(
   const usageLine = sub.lineItems.find(
     (li) => li.plan.pricingDetails.__typename === 'AppUsagePricing',
   );
+  const recurringLine = sub.lineItems.find(
+    (li) => li.plan.pricingDetails.__typename === 'AppRecurringPricing',
+  );
   const periodEnd = sub.currentPeriodEnd === null ? NaN : Date.parse(sub.currentPeriodEnd);
+
+  // Shopify returns money as a decimal string ("599.00"). Round rather than
+  // truncate: 0.1 + 0.2 arithmetic on a parsed float can land at 59899.999…,
+  // and a cent lost here would stop the price from identifying the plan.
+  const amount = Number(recurringLine?.plan.pricingDetails.price?.amount);
+  const recurringPriceMinor = Number.isFinite(amount) ? Math.round(amount * 100) : undefined;
 
   return {
     id: sub.id,
@@ -236,6 +269,7 @@ export async function fetchActiveSubscription(
     test: sub.test,
     currentPeriodEnd: Number.isFinite(periodEnd) ? periodEnd : undefined,
     ...(usageLine === undefined ? {} : { usageLineItemId: usageLine.id }),
+    ...(recurringPriceMinor === undefined ? {} : { recurringPriceMinor }),
   };
 }
 
