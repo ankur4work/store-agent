@@ -217,6 +217,21 @@ export class BillingService {
 
     const plan = resolvePlan({ name: active.name, priceMinor: active.recurringPriceMinor });
 
+    // The subscription exactly as Shopify describes it. Logged on every
+    // reconcile, not only on a change: "which subscription is Shopify actually
+    // reporting" turned out to be the question behind several days of wrong
+    // guesses, and the id is what distinguishes a Shopify App Pricing contract
+    // from a leftover Billing API subscription this app created itself.
+    this.deps.log?.info?.('billing_subscription_seen', {
+      shop,
+      subscriptionId: active.id,
+      subscriptionName: active.name,
+      priceMinor: active.recurringPriceMinor,
+      status: active.status,
+      test: active.test,
+      resolvedTo: plan?.id,
+    });
+
     if (plan === undefined) {
       // Shopify has an active subscription we cannot map to a plan, so the
       // merchant is paying for something we will not grant. Keeping the stored
