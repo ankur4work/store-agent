@@ -640,14 +640,50 @@ function renderHomeSections(vm: AdminViewModel): string {
  * running OAuth inside the admin's iframe dead-ends on a blank frame — the
  * merchant has to be taken out of the iframe to authenticate.
  */
-export function renderUnauthenticated(reason: string, installUrl?: string): string {
+export function renderUnauthenticated(reason: string, installUrl?: string, apiKey?: string): string {
   const action =
     installUrl === undefined
       ? '<p>This page authenticates through Shopify and can’t be opened directly.</p>'
       : `<p>StoreAgent isn’t connected to this store yet. Connecting takes one click.</p>
 <p><a class="btn" href="${esc(installUrl)}" target="_top" rel="noopener">Connect StoreAgent</a></p>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>StoreAgent</title><style>
+<title>StoreAgent</title>${
+    apiKey === undefined
+      ? ''
+      : `
+<!--
+  App Bridge belongs on THIS page too, not only the authenticated one.
+
+  Shopify's admin decides an embedded app is broken when the framed document
+  never initialises App Bridge, and reports it as "The application can't be
+  loaded, check that your browser allows third-party cookies" — which names
+  a cause that has nothing to do with it and sends everyone to their browser
+  settings. Any 401 rendered inside the frame produced exactly that.
+
+  With App Bridge present the frame initialises, and the script below can do
+  the thing that actually fixes the common case: a page reached by in-app
+  navigation carries no id_token, so it asks App Bridge for a fresh one and
+  reloads with it. Guarded on the token being absent, so it can never loop.
+-->
+<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"
+        data-api-key="${esc(apiKey)}"></script>
+<script>
+  (async function () {
+    try {
+      if (new URLSearchParams(location.search).has('id_token')) return;
+      if (!window.shopify || !window.shopify.idToken) return;
+      var token = await window.shopify.idToken();
+      if (!token) return;
+      var url = new URL(location.href);
+      url.searchParams.set('id_token', token);
+      location.replace(url.toString());
+    } catch (err) {
+      // Not embedded, or App Bridge unavailable. The page below still
+      // explains itself and offers the install link.
+    }
+  })();
+</script>`
+  }<style>
 body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
   background:#f1f2f4;color:#303030;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px}
 .c{background:#fff;border:1px solid #e3e3e3;border-radius:12px;padding:26px 28px;max-width:440px}

@@ -10,7 +10,7 @@ import {
   contrastWithWhite,
   validateSettings,
 } from '../src/admin/settings.js';
-import { esc, renderAdmin } from '../src/admin/render.js';
+import { esc, renderAdmin, renderUnauthenticated } from '../src/admin/render.js';
 import { analyze, describe as describeLift } from '@storeagent/attribution';
 import type { ShopSettings } from '../src/admin/settings.js';
 import { MemoryShopStore } from '../src/shopify/shops.js';
@@ -419,6 +419,33 @@ describe('recovering from a rejected access token', () => {
 
     expect(exchanges).toBe(1); // provisioning only
     expect(graphqlCalls).toHaveLength(1); // no pointless retry
+  });
+});
+
+/**
+ * Shopify's admin decides an embedded app is broken when the framed document
+ * never initialises App Bridge, and reports it as "check that your browser
+ * allows third-party cookies" — a cause that has nothing to do with it. Any
+ * 401 inside the frame produced exactly that, and adding a second route made
+ * it routine: in-app navigation carries no id_token, so the Plan page 401'd
+ * on every click.
+ */
+describe('unauthenticated page inside the admin frame', () => {
+  it('loads App Bridge, so the frame initialises instead of looking broken', () => {
+    const out = renderUnauthenticated('missing token', '/shopify/auth?shop=x', API_KEY);
+    expect(out).toContain('app-bridge.js');
+    expect(out).toContain(`data-api-key="${API_KEY}"`);
+  });
+
+  it('retries once with a token fetched from App Bridge', () => {
+    const out = renderUnauthenticated('missing token', undefined, API_KEY);
+    expect(out).toContain('shopify.idToken()');
+    // Guarded on the token being absent, so the reload cannot loop.
+    expect(out).toContain("has('id_token')");
+  });
+
+  it('omits App Bridge when there is no app configured to load it with', () => {
+    expect(renderUnauthenticated('missing token')).not.toContain('app-bridge.js');
   });
 });
 

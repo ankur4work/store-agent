@@ -546,7 +546,7 @@ export function createGateway(deps: GatewayDeps): Server {
         html(
           res,
           401,
-          renderUnauthenticated(verified.reason, installUrl),
+          renderUnauthenticated(verified.reason, installUrl, app.apiKey),
           named.ok ? named.shop : undefined,
         );
         return;
@@ -607,11 +607,11 @@ export function createGateway(deps: GatewayDeps): Server {
         const named = parseShopDomain(url.searchParams.get('shop'));
         if (named.ok && named.shop !== undefined) {
           const installUrl = `/shopify/auth?shop=${encodeURIComponent(named.shop)}`;
-          html(res, 401, renderUnauthenticated(verified.reason, installUrl), named.shop);
+          html(res, 401, renderUnauthenticated(verified.reason, installUrl, app.apiKey), named.shop);
           return;
         }
         // No trustworthy shop named: keep the page unframeable.
-        html(res, 401, renderUnauthenticated(verified.reason));
+        html(res, 401, renderUnauthenticated(verified.reason, undefined, app.apiKey));
         return;
       }
 
