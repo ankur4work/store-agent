@@ -521,51 +521,11 @@ describe('stale plan self-heal', () => {
 });
 
 /**
- * The whole product rests on not overclaiming. These assert the admin refuses
- * to show a lift figure the sample cannot support — no greyed-out placeholder,
- * no "provisional" number a merchant might act on.
+ * The Results panel and its tests are gone with it. The invariant it existed
+ * to protect — never show a lift figure the sample cannot support — now lives
+ * on the revenue tile, which is asserted under "stat tiles" above.
  */
-describe('results panel honesty', () => {
-  const arm = (sessions: number, conversions: number) => ({
-    sessions,
-    conversions,
-    revenueMinor: conversions * 18_900,
-  });
-
-  it('shows no lift figure while the sample is thin', () => {
-    const out = renderAdmin(viewModel({}, [arm(120, 5), arm(30, 1)]));
-    expect(out).toContain('Still measuring');
-    expect(out).not.toMatch(/Incremental revenue[\s\S]{0,200}\$\d/);
-  });
-
-  it('explains what is missing rather than showing an empty box', () => {
-    const out = renderAdmin(viewModel({}, [arm(120, 5), arm(30, 1)]));
-    expect(out).toMatch(/Not enough (sessions|orders)/);
-  });
-
-  it('reports revenue only once the effect is significant', () => {
-    const out = renderAdmin(viewModel({}, [arm(20_000, 800), arm(20_000, 600)]));
-    expect(out).toContain('Incremental revenue');
-    expect(out).toContain('95% CI');
-    expect(out).not.toContain('Still measuring');
-  });
-
-  it('does not claim revenue when the arms are indistinguishable', () => {
-    const out = renderAdmin(viewModel({}, [arm(5_000, 150), arm(5_000, 148)]));
-    expect(out).toContain('Not proven yet');
-  });
-
-  it('reports a negative result rather than hiding it', () => {
-    const out = renderAdmin(viewModel({}, [arm(20_000, 500), arm(20_000, 700)]));
-    expect(out).toContain('lower');
-    expect(out).toContain('Not proven yet');
-  });
-
-  it('surfaces unmatched orders instead of silently dropping them', () => {
-    const vm = { ...viewModel({}, [arm(20_000, 800), arm(20_000, 600)]), unmatchedOrders: 7 };
-    expect(renderAdmin(vm)).toContain('7 order(s)');
-  });
-
+describe('measurement settings', () => {
   /**
    * The holdout input is gone from the UI — picking an experiment parameter
    * is our job to do well, not a number to ask a merchant to guess. What must

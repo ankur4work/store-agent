@@ -73,66 +73,6 @@ const money = (minor: number): string =>
 
 const pct = (r: number): string => `${(r * 100).toFixed(2)}%`;
 
-/**
- * The Results panel.
- *
- * When the sample cannot support a conclusion, this shows what is missing and
- * nothing else — no greyed-out placeholder figure, no "provisional" lift. A
- * merchant who sees a number acts on it, and a number that evaporates next
- * month costs more trust than an empty state ever does.
- */
-function renderResults(vm: AdminViewModel): string {
-  const l = vm.lift;
-  const both = `${l.exposed.sessions.toLocaleString()} shown · ${l.holdout.sessions.toLocaleString()} held back`;
-
-  if (!l.readable) {
-    return `
-      <div class="banner warn" style="margin-bottom:14px">
-        <div><strong>Still measuring.</strong> ${esc(l.reason)}
-        ${
-          l.sessionsRemaining !== null
-            ? ` Roughly ${l.sessionsRemaining.toLocaleString()} more sessions at the current split.`
-            : ''
-        }</div>
-      </div>
-      <div class="rows">
-        <div class="row"><span class="k">Sessions measured</span><span class="v">${esc(both)}</span></div>
-        <div class="row"><span class="k">Orders so far</span>
-          <span class="v">${l.exposed.conversions} · ${l.holdout.conversions}</span></div>
-      </div>
-      <p class="muted" style="margin-top:12px">We show a lift figure only once the numbers can support one.
-      A result that looks good this month and disappears next month is worse than waiting.</p>`;
-  }
-
-  const positive = l.absoluteLiftPp > 0;
-  return `
-    <div class="banner ${l.significant && positive ? 'ok' : 'warn'}" style="margin-bottom:14px">
-      <div>${esc(vm.liftSummary)}</div>
-    </div>
-    <div class="rows">
-      <div class="row"><span class="k">Shown the assistant</span>
-        <span class="v">${pct(l.exposed.rate)} <span class="muted">of ${l.exposed.sessions.toLocaleString()}</span></span></div>
-      <div class="row"><span class="k">Held back (control)</span>
-        <span class="v">${pct(l.holdout.rate)} <span class="muted">of ${l.holdout.sessions.toLocaleString()}</span></span></div>
-      <div class="row"><span class="k">Difference</span>
-        <span class="v">${l.absoluteLiftPp > 0 ? '+' : ''}${l.absoluteLiftPp.toFixed(2)}pp
-          <span class="muted">95% CI ${l.ci95Pp[0].toFixed(2)} to ${l.ci95Pp[1].toFixed(2)}</span></span></div>
-      <div class="row"><span class="k">Incremental revenue</span>
-        <span class="v">${
-          l.incrementalRevenueMinor === null
-            ? '<span class="muted">Not proven yet</span>'
-            : money(l.incrementalRevenueMinor)
-        }</span></div>
-    </div>
-    ${
-      vm.unmatchedOrders > 0
-        ? `<p class="muted" style="margin-top:12px">${vm.unmatchedOrders} order(s) couldn’t be matched to a session
-           (ad blockers, or a checkout that skipped the storefront). They’re excluded from both sides rather than
-           guessed at.</p>`
-        : ''
-    }`;
-}
-
 
 /**
  * The plan card.
@@ -493,26 +433,6 @@ function renderHomeSections(vm: AdminViewModel): string {
       : ''
   }
 
-  <!--
-    Assistant state and live-conversation count moved to the header badge and
-    the tiles. Repeating them here made the first card a summary of the thing
-    directly above it, which is how the page came to read as filler.
-  -->
-  <section class="card">
-    <h2>Connection</h2>
-    <p class="hint">Where answers come from. Both should say your own store before you go live.</p>
-    <div class="body">
-      <div class="rows">
-        <div class="row"><span class="k">Catalog source</span>
-          <span class="v">${vm.stats.mode === 'live' ? 'Your live catalog' : 'Demo catalog'}</span></div>
-        <div class="row"><span class="k">Store</span>
-          <span class="v">${esc(vm.shop)}</span></div>
-        <div class="row"><span class="k">Model</span>
-          <span class="v muted">${esc(vm.stats.model)}</span></div>
-      </div>
-    </div>
-  </section>
-
   <section class="card">
     <h2>Appearance</h2>
     <p class="hint">The assistant inherits your theme’s fonts. These settings control the rest.</p>
@@ -683,13 +603,6 @@ function renderHomeSections(vm: AdminViewModel): string {
         })();
       </script>
     </div>
-  </section>
-
-  <section class="card">
-    <h2>Results</h2>
-    <p class="hint">Measured against a held-back group who never see the assistant. That comparison is the only
-      way to tell revenue the assistant <em>caused</em> from revenue it merely stood next to.</p>
-    <div class="body">${renderResults(vm)}</div>
   </section>
 
   <!--
