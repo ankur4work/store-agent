@@ -108,6 +108,61 @@ export function reachedHuman(result: Pick<TurnResult, 'escalated' | 'handedOff'>
   return result.escalated || result.handedOff;
 }
 
+/**
+ * Hide a money `amount` from the model when a ready-to-quote `display` sits
+ * next to it.
+ *
+ * Catalog payloads carry both: `{ amount: 78595, currency: "USD", display:
+ * "$785.95" }`. The grounding rules tell the model in as many words to copy
+ * `display` and never compute from `amount` — including the literal example
+ * that $785.95 is not $785. It complies on short answers and slips on long
+ * ones: listing six boards, it wrote "$785.00" for the $785.95 board. The
+ * tripwire caught it, threw the answer away, retried, watched it happen
+ * again, and escalated a question the store could answer.
+ *
+ * An instruction not to do arithmetic competes with the arithmetic being
+ * right there. Removing the operand is the version that cannot be ignored.
+ *
+ * Only the model's copy is narrowed. `toolResults` keeps the full payload, so
+ * grounding still validates against the true minor units, and product cards
+ * still render from `amount`. `display` alone is enough for the model to
+ * quote AND to compare — string prices sort correctly for "cheapest" once
+ * they share a currency and width, which is the same assumption the card UI
+ * already makes.
+ */
+export function hideComputableAmounts<T>(payload: T): T {
+  // A Map, not a Set: the same money object can legitimately appear twice in
+  // one payload (a price_range whose min and max are the same value). A
+  // visited-set would return the second occurrence untransformed, leaking the
+  // amount this function exists to hide. Caching the RESULT both terminates
+  // cycles and gives every reference the same narrowed copy.
+  const done = new WeakMap<object, unknown>();
+
+  const walk = (node: unknown): unknown => {
+    if (node === null || typeof node !== 'object') return node;
+    const cached = done.get(node as object);
+    if (cached !== undefined) return cached;
+
+    if (Array.isArray(node)) {
+      const arr: unknown[] = [];
+      done.set(node as object, arr);
+      for (const item of node) arr.push(walk(item));
+      return arr;
+    }
+
+    const obj = node as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    done.set(node as object, out);
+    const quotable = typeof obj['display'] === 'string' && typeof obj['amount'] === 'number';
+    for (const [key, value] of Object.entries(obj)) {
+      if (quotable && key === 'amount') continue;
+      out[key] = walk(value);
+    }
+    return out;
+  };
+  return walk(payload) as T;
+}
+
 export interface OrchestratorDeps {
   readonly model: ModelClient;
   readonly tools: ToolExecutor;
@@ -348,11 +403,13 @@ export class Orchestrator {
         // needless refusal. The handle is echoed inside the tool result so the
         // model can read it back off the transcript.
         const handle = `${call.name}#${args.toolResults.length + 1}`;
+        // The FULL payload goes to grounding and to the product cards. Only the
+        // model's copy is narrowed — see `hideComputableAmounts`.
         args.toolResults.push({ tool_call_id: handle, tool: call.name, result: payload });
         results.push({
           type: 'tool_result',
           tool_use_id: call.id,
-          content: JSON.stringify({ source: handle, data: payload }),
+          content: JSON.stringify({ source: handle, data: hideComputableAmounts(payload) }),
         });
         args.emit({ type: 'tool_end', detail: call.name });
       }
