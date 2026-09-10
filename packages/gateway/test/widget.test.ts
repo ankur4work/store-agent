@@ -258,13 +258,41 @@ describe('widget voice endpointing', () => {
   it('adapts the floor down fast and up slowly', () => {
     // A pause between words should reset the floor honestly; a passing truck
     // should not raise it permanently.
-    expect(vad()).toMatch(/if \(level < voice\.floor\) voice\.floor = level/);
+    expect(vad()).toMatch(/if \(level < floorRaw\) floorRaw = level;/);
+    expect(vad()).toMatch(/floorRaw \+= \(level - floorRaw\) \* 0\.002;/);
   });
 
   it('stops recording even if the level never falls', () => {
     // The backstop for the exact bug: unbounded recording in a noisy room.
     expect(vad()).toContain('MAX_UTTERANCE_MS');
     expect(vad()).toMatch(/tooLong/);
+  });
+
+  /**
+   * The backstop must not depend on the thing it is backing up. The first
+   * attempt gated it on `spokeMs > MIN_SPEECH_MS`, so when speech detection
+   * failed — which was the actual bug — the safety net was disabled with it
+   * and the recorder ran forever.
+   */
+  it('does not gate the max-duration stop on speech having been detected', () => {
+    expect(vad()).toMatch(/var tooLong =\s*now - startedAt > MAX_UTTERANCE_MS;/);
+    expect(vad()).not.toMatch(/tooLong[\s\S]{0,80}spokeMs > MIN_SPEECH_MS/);
+  });
+
+  it('caps the floor against the peak, so speech cannot become the floor', () => {
+    // Press the mic and talk at once and the first frames ARE speech. Taking
+    // a plain minimum calibrated the floor to the speaking level and the
+    // threshold then demanded the speaker exceed their own voice.
+    expect(vad()).toMatch(/voice\.floor = Math\.min\(floorRaw, peak \* 0\.5\)/);
+  });
+
+  it('gives up when it hears nothing at all, rather than listening forever', () => {
+    expect(vad()).toContain('IDLE_GIVE_UP_MS');
+    expect(vad()).toMatch(/heardNothing/);
+  });
+
+  it('reports why it stopped, so a bad mic is diagnosable from the console', () => {
+    expect(vad()).toMatch(/\[StoreAgent\] endpoint:/);
   });
 
   it('resumes a suspended AudioContext, or every level reads as silence', () => {

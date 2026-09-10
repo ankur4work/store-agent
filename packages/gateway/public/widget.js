@@ -738,6 +738,7 @@ textarea::placeholder{color:var(--muted)}
   var ENDPOINT_SILENCE_MS = 550; // THRESHOLDS.base
   var MIN_SPEECH_MS = 250;       // shorter than this is a cough, not a turn
   var MAX_UTTERANCE_MS = 20000;  // a hard stop, so noise cannot record forever
+  var IDLE_GIVE_UP_MS = 8000;    // heard nothing at all — mic muted or dead
 
   function monitorSilence() {
     if (!voice.ctx) {
@@ -754,9 +755,10 @@ textarea::placeholder{color:var(--muted)}
     var startedAt = performance.now();
     voice.silenceSince = startedAt;
     voice.spokeMs = 0;
-    // Seeded high so the first genuinely quiet frame pulls it down fast,
-    // rather than a loud first frame pinning the floor up.
-    voice.floor = 255;
+    // Both seeded from the signal, never assumed. `floorRaw` chases the
+    // quietest level seen, `peak` the loudest.
+    var floorRaw = 255;
+    var peak = 0;
     var last = startedAt;
 
     function tick() {
@@ -769,15 +771,32 @@ textarea::placeholder{color:var(--muted)}
       var dt = now - last;
       last = now;
 
-      // Track the noise floor: drop to a new quiet level immediately, drift
-      // back up slowly. Fast down/slow up means a pause between words resets
-      // the floor honestly, while a passing truck does not raise it for good.
-      if (level < voice.floor) voice.floor = level;
-      else voice.floor += (level - voice.floor) * 0.0005;
+      // Fall to a new quiet level at once, climb back very slowly — so a gap
+      // between words re-reads the room honestly while a passing truck does
+      // not raise the floor for good.
+      if (level < floorRaw) floorRaw = level;
+      else floorRaw += (level - floorRaw) * 0.002;
+      if (level > peak) peak = level;
+      else peak *= 0.9997;
 
-      // Speech has to clear the room by a real margin, with an absolute floor
-      // so a perfectly silent room doesn't make every tiny sound "speech".
-      var speaking = level > Math.max(6, voice.floor + 6 + voice.floor * 0.5);
+      // The floor is CAPPED against the peak, and that cap is the whole fix.
+      //
+      // Taking the plain minimum meant the floor calibrated to whatever was
+      // heard first. Press the mic and start talking — which is what everyone
+      // does — and the first frames are speech, so the floor became the
+      // speaking level and the threshold then demanded you exceed your own
+      // voice by half again. Nothing ever registered as speech, so nothing
+      // ever registered as the end of it, and the recorder ran forever.
+      //
+      // A real noise floor is never half the peak, so clamping there keeps a
+      // speech-poisoned reading from swallowing the signal.
+      voice.floor = Math.min(floorRaw, peak * 0.5);
+
+      // Whichever is higher: clear of the room, or a real fraction of how
+      // loud this speaker actually is. The first handles a noisy shop, the
+      // second a quiet room with a soft voice.
+      var threshold = Math.max(6, voice.floor + 6, peak * 0.3);
+      var speaking = level > threshold;
 
       if (speaking) {
         voice.silenceSince = now;
@@ -792,11 +811,28 @@ textarea::placeholder{color:var(--muted)}
       var recording = voice.recorder && voice.recorder.state === 'recording';
       var quietLongEnough =
         voice.spokeMs > MIN_SPEECH_MS && now - voice.silenceSince > ENDPOINT_SILENCE_MS;
-      // The safety net for the case this whole function exists to fix: if the
-      // level never falls, stop anyway rather than recording indefinitely.
-      var tooLong = now - startedAt > MAX_UTTERANCE_MS && voice.spokeMs > MIN_SPEECH_MS;
+      // UNCONDITIONAL. The previous version required speech to have been
+      // detected before it would fire, which made it useless in exactly the
+      // case it existed for: when speech detection is what failed, the
+      // backstop was disabled too and the recorder never stopped at all.
+      var tooLong = now - startedAt > MAX_UTTERANCE_MS;
+      // Nothing heard at all — a muted or dead mic. Stop and start a fresh
+      // capture rather than sitting in a listening state that cannot end.
+      var heardNothing = voice.spokeMs === 0 && now - startedAt > IDLE_GIVE_UP_MS;
 
-      if (recording && (quietLongEnough || tooLong)) {
+      if (recording && (quietLongEnough || tooLong || heardNothing)) {
+        // One line, so a mic that still misbehaves can be diagnosed from the
+        // console instead of guessed at a third time.
+        console.log(
+          '[StoreAgent] endpoint: ' +
+            (quietLongEnough ? 'silence' : tooLong ? 'max-duration' : 'no-speech') +
+            ' level=' + level.toFixed(1) +
+            ' floor=' + voice.floor.toFixed(1) +
+            ' peak=' + peak.toFixed(1) +
+            ' threshold=' + threshold.toFixed(1) +
+            ' spokeMs=' + Math.round(voice.spokeMs) +
+            ' elapsedMs=' + Math.round(now - startedAt),
+        );
         voice.recorder.stop();
         return;
       }
