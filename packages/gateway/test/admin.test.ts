@@ -18,6 +18,31 @@ import { BillingService } from '../src/billing/service.js';
 import { SqliteBillingStore } from '../src/billing/store.js';
 import { openDatabase } from '../src/store/sqlite.js';
 
+/** The rendered stylesheet, for assertions about type and colour choices. */
+const SRC_ADMIN = renderAdmin({
+  shop: 'acme.myshopify.com',
+  apiKey: 'k',
+  host: '',
+  settings: {
+    shop: 'acme.myshopify.com',
+    accentColor: '#1b3a34',
+    cornerRadius: 16,
+    position: 'right' as const,
+    greeting: '',
+    enabled: true,
+    holdoutFraction: 0.2,
+    updatedAt: 0,
+  },
+  stats: { activeSessions: 0, mode: 'demo' as const, model: 'm' },
+  lift: analyze(
+    { sessions: 0, conversions: 0, revenueMinor: 0 },
+    { sessions: 0, conversions: 0, revenueMinor: 0 },
+  ),
+  liftSummary: '',
+  recommendedHoldout: 0.2,
+  unmatchedOrders: 0,
+});
+
 const API_KEY = 'test-client-id';
 const SECRET = 'shpss_admin_secret';
 const SHOP = 'acme.myshopify.com';
@@ -394,6 +419,69 @@ describe('recovering from a rejected access token', () => {
 
     expect(exchanges).toBe(1); // provisioning only
     expect(graphqlCalls).toHaveLength(1); // no pointless retry
+  });
+});
+
+describe('stat tiles', () => {
+  const billing = {
+    planId: 'scale',
+    planName: 'Scale',
+    status: 'active',
+    used: 18,
+    included: 2500,
+    remaining: 2482,
+    overageMinor: 0,
+    verdict: 'ok',
+    test: false,
+    history: [],
+  };
+  const withBilling = () => ({ ...viewModel(), billing }) as Parameters<typeof renderAdmin>[0];
+
+  it('leads with usage against the allowance, not a bare number', () => {
+    const out = renderAdmin(withBilling());
+    expect(out).toContain('Resolved this month');
+    expect(out).toContain('of 2,500 included on Scale');
+    expect(out).toContain('2,482');
+  });
+
+  it('says Measuring rather than showing a revenue figure it cannot support', () => {
+    // The whole product rests on not overclaiming. A number a merchant acts
+    // on and that evaporates next month costs more than an empty state.
+    const out = renderAdmin(withBilling());
+    expect(out).toContain('Measuring');
+    expect(out).not.toMatch(/Revenue earned<\/span>\s*<span class="value">\$/);
+  });
+
+  it('shows the figure once the experiment can support one', () => {
+    const vm = {
+      ...withBilling(),
+      lift: { ...viewModel().lift, readable: true, significant: true, incrementalRevenueMinor: 428_900 },
+    } as Parameters<typeof renderAdmin>[0];
+    const out = renderAdmin(vm);
+    expect(out).toContain('$4,289.00');
+    expect(out).not.toContain('Measuring');
+  });
+
+  it('puts the live/paused state in the header where it is read first', () => {
+    expect(renderAdmin(viewModel({ enabled: true }) as Parameters<typeof renderAdmin>[0])).toMatch(
+      /class="page"[\s\S]{0,400}>Live</,
+    );
+    expect(renderAdmin(viewModel({ enabled: false }) as Parameters<typeof renderAdmin>[0])).toMatch(
+      /class="page"[\s\S]{0,400}>Paused</,
+    );
+  });
+
+  it('does not repeat the tiles as rows in the first card', () => {
+    // The duplication is what made the page read as filler.
+    const out = renderAdmin(withBilling());
+    expect(out).not.toContain('Active conversations');
+  });
+
+  it('uses proportional figures for display values, tabular only for columns', () => {
+    // tabular-nums gives every digit a zero's width, which reads gappy at
+    // display sizes. It belongs on aligned rows, not standalone numbers.
+    const tile = SRC_ADMIN.slice(SRC_ADMIN.indexOf('.tile .value'), SRC_ADMIN.indexOf('.tile .foot'));
+    expect(tile).not.toContain('tabular-nums');
   });
 });
 

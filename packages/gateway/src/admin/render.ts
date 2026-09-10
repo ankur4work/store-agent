@@ -135,6 +135,52 @@ function renderResults(vm: AdminViewModel): string {
  * wall: a merchant who discovers the limit by the widget stopping is a
  * merchant who churns.
  */
+/**
+ * The four figures a merchant opens the app to check.
+ *
+ * They existed before as label/value rows inside a "Status" card, which made
+ * the page a wall of identical text and buried the two numbers that actually
+ * change — usage and earnings — below the ones that never do.
+ *
+ * Each tile is `label / value / foot`. Nothing here is a hero figure: a
+ * dashboard gets at most one, and none of these four earns the role over the
+ * others, so they share a size and the eye picks its own entry point.
+ *
+ * The revenue tile is the one that must not overclaim. It shows a figure only
+ * when the experiment is BOTH readable and significant — otherwise it says so
+ * plainly rather than showing a provisional number a merchant might act on.
+ */
+function renderTiles(vm: AdminViewModel): string {
+  const b = vm.billing;
+  const revenue = vm.lift.incrementalRevenueMinor;
+
+  const tile = (label: string, value: string, foot: string, small = false): string => `
+    <div class="tile">
+      <span class="label">${esc(label)}</span>
+      <span class="value${small ? ' sm' : ''}">${esc(value)}</span>
+      <span class="foot">${esc(foot)}</span>
+    </div>`;
+
+  return `<div class="tiles">
+    ${
+      b === undefined
+        ? tile('Conversations resolved', vm.stats.activeSessions.toLocaleString(), 'billing not configured')
+        : tile(
+            'Resolved this month',
+            b.used.toLocaleString(),
+            `of ${b.included.toLocaleString()} included on ${b.planName}`,
+          )
+    }
+    ${b === undefined ? '' : tile('Remaining', b.remaining.toLocaleString(), 'before extra usage is charged')}
+    ${tile('Live conversations', vm.stats.activeSessions.toLocaleString(), 'happening right now')}
+    ${
+      revenue === null
+        ? tile('Revenue earned', 'Measuring', 'a figure appears once the result is solid', true)
+        : tile('Revenue earned', money(revenue), 'more than the held-back group, this period')
+    }
+  </div>`;
+}
+
 function renderPlan(b: NonNullable<AdminViewModel['billing']>): string {
   const pctUsed = b.included === 0 ? 0 : Math.min(100, Math.round((b.used / b.included) * 100));
   const state =
@@ -256,16 +302,42 @@ export function renderAdmin(vm: AdminViewModel): string {
     -webkit-font-smoothing:antialiased;padding:24px 16px 64px}
   .wrap{max-width:800px;margin:auto;display:flex;flex-direction:column;gap:16px}
 
-  .top{display:flex;align-items:center;gap:12px;margin-bottom:2px}
-  .top h1{font-size:20px;font-weight:650;letter-spacing:-.01em}
-  .shop{margin-left:auto;font-size:12.5px;color:var(--sub);
+  /* ---------- page header -------------------------------------------------
+     A bare "StoreAgent" over a stack of identical cards gave the page no
+     entry point: nothing said what the app was for, and the one fact a
+     merchant checks first — is it actually running — was four rows down
+     inside a card. Title, one line of purpose, and the live state, in the
+     order they get read. */
+  .page{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:0 2px 4px}
+  .page h1{font-size:20px;font-weight:650;letter-spacing:-.015em;line-height:1.25}
+  .page .lede{font-size:13.5px;color:var(--sub);margin-top:4px;max-width:56ch;line-height:1.5}
+  .page .meta{margin-left:auto;display:flex;align-items:center;gap:8px;
+    flex-wrap:wrap;justify-content:flex-end;padding-top:3px}
+  .shop{font-size:12.5px;color:var(--sub);
     background:var(--card);border:1px solid var(--line);padding:5px 11px;border-radius:8px}
+
+  /* ---------- stat tiles --------------------------------------------------
+     The four numbers a merchant opens the app to check, above the fold and
+     legible at a glance, instead of buried as label/value rows. Values use
+     the font's PROPORTIONAL figures: tabular-nums gives every digit the
+     width of a zero, which reads loose and gappy at display sizes. Tabular
+     is for columns that must align — the detail rows below — not for these. */
+  .tiles{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(158px,1fr))}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:0 1px 0 rgba(0,0,0,.04);padding:14px 16px 15px;
+    display:flex;flex-direction:column;gap:5px;min-height:104px}
+  .tile .label{font-size:12.5px;color:var(--sub);line-height:1.3}
+  .tile .value{font-size:26px;font-weight:650;letter-spacing:-.022em;line-height:1.15}
+  .tile .value.sm{font-size:19px;letter-spacing:-.015em}
+  .tile .foot{font-size:12px;color:var(--sub);line-height:1.4;margin-top:auto}
 
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
     box-shadow:0 1px 0 rgba(0,0,0,.04)}
-  .card > h2{font-size:14px;font-weight:650;padding:15px 18px 0}
-  .card > p.hint{font-size:13px;color:var(--sub);padding:4px 18px 0}
-  .card .body{padding:16px 18px 18px}
+  /* A rule between a card's heading and its content. Every card was one
+     undifferentiated block of text, so the eye had nothing to catch on. */
+  .card > h2{font-size:14px;font-weight:650;padding:15px 18px 13px;letter-spacing:-.008em}
+  .card > p.hint{font-size:13px;color:var(--sub);padding:0 18px 14px;margin-top:-5px;line-height:1.5}
+  .card .body{padding:16px 18px 18px;border-top:1px solid var(--line)}
 
   .banner{display:flex;gap:10px;align-items:flex-start;padding:12px 15px;border-radius:10px;
     font-size:13.5px;line-height:1.5}
@@ -284,11 +356,17 @@ export function renderAdmin(vm: AdminViewModel): string {
   /* ---------- usage meter -------------------------------------------------
      A number alone does not convey "nearly out". The legend gives both halves
      the merchant actually asks: how far in, and how much is left. */
-  .meter{margin-top:14px;height:8px;border-radius:999px;background:#e3e3e3;overflow:hidden}
+     The unfilled track is a LIGHTER STEP OF THE FILL'S OWN RAMP, not neutral
+     grey: state then reads across the whole bar rather than only the filled
+     part, so "nearly out" is legible at a glance even when the fill is short. */
+  .meter{margin-top:14px;height:8px;border-radius:999px;overflow:hidden;background:#dbe5e1}
   .meter-fill{height:100%;border-radius:999px;background:var(--accentbar);
     transition:width .4s cubic-bezier(.22,1,.36,1)}
+  .meter-ok{background:#dbe5e1}
   .meter-ok .meter-fill{background:#1b3a34}
+  .meter-warn{background:#f6e6c4}
   .meter-warn .meter-fill{background:#b98900}
+  .meter-over{background:#f7ddd8}
   .meter-over .meter-fill{background:#8e1f0b}
   .meter-legend{display:flex;justify-content:space-between;margin-top:6px;
     font-size:12px;color:var(--sub);font-variant-numeric:tabular-nums}
@@ -303,8 +381,9 @@ export function renderAdmin(vm: AdminViewModel): string {
   .plan-current{border-color:#1b3a34;box-shadow:0 0 0 1px #1b3a34 inset;background:#fbfdfc}
   .plan-head{display:flex;align-items:center;gap:8px;min-height:20px}
   .plan-name{font-size:13.5px;font-weight:650}
-  .plan-price{font-size:19px;font-weight:650;letter-spacing:-.02em;
-    font-variant-numeric:tabular-nums}
+  /* Proportional figures, not tabular: these are standalone display numbers
+     in separate cards, not a column that has to align. */
+  .plan-price{font-size:19px;font-weight:650;letter-spacing:-.02em}
   .plan-per{font-size:12.5px;font-weight:500;color:var(--sub);letter-spacing:0}
   .plan-meta{font-size:12px;color:var(--sub);line-height:1.45;min-height:34px}
   .plan .btn{width:100%;margin-top:4px}
@@ -359,10 +438,19 @@ export function renderAdmin(vm: AdminViewModel): string {
 </s-app-nav>
 <div class="wrap">
 
-  <div class="top">
-    <h1>StoreAgent</h1>
-    <span class="shop">${esc(vm.shop)}</span>
-  </div>
+  <header class="page">
+    <div>
+      <h1>StoreAgent</h1>
+      <p class="lede">Answers shoppers’ questions from your live catalog, and measures what it earns
+        against a group who never see it.</p>
+    </div>
+    <div class="meta">
+      <span class="chip${s.enabled ? '' : ' grey'}">${s.enabled ? 'Live' : 'Paused'}</span>
+      <span class="shop">${esc(vm.shop)}</span>
+    </div>
+  </header>
+
+  ${renderTiles(vm)}
 
   ${vm.saved ? '<div class="banner ok">Settings saved. The widget picks them up on the next page load.</div>' : ''}
   ${
@@ -373,16 +461,20 @@ export function renderAdmin(vm: AdminViewModel): string {
       : ''
   }
 
+  <!--
+    Assistant state and live-conversation count moved to the header badge and
+    the tiles. Repeating them here made the first card a summary of the thing
+    directly above it, which is how the page came to read as filler.
+  -->
   <section class="card">
-    <h2>Status</h2>
+    <h2>Connection</h2>
+    <p class="hint">Where answers come from. Both should say your own store before you go live.</p>
     <div class="body">
       <div class="rows">
-        <div class="row"><span class="k">Assistant</span>
-          <span class="v"><span class="chip${s.enabled ? '' : ' grey'}">${s.enabled ? 'Live' : 'Paused'}</span></span></div>
         <div class="row"><span class="k">Catalog source</span>
           <span class="v">${vm.stats.mode === 'live' ? 'Your live catalog' : 'Demo catalog'}</span></div>
-        <div class="row"><span class="k">Active conversations</span>
-          <span class="v">${esc(vm.stats.activeSessions)}</span></div>
+        <div class="row"><span class="k">Store</span>
+          <span class="v">${esc(vm.shop)}</span></div>
         <div class="row"><span class="k">Model</span>
           <span class="v muted">${esc(vm.stats.model)}</span></div>
       </div>
