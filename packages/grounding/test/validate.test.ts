@@ -131,6 +131,37 @@ describe('coverage checks — the anti-fabrication net', () => {
     expect(v.violations[0]!.message).not.toContain('the catalog says');
   });
 
+  /**
+   * A budget the shopper named is not a claim about the catalog. "anything
+   * under $700" came back as "here are the boards under $700", the validator
+   * flagged $700 as fabricated, threw away a correct answer and escalated —
+   * because $700 appears in no product row, which is exactly what a budget is.
+   */
+  it('lets the reply repeat a budget the shopper named', () => {
+    const v = validateGrounding(
+      { reply: 'Two boards come in under $700: the scarf at $79.00 and the coat at $189.00.', claims: [] },
+      [SEARCH_RESULT],
+      { shopperMessage: 'do you have anything under $700' },
+    );
+    expect(v.ok).toBe(true);
+  });
+
+  it('still refuses that same figure when stated as a price', () => {
+    // Otherwise a shopper could name a number and be quoted it back.
+    const v = validateGrounding({ reply: 'That coat is $700.00.', claims: [] }, [SEARCH_RESULT], {
+      shopperMessage: 'is the coat $700',
+    });
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]!.code).toBe('uncited_price');
+  });
+
+  it('does not accept a threshold the shopper never mentioned', () => {
+    const v = validateGrounding({ reply: 'Everything is under $700.', claims: [] }, [SEARCH_RESULT], {
+      shopperMessage: 'what do you have',
+    });
+    expect(v.ok).toBe(false);
+  });
+
   it('catches price assertions when no tool ran at all', () => {
     const v = validateGrounding({ reply: 'That coat is usually around $200.', claims: [] }, []);
     expect(v.ok).toBe(false);

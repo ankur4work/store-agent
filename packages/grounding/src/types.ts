@@ -62,4 +62,18 @@ export interface ValidateOptions {
    * fast" in brand copy shouldn't trip the validator.
    */
   readonly strictSoftClaims?: boolean;
+  /**
+   * What the shopper said this turn.
+   *
+   * A budget the shopper themselves named is not a claim about the catalog.
+   * "anything under $700" came back as "Here are the boards under $700…" and
+   * the validator flagged $700 as a fabricated price, discarded a correct
+   * answer, and escalated — because the number appeared in no product row,
+   * which is exactly what a budget is.
+   *
+   * Only ever consulted for money in an explicit comparative ("under $700",
+   * "below £50"). A bare "it's $700" is still checked against the catalog, so
+   * a shopper naming a figure cannot talk the assistant into quoting it.
+   */
+  readonly shopperMessage?: string;
 }

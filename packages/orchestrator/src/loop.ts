@@ -53,6 +53,13 @@ export interface TurnEvent {
     | 'speculation_miss'
     | 'grounding_retry'
     | 'stream_aborted'
+    /**
+     * A tool threw. Emitted so the failure is visible: it used to be caught,
+     * turned into an `{error:true}` payload for the model, and never recorded
+     * anywhere — so "the cart service failed" reached a shopper while the
+     * logs showed a clean turn and said nothing about why.
+     */
+    | 'tool_error'
     | 'escalated';
   readonly detail?: string;
 }
@@ -278,7 +285,9 @@ export class Orchestrator {
         return this.escalate(events, chosenRoute, toolResults, fingerprint, usage, attempts);
       }
 
-      lastVerdict = validateGrounding(parsed, toolResults);
+      // The shopper's own words go in: a budget they named ("under $700") is
+      // theirs to repeat back, not a price the catalog has to justify.
+      lastVerdict = validateGrounding(parsed, toolResults, { shopperMessage: input.message });
       if (lastVerdict.ok) {
         return {
           reply: parsed.reply,
@@ -384,7 +393,7 @@ export class Orchestrator {
         if (canUseSpeculation) {
           payload = await args.speculation;
           if (payload === undefined) {
-            payload = await this.safeExecute(call.name, call.input, args.signal);
+            payload = await this.safeExecute(call.name, call.input, args.signal, args.emit);
             args.emit({ type: 'speculation_miss', detail: 'prefetch failed' });
           } else {
             args.emit({ type: 'speculation_hit', detail: specQuery });
@@ -393,7 +402,7 @@ export class Orchestrator {
           if (call.name === 'search_catalog' && args.speculation !== undefined) {
             args.emit({ type: 'speculation_miss', detail: specQuery });
           }
-          payload = await this.safeExecute(call.name, call.input, args.signal);
+          payload = await this.safeExecute(call.name, call.input, args.signal, args.emit);
         }
 
         // Cite by a short, deterministic HANDLE — not the provider's opaque
@@ -491,12 +500,18 @@ export class Orchestrator {
     name: string,
     input: Record<string, unknown>,
     signal?: AbortSignal,
+    emit?: (e: TurnEvent) => void,
   ): Promise<unknown> {
     try {
       return await this.deps.tools.execute(name, input, signal);
     } catch (err) {
       // A failed tool is not a failed turn — hand the model the error so it can
       // adapt, and let grounding decide whether the answer is still safe.
+      //
+      // But it must not be SILENT. Swallowed here with no event, a broken cart
+      // told the shopper "the cart service failed" while the logs recorded a
+      // successful turn — the failure existed only in prose nobody was reading.
+      emit?.({ type: 'tool_error', detail: `${name}: ${(err as Error).message}` });
       return { error: true, message: (err as Error).message };
     }
   }

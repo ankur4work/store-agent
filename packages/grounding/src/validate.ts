@@ -141,7 +141,12 @@ export function validateGrounding(
     return finalize(violations);
   }
 
+  // Budgets the shopper named, which the reply may legitimately repeat back.
+  const shopperMoney =
+    opts.shopperMessage === undefined ? [] : extractMoneyFromText(opts.shopperMessage);
+
   for (const mentioned of replyMoney) {
+    if (shopperMoney.includes(mentioned) && isComparative(response.reply, mentioned)) continue;
     if (!isDerivable(mentioned, allSourceMoney)) {
       // Distinguish "invented a price" from "dropped the cents off a real
       // one". They read identically in the violation and need opposite
@@ -210,6 +215,23 @@ export function validateGrounding(
 
 function finalize(violations: readonly Violation[]): GroundingVerdict {
   return { ok: !violations.some((v) => v.severity === 'error'), violations };
+}
+
+/**
+ * Is this amount used as a THRESHOLD in the reply rather than as a price?
+ *
+ * "boards under $700" describes a filter the shopper asked for; "it costs
+ * $700" asserts a price and must come from the catalog. The distinction is
+ * the comparative word immediately before the figure, so a shopper naming a
+ * number cannot get it quoted back as a product's price.
+ */
+function isComparative(reply: string, value: Minor): boolean {
+  const dollars = value / 100;
+  // Both "700" and "700.00" spellings of the same amount.
+  const written = `(?:${dollars.toFixed(0)}|${dollars.toFixed(2)})`.replace(/\./g, '\\.');
+  const before =
+    '(?:under|below|less than|cheaper than|up to|at most|over|above|more than|at least|between|from|around|about|near)';
+  return new RegExp(`\\b${before}\\s+[$£€¥]?\\s?${written}\\b`, 'i').test(reply);
 }
 
 /**

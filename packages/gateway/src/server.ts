@@ -1173,6 +1173,16 @@ export function createGateway(deps: GatewayDeps): Server {
         attempts: result.attempts,
         ttftMs: firstDeltaAt === undefined ? null : firstDeltaAt - startedTurnAt,
         ms: Date.now() - startedTurnAt,
+        // A tool that threw is worth a line whether or not grounding failed:
+        // the shopper is being told something is broken, and until now that
+        // sentence was the only record of it anywhere.
+        ...(result.events.some((e) => e.type === 'tool_error')
+          ? {
+              toolErrors: result.events
+                .filter((e) => e.type === 'tool_error')
+                .map((e) => e.detail ?? 'unknown'),
+            }
+          : {}),
         ...(result.verdict.violations.length === 0
           ? {}
           : {
