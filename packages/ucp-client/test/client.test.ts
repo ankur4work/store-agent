@@ -130,6 +130,46 @@ describe('transport', () => {
     );
   });
 
+  /**
+   * The cart wire format, pinned against a live Shopify UCP endpoint. Each
+   * of these was wrong, and each failed silently: create_cart rejected every
+   * call, `const { cart } = ...` was undefined so SafeCart threw, and the
+   * authoritative "already sold out" notice read as an empty string.
+   */
+  it('sends line items as {item: {id}}, which is what the schema requires', async () => {
+    const server = new MockUcpServer();
+    const client = make(server);
+    await client.createCart({ line_items: [{ variant_id: 'v-coat-m', quantity: 2 }] });
+
+    const sent = server.callLog.find((c) => c.tool === 'create_cart')!.args as {
+      cart: { line_items: { item?: { id?: string }; variant_id?: string; quantity: number }[] };
+    };
+    expect(sent.cart.line_items[0]).toMatchObject({ item: { id: 'v-coat-m' }, quantity: 2 });
+    expect(sent.cart.line_items[0]!.variant_id).toBeUndefined();
+  });
+
+  it('reads a cart whose fields arrive at the top level, not under `cart`', async () => {
+    const server = new MockUcpServer();
+    const client = make(server);
+    const created = await client.createCart({ line_items: [{ variant_id: 'v-coat-m', quantity: 1 }] });
+
+    expect(created.cart.id).toMatch(/^gid:\/\/shopify\/Cart\//);
+    expect(created.cart.line_items[0]!.variant_id).toBe('v-coat-m');
+  });
+
+  it('reads a business message from {type, content}, not {severity, text}', async () => {
+    // These are authoritative and shown to the shopper verbatim. Read from
+    // the wrong fields they are empty, and a sold-out line vanishes in
+    // silence — the cart says nothing and the shopper never learns.
+    const server = new MockUcpServer({ outOfStock: ['v-coat-l'] });
+    const client = make(server);
+    const created = await client.createCart({ line_items: [{ variant_id: 'v-coat-l', quantity: 1 }] });
+
+    expect(created.messages).toHaveLength(1);
+    expect(created.messages[0]!.severity).toBe('warning');
+    expect(created.messages[0]!.text).toContain('out of stock');
+  });
+
   it('does not retry a non-retryable 4xx', async () => {
     const server = new MockUcpServer({ failNthCall: { tool: 'search_catalog', n: 1, status: 400 } });
     const client = make(server, { maxRetries: 3 });

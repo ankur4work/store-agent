@@ -1,4 +1,4 @@
-import type { Cart, CartMessage, CartWritable, CatalogProduct } from '../src/types.js';
+import type { Cart, CartLineItem, CartMessage, CartWritable, CatalogProduct } from '../src/types.js';
 
 /**
  * A deliberately HOSTILE UCP mock.
@@ -188,11 +188,27 @@ export class MockUcpServer {
   }
 
   // --- cart ---------------------------------------------------------------
+  //
+  // The wire format, verified against a live Shopify UCP endpoint:
+  //
+  //   line item   {item: {id}, quantity}   — NOT {variant_id, quantity}
+  //   response    cart fields at TOP LEVEL — NOT {cart: {...}}
+  //   message     {code, type, content}    — NOT {code, severity, text}
+  //
+  // This mock previously spoke the shape the client had guessed, so the two
+  // agreed with each other and neither agreed with Shopify. Every cart
+  // operation passed here and failed in production.
+
+  /** `{item: {id}}` on the wire → the internal `{variant_id}` the mock stores. */
+  private static readLines(cart: Record<string, unknown>): CartLineItem[] {
+    const raw = (cart['line_items'] ?? []) as { item?: { id?: string }; variant_id?: string; quantity?: number }[];
+    return raw.map((l) => ({ ...l, variant_id: l.item?.id ?? l.variant_id ?? '', quantity: l.quantity ?? 0 }));
+  }
 
   private createCart(args: Record<string, unknown>) {
     const incoming = (args['cart'] ?? {}) as CartWritable;
     const id = `gid://shopify/Cart/${++this.seq}`;
-    const stored: CartWritable = { ...incoming, line_items: [...(incoming.line_items ?? [])] };
+    const stored: CartWritable = { ...incoming, line_items: MockUcpServer.readLines(args['cart'] as Record<string, unknown> ?? {}) };
     this.carts.set(id, stored);
     return this.materialize(id);
   }
@@ -211,7 +227,7 @@ export class MockUcpServer {
     const id = String(args['id']);
     if (!this.carts.has(id)) throw new Error(`cart not found: ${id}`);
     const incoming = (args['cart'] ?? {}) as CartWritable;
-    this.carts.set(id, { ...incoming, line_items: [...(incoming.line_items ?? [])] });
+    this.carts.set(id, { ...incoming, line_items: MockUcpServer.readLines((args['cart'] ?? {}) as Record<string, unknown>) });
     return this.materialize(id);
   }
 
@@ -236,7 +252,7 @@ export class MockUcpServer {
           severity: 'warning',
           text: `${li.variant_id} is out of stock and was removed.`,
           line_item_id: li.variant_id,
-        });
+        } as CartMessage);
         return { ...li, quantity: 0, price: { amount: PRICE_BY_VARIANT[li.variant_id] ?? 0, currency: 'USD' } };
       }
       return { ...li, price: { amount: PRICE_BY_VARIANT[li.variant_id] ?? 0, currency: 'USD' } };
@@ -254,7 +270,21 @@ export class MockUcpServer {
       currency: 'USD',
       updated_at: new Date(0).toISOString(),
     };
-    return { cart, messages };
+
+    // Emitted in the REAL wire shape: cart fields at the top level, line
+    // items carrying `item.id`, messages as `{code, type, content}`. The
+    // mock used to return the internal shape, so client and mock agreed with
+    // each other and neither agreed with Shopify.
+    return {
+      ...cart,
+      line_items: line_items.map((li) => ({ ...li, item: { id: li.variant_id } })),
+      messages: messages.map((m) => ({
+        code: m.code,
+        type: m.severity,
+        content_type: 'plain',
+        content: m.text,
+      })),
+    };
   }
 
   // --- envelopes ----------------------------------------------------------
