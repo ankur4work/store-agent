@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-10.1';
+  var BUILD = '2026-09-10.2';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -56,6 +56,13 @@
   } catch (e) {}
 
   var els = {};
+  /**
+   * Per-turn UI handles. The card rail belongs to ONE answer, so it is
+   * created next to that answer's bubble and forgotten when the next turn
+   * starts — rather than a single rail at the top of the panel being
+   * rewritten by every question.
+   */
+  var turnUi = { bubble: null, rail: null };
   function persist() {
     try {
       sessionStorage.setItem(
@@ -402,7 +409,6 @@ textarea::placeholder{color:var(--muted)}
       '</header>' +
       '<div class="scroll">' +
       '<div class="intro"><h2></h2><p></p></div>' +
-      '<div class="rail" hidden><h3></h3><div class="cards"></div></div>' +
       '<div class="log" aria-live="polite"></div>' +
       '<div class="chips"></div>' +
       '</div>' +
@@ -420,9 +426,6 @@ textarea::placeholder{color:var(--muted)}
     els.panel = p;
     els.scroll = p.querySelector('.scroll');
     els.intro = p.querySelector('.intro');
-    els.rail = p.querySelector('.rail');
-    els.railTitle = p.querySelector('.rail h3');
-    els.cards = p.querySelector('.cards');
     els.log = p.querySelector('.log');
     els.chips = p.querySelector('.chips');
     els.status = p.querySelector('.status');
@@ -569,10 +572,47 @@ textarea::placeholder{color:var(--muted)}
     return 'https://' + SHOP + '/products/' + handle;
   }
 
+  /**
+   * The card rail for the CURRENT answer, created inside the log.
+   *
+   * There used to be exactly one rail, pinned above the whole conversation.
+   * It worked for the first question and quietly stopped after that: ask a
+   * second thing and its cards replaced the first set, several screens above
+   * the answer they belonged to and usually scrolled out of sight. A shopper
+   * reading a list of six boards saw no pictures at all, because the pictures
+   * were up where the conversation began.
+   *
+   * A rail per turn, inserted directly above the bubble it explains, so cards
+   * and prose arrive together and stay together in the scrollback.
+   */
+  function turnRail() {
+    if (turnUi.rail && turnUi.rail.isConnected) return turnUi.rail;
+    var rail = document.createElement('div');
+    rail.className = 'rail';
+    rail.innerHTML = '<h3></h3><div class="cards"></div>';
+    // Above the answer, not below it: the cards land ~44ms into the turn off
+    // the speculative search, while the model is still composing.
+    if (turnUi.bubble && turnUi.bubble.isConnected) {
+      els.log.insertBefore(rail, turnUi.bubble);
+    } else {
+      els.log.appendChild(rail);
+    }
+    turnUi.rail = rail;
+    return rail;
+  }
+
+  /** Drop this turn's rail — no results, or the turn failed. */
+  function dropRail() {
+    if (turnUi.rail && turnUi.rail.parentNode) turnUi.rail.parentNode.removeChild(turnUi.rail);
+    turnUi.rail = null;
+  }
+
   function renderCards(products, label) {
-    els.rail.hidden = false;
-    els.railTitle.textContent = label || 'From the store';
-    els.cards.innerHTML = '';
+    var rail = turnRail();
+    rail.querySelector('h3').textContent = label || 'From the store';
+    var cards = rail.querySelector('.cards');
+    cards.innerHTML = '';
+    els.cards = cards;
     products.slice(0, 8).forEach(function (p, i) {
       var min = p.price_range && p.price_range.min ? p.price_range.min.amount : null;
       var vars = p.variants || [];
@@ -621,15 +661,17 @@ textarea::placeholder{color:var(--muted)}
   }
 
   function skeletons(n) {
-    els.rail.hidden = false;
-    els.railTitle.textContent = 'Looking…';
-    els.cards.innerHTML = '';
+    var rail = turnRail();
+    rail.querySelector('h3').textContent = 'Looking…';
+    var cards = rail.querySelector('.cards');
+    cards.innerHTML = '';
+    els.cards = cards;
     for (var i = 0; i < n; i++) {
       var c = document.createElement('div');
       c.className = 'card skel';
       c.style.animationDelay = i * 55 + 'ms';
       c.innerHTML = '<div class="ph"></div><div class="meta"><div class="t"></div><div class="p"></div></div>';
-      els.cards.appendChild(c);
+      cards.appendChild(c);
     }
   }
 
@@ -972,6 +1014,10 @@ textarea::placeholder{color:var(--muted)}
 
   function stream(text, isVoice) {
     var bubble = addMsg('bot', '');
+    // A new turn owns a new rail; the previous one stays where it is, beside
+    // the answer it belongs to.
+    turnUi.bubble = bubble;
+    turnUi.rail = null;
 
     if (suspended) {
       bubble.textContent =
@@ -1023,7 +1069,7 @@ textarea::placeholder{color:var(--muted)}
         // a number. So the assistant simply steps aside and points at the
         // channel that still works.
         if (res.status === 402) {
-          els.rail.hidden = true;
+          dropRail();
           bubble.textContent =
             'I can’t answer right now, but the team can help — leave an email and someone will follow up.';
           suspended = true;
@@ -1032,7 +1078,7 @@ textarea::placeholder{color:var(--muted)}
         // 429 is the rate limiter, which is temporary by definition, so it
         // gets a "try shortly" rather than a dead end.
         if (res.status === 429) {
-          els.rail.hidden = true;
+          dropRail();
           bubble.textContent = 'A lot of people are asking at once. Try that again in a few seconds.';
           return;
         }
@@ -1091,7 +1137,7 @@ textarea::placeholder{color:var(--muted)}
             flush();
             if (shown !== d.reply) bubble.textContent = d.reply;
             state.messages.push({ role: 'bot', text: d.reply });
-            if (els.railTitle.textContent === 'Looking…') els.rail.hidden = true;
+            if (turnUi.rail && turnUi.rail.querySelector('.card.skel')) dropRail();
             els.status.textContent = d.grounded ? 'Ready' : 'Passed to the team';
             persist();
           } else if (ev === 'error') {
@@ -1103,7 +1149,7 @@ textarea::placeholder{color:var(--muted)}
       })
       .catch(function (err) {
         if (err && err.name === 'AbortError') return;
-        els.rail.hidden = true;
+        dropRail();
         bubble.textContent =
           'I couldn’t reach the store just then. Try again in a moment, or leave an email and someone will follow up.';
       })

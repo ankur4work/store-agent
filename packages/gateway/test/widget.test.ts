@@ -319,6 +319,38 @@ describe('widget voice endpointing', () => {
   });
 });
 
+/**
+ * Cards belong to the answer that produced them.
+ *
+ * There used to be one rail pinned above the whole conversation. It worked
+ * for the first question and quietly stopped after: a second question
+ * replaced the first set of cards, several screens above the answer they
+ * explained and usually scrolled out of view — so a shopper reading a list
+ * of six boards saw no pictures at all.
+ */
+describe('widget product cards', () => {
+  it('creates a rail per turn instead of one for the whole panel', () => {
+    expect(SRC).toContain('function turnRail()');
+    // The single pinned rail is gone from the panel markup.
+    expect(SRC).not.toContain('<div class="rail" hidden>');
+  });
+
+  it('puts the cards above the answer they belong to', () => {
+    expect(SRC).toMatch(/els\.log\.insertBefore\(rail, turnUi\.bubble\)/);
+  });
+
+  it('starts each turn without inheriting the previous turn\'s rail', () => {
+    expect(SRC).toMatch(/turnUi\.bubble = bubble;\s*\n\s*turnUi\.rail = null;/);
+  });
+
+  it('removes only this turn\'s rail when a turn fails', () => {
+    // Previously this hid the one shared rail, which also wiped the cards
+    // from every earlier answer in the scrollback.
+    expect(SRC).toContain('function dropRail()');
+    expect(SRC).not.toMatch(/els\.rail\.hidden = true/);
+  });
+});
+
 describe('widget diagnostics', () => {
   /**
    * Every non-render path used to be silent, so holdout, disabled, and
