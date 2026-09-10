@@ -291,8 +291,21 @@ describe('widget voice endpointing', () => {
     expect(vad()).toMatch(/heardNothing/);
   });
 
-  it('reports why it stopped, so a bad mic is diagnosable from the console', () => {
-    expect(vad()).toMatch(/\[StoreAgent\] endpoint:/);
+  it('reports the endpoint decision to the server, not just the console', () => {
+    expect(vad()).toMatch(/voiceDiag\('endpoint', reading\)/);
+    expect(vad()).toMatch(/reason = quietLongEnough \? 'silence'/);
+  });
+
+  /**
+   * The failure being chased is one where the recorder NEVER stops, so a
+   * report sent only on stop is never sent at all — which is exactly why the
+   * server saw nothing across two failed attempts and both fixes were made
+   * blind. The heartbeat makes "still listening, and here are the levels"
+   * visible while it is happening.
+   */
+  it('heartbeats the levels while still listening', () => {
+    expect(vad()).toMatch(/voiceDiag\('listening', reading\)/);
+    expect(vad()).toMatch(/voice\.lastBeat/);
   });
 
   it('resumes a suspended AudioContext, or every level reads as silence', () => {

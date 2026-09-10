@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-08.8';
+  var BUILD = '2026-09-10.1';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -656,6 +656,32 @@ textarea::placeholder{color:var(--muted)}
     raf: 0,
   };
 
+  /**
+   * Report a voice milestone to the server.
+   *
+   * Voice is the one path that cannot be tested from outside the browser: it
+   * needs a real microphone. Two attempts at the endpointing bug were made
+   * blind, both wrong, and the server saw nothing either time — a recorder
+   * that never stops never sends audio, so the logs looked identical to
+   * "nobody tried it". These lines are the difference between diagnosing and
+   * guessing. No audio and no transcript, only what happened and the levels.
+   */
+  function voiceDiag(event, fields) {
+    try {
+      var payload = { voice: event, build: BUILD };
+      for (var k in fields) if (Object.prototype.hasOwnProperty.call(fields, k)) payload[k] = fields[k];
+      say('voice ' + event + ' ' + JSON.stringify(fields || {}));
+      fetch(API + '/api/diag', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ shop: SHOP, diag: payload }),
+        keepalive: true,
+      }).catch(function () {});
+    } catch (e) {
+      /* diagnostics must never break the feature they are diagnosing */
+    }
+  }
+
   function setVoiceState(s) {
     if (els.mic) els.mic.dataset.state = s;
     if (els.status) {
@@ -665,12 +691,21 @@ textarea::placeholder{color:var(--muted)}
   }
 
   async function toggleVoice() {
-    if (voice.on) return stopVoice(true);
+    if (voice.on) {
+      voiceDiag('mic_off');
+      return stopVoice(true);
+    }
+    voiceDiag('mic_on', {
+      hasMediaDevices: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+      hasRecorder: typeof MediaRecorder !== 'undefined',
+      mime: typeof MediaRecorder === 'undefined' ? null : pickMime(),
+    });
     try {
       voice.stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
     } catch (e) {
+      voiceDiag('mic_denied', { error: String((e && e.name) || e) });
       // Permission denied is a normal outcome, not an error state. Fall back
       // to text without ceremony.
       els.voicebar.classList.remove('on');
@@ -702,11 +737,13 @@ textarea::placeholder{color:var(--muted)}
     rec.ondataavailable = function (e) { if (e.data.size) voice.chunks.push(e.data); };
     rec.onstop = function () {
       var blob = new Blob(voice.chunks, { type: rec.mimeType });
+      voiceDiag('recorder_stopped', { bytes: blob.size, type: rec.mimeType });
       if (blob.size > 1200) transcribeAndSend(blob);
       else if (voice.on) startCapture(); // too short to be speech
     };
     rec.start(100);
     setVoiceState('listening');
+    voiceDiag('capture_start');
     monitorSilence();
   }
 
@@ -820,22 +857,31 @@ textarea::placeholder{color:var(--muted)}
       // capture rather than sitting in a listening state that cannot end.
       var heardNothing = voice.spokeMs === 0 && now - startedAt > IDLE_GIVE_UP_MS;
 
+      var reading = {
+        level: Math.round(level * 10) / 10,
+        floor: Math.round(voice.floor * 10) / 10,
+        peak: Math.round(peak * 10) / 10,
+        threshold: Math.round(threshold * 10) / 10,
+        spokeMs: Math.round(voice.spokeMs),
+        elapsedMs: Math.round(now - startedAt),
+      };
+
       if (recording && (quietLongEnough || tooLong || heardNothing)) {
-        // One line, so a mic that still misbehaves can be diagnosed from the
-        // console instead of guessed at a third time.
-        console.log(
-          '[StoreAgent] endpoint: ' +
-            (quietLongEnough ? 'silence' : tooLong ? 'max-duration' : 'no-speech') +
-            ' level=' + level.toFixed(1) +
-            ' floor=' + voice.floor.toFixed(1) +
-            ' peak=' + peak.toFixed(1) +
-            ' threshold=' + threshold.toFixed(1) +
-            ' spokeMs=' + Math.round(voice.spokeMs) +
-            ' elapsedMs=' + Math.round(now - startedAt),
-        );
+        reading.reason = quietLongEnough ? 'silence' : tooLong ? 'max-duration' : 'no-speech';
+        voiceDiag('endpoint', reading);
         voice.recorder.stop();
         return;
       }
+
+      // A heartbeat while still listening. The failure mode being chased is
+      // one where the recorder NEVER stops — so a report sent only on stop is
+      // never sent at all, which is exactly why the server saw nothing the
+      // last two times. This makes "still listening, and here is why" visible.
+      if (now - (voice.lastBeat || 0) > 3000) {
+        voice.lastBeat = now;
+        voiceDiag('listening', reading);
+      }
+
       voice.raf = requestAnimationFrame(tick);
     }
     voice.raf = requestAnimationFrame(tick);
