@@ -93,6 +93,47 @@ export function detectShippingEstimate(text: string): string | undefined {
  * Availability signals present in a tool result, deep-walked.
  * Returns the set of `available` booleans found.
  */
+/**
+ * Authoritative out-of-stock notices from a cart or checkout result.
+ *
+ * The catalog and the cart can disagree, and when they do the CART is right:
+ * `available: true` is a search-time snapshot, while "already sold out" comes
+ * from the attempt to actually reserve the item. Weighing them equally is how
+ * a true statement got suppressed — the cart refused a line, the model
+ * relayed it, and the validator called it a contradiction because a stale
+ * catalog row in the same turn still said available.
+ *
+ * Matched on the message CODE where there is one, falling back to the prose,
+ * since only cart tools emit these.
+ */
+export function collectStockMessages(result: unknown): string[] {
+  const out: string[] = [];
+  const seen = new Set<unknown>();
+  const OOS_CODE = /out_of_stock|sold_out|unavailable|insufficient_(?:stock|inventory)/i;
+  const OOS_TEXT = /\b(?:sold out|out of stock|no longer available)\b/i;
+
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    const code = obj['code'];
+    const prose = [obj['content'], obj['text'], obj['message']].find((v) => typeof v === 'string');
+    if (typeof code === 'string' && OOS_CODE.test(code)) out.push(code);
+    else if (typeof prose === 'string' && OOS_TEXT.test(prose)) out.push(prose);
+
+    for (const child of Object.values(obj)) walk(child);
+  };
+
+  walk(result);
+  return out;
+}
+
 export function collectAvailability(result: unknown): boolean[] {
   const out: boolean[] = [];
   const seen = new Set<unknown>();

@@ -162,6 +162,48 @@ describe('coverage checks — the anti-fabrication net', () => {
     expect(v.ok).toBe(false);
   });
 
+  /**
+   * The cart outranks the catalog on availability. Found live: add_to_cart
+   * returned "The product is already sold out", the model relayed it, and the
+   * validator called it a contradiction because a search_catalog result in
+   * the same turn still said `available: true`. The one thing the shopper
+   * most needed to hear was thrown away as a hallucination.
+   */
+  it('believes a cart that says sold out over a catalog row that says available', () => {
+    const cartSaysNo = {
+      tool_call_id: 'add_to_cart#2',
+      tool: 'add_to_cart',
+      result: {
+        line_items: [],
+        messages: [
+          { code: 'merchandise_out_of_stock', type: 'warning', content: "'Hydrogen' is already sold out." },
+        ],
+      },
+    };
+    const v = validateGrounding(
+      { reply: 'I couldn’t add it — the Hydrogen snowboard is sold out.', claims: [] },
+      [SEARCH_RESULT, cartSaysNo],
+    );
+    expect(v.ok).toBe(true);
+  });
+
+  it('still catches an invented out-of-stock with no cart notice behind it', () => {
+    // Everything in this source is available and nothing reported a problem,
+    // so "sold out" is the model's own invention.
+    const allAvailable = {
+      tool_call_id: 'search_catalog#1',
+      tool: 'search_catalog',
+      result: {
+        products: [
+          { id: 'p1', title: 'Overcoat', variants: [{ id: 'v1', available: true }] },
+        ],
+      },
+    };
+    const v = validateGrounding({ reply: 'The overcoat is sold out.', claims: [] }, [allAvailable]);
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]!.code).toBe('stock_contradicts_source');
+  });
+
   it('catches price assertions when no tool ran at all', () => {
     const v = validateGrounding({ reply: 'That coat is usually around $200.', claims: [] }, []);
     expect(v.ok).toBe(false);

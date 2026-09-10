@@ -1,4 +1,9 @@
-import { collectAvailability, detectShippingEstimate, detectStock } from './extract.js';
+import {
+  collectAvailability,
+  collectStockMessages,
+  detectShippingEstimate,
+  detectStock,
+} from './extract.js';
 import {
   collectMoneyFromResult,
   extractMoneyFromText,
@@ -42,6 +47,14 @@ export function validateGrounding(
   // Every money value observable anywhere in this turn's tool results.
   const allSourceMoney = toolResults.flatMap((r) => collectMoneyFromResult(r.result));
   const allAvailability = toolResults.flatMap((r) => collectAvailability(r.result));
+  /**
+   * A cart saying "sold out" outranks a catalog row saying `available: true`.
+   * The catalog is a search-time snapshot; the cart is the attempt to
+   * actually reserve the item. Treated equally, the cart's refusal — which
+   * the shopper most needs to hear — was scored as a contradiction and
+   * suppressed.
+   */
+  const soldOutNotices = toolResults.flatMap((r) => collectStockMessages(r.result));
 
   // --- 1. Citation checks -------------------------------------------------
 
@@ -101,7 +114,7 @@ export function validateGrounding(
         const anyAvailable = availability.includes(true);
         const contradicts =
           (stock.polarity === 'in_stock' && !anyAvailable) ||
-          (stock.polarity === 'out_of_stock' && availability.every((a) => a));
+          (stock.polarity === 'out_of_stock' && availability.every((a) => a) && soldOutNotices.length === 0);
         if (contradicts) {
           violations.push({
             code: 'stock_contradicts_source',
@@ -182,7 +195,7 @@ export function validateGrounding(
       const anyAvailable = allAvailability.includes(true);
       const contradicts =
         (replyStock.polarity === 'in_stock' && !anyAvailable) ||
-        (replyStock.polarity === 'out_of_stock' && allAvailability.every((a) => a));
+        (replyStock.polarity === 'out_of_stock' && allAvailability.every((a) => a) && soldOutNotices.length === 0);
       if (contradicts) {
         violations.push({
           code: 'stock_contradicts_source',
