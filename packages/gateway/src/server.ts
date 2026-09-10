@@ -1120,7 +1120,13 @@ export function createGateway(deps: GatewayDeps): Server {
         ...(result.verdict.violations.length === 0
           ? {}
           : {
-              violations: result.verdict.violations.map((v) => `${v.severity}:${v.code}`),
+              // Evidence included: for every code the validator emits it is
+              // either a formatted amount or a match from a fixed phrase list,
+              // never free-form shopper text. Without it the code says a price
+              // was untraceable but not WHICH, which is most of the answer.
+              violations: result.verdict.violations.map(
+                (v) => `${v.severity}:${v.code}${v.evidence === undefined ? '' : `(${v.evidence})`}`,
+              ),
               toolsCalled: result.events
                 .filter((e) => e.type === 'tool_end')
                 .map((e) => e.detail ?? 'unknown'),
