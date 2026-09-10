@@ -343,6 +343,25 @@ describe('widget product cards', () => {
     expect(SRC).toMatch(/turnUi\.bubble = bubble;\s*\n\s*turnUi\.rail = null;/);
   });
 
+  /**
+   * A live UCP variant reports `availability: {available: true}`; the demo
+   * fixtures use a flat `available`. Reading only the flat one made the value
+   * `undefined` against a real store, so every card wore a "Sold out" badge
+   * while the answer beside it listed the same products as available.
+   */
+  it('reads availability from the shape a live store actually sends', () => {
+    expect(SRC).toContain('function variantAvailable(v)');
+    expect(SRC).toMatch(/v\.availability && typeof v\.availability\.available === 'boolean'/);
+    expect(SRC).not.toMatch(/return !v\.available;/);
+  });
+
+  it('treats unknown availability as available, not sold out', () => {
+    // Branding a purchasable product sold out loses the sale outright; the
+    // opposite is corrected at the cart, which is authoritative.
+    const fn = SRC.slice(SRC.indexOf('function variantAvailable'), SRC.indexOf('function renderCards'));
+    expect(fn.trimEnd().endsWith('return true;\n  }')).toBe(true);
+  });
+
   it('removes only this turn\'s rail when a turn fails', () => {
     // Previously this hid the one shared rail, which also wiped the cards
     // from every earlier answer in the scrollback.

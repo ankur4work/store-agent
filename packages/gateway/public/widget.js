@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-10.2';
+  var BUILD = '2026-09-10.3';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -607,6 +607,26 @@ textarea::placeholder{color:var(--muted)}
     turnUi.rail = null;
   }
 
+  /**
+   * Is this variant purchasable?
+   *
+   * A live UCP variant reports `availability: {available: true}`. The demo
+   * fixtures use a flat `available`, and the card read only the flat one — so
+   * against a real store the value was `undefined`, `!undefined` was true,
+   * and EVERY product wore a "Sold out" badge while the answer beside it
+   * said the same products were available.
+   *
+   * Unknown means available. Branding a purchasable product sold out costs a
+   * sale outright; the opposite is corrected at the cart, where the
+   * authoritative message comes from.
+   */
+  function variantAvailable(v) {
+    if (!v) return true;
+    if (v.availability && typeof v.availability.available === 'boolean') return v.availability.available;
+    if (typeof v.available === 'boolean') return v.available;
+    return true;
+  }
+
   function renderCards(products, label) {
     var rail = turnRail();
     rail.querySelector('h3').textContent = label || 'From the store';
@@ -617,10 +637,10 @@ textarea::placeholder{color:var(--muted)}
       var min = p.price_range && p.price_range.min ? p.price_range.min.amount : null;
       var vars = p.variants || [];
       var anyOut = vars.some(function (v) {
-        return !v.available;
+        return !variantAvailable(v);
       });
       var allOut = vars.length > 0 && vars.every(function (v) {
-        return !v.available;
+        return !variantAvailable(v);
       });
 
       // Demo fixtures carry `image`; real UCP payloads carry `media[]`.
