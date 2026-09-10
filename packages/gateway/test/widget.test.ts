@@ -335,8 +335,11 @@ describe('widget product cards', () => {
     expect(SRC).not.toContain('<div class="rail" hidden>');
   });
 
-  it('puts the cards above the answer they belong to', () => {
-    expect(SRC).toMatch(/els\.log\.insertBefore\(rail, turnUi\.bubble\)/);
+  it('puts the cards AFTER the answer, in reading order', () => {
+    // Cards arrive first, off the speculative search. Rendering them where
+    // they landed pushed the reply below the fold — pictures for a question
+    // that had not been answered yet, with the words out of sight.
+    expect(SRC).toMatch(/insertBefore\(rail, turnUi\.bubble\.nextSibling\)/);
   });
 
   it('starts each turn without inheriting the previous turn\'s rail', () => {

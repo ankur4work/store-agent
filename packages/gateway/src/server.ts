@@ -994,6 +994,9 @@ export function createGateway(deps: GatewayDeps): Server {
     void attribution.markEngaged(session.shopDomain, sessionId);
 
     const products: unknown[] = [];
+    // Every product seen this turn, not just the first search's — see the
+    // reconciliation at .
+    const allProducts: unknown[] = [];
     const executor = createToolExecutor({
       session,
       ucp,
@@ -1029,6 +1032,13 @@ export function createGateway(deps: GatewayDeps): Server {
           .finally(() => metrics.upstream.observe(Date.now() - upstreamStart, { target: 'catalog' }));
         if (name === 'search_catalog' || name === 'get_product') {
           const extracted = extractProducts(result);
+          // Everything seen this turn, deduped — the pool the final cards are
+          // chosen from once the reply is settled. The early send below is
+          // still only the first search, so something is on screen fast.
+          for (const p of extracted) {
+            const id = (p as { id?: unknown }).id;
+            if (!allProducts.some((q) => (q as { id?: unknown }).id === id)) allProducts.push(p);
+          }
           if (extracted.length > 0 && products.length === 0) {
             products.push(...extracted);
             send('products', { products: extracted });
@@ -1102,6 +1112,27 @@ export function createGateway(deps: GatewayDeps): Server {
       // The tripwire may have aborted a partial message — tell the client to
       // discard whatever it painted before showing the final text.
       if (result.events.some((e) => e.type === 'stream_aborted')) send('reset', {});
+
+      /**
+       * Re-send the cards, narrowed to the products the answer actually names.
+       *
+       * Cards are emitted early, off the FIRST catalog search, so they can be
+       * on screen while the model is still writing. That first search is a
+       * guess at what the shopper meant, and the answer is often composed
+       * from a later or broader one — so the pictures and the words routinely
+       * disagreed, showing two boards beside a reply discussing four others.
+       *
+       * By `done` the reply is settled and every tool result is in hand, so
+       * the two can be reconciled. Only narrowed, never widened: a product
+       * the answer does not mention has no business being pictured.
+       */
+      const named = allProducts.filter((p) => {
+        const title = (p as { title?: unknown }).title;
+        return typeof title === 'string' && title !== '' && result.reply.includes(title);
+      });
+      if (named.length > 0 && named.length !== products.length) {
+        send('products', { products: named, final: true });
+      }
 
       // A turn reaches a human two ways: the loop gave up (`escalated`) or the
       // agent chose to hand off (`handedOff`). A client asking "did this reach

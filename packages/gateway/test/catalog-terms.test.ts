@@ -23,8 +23,12 @@ describe('reducing a shopper sentence to catalog terms', () => {
     expect(catalogTerms('yo whats poppin any deals on boards rn')).toBe('poppin boards');
   });
 
-  it('drops a superlative down to the product word', () => {
-    expect(catalogTerms('whats your most expensive product')).toBe('most product');
+  it('drops a superlative to nothing, which means browse the catalog', () => {
+    // "product" is not a product name. Searching for it found nothing and
+    // the assistant apologised instead of listing the store.
+    expect(catalogTerms('whats your most expensive product')).toBe('most');
+    expect(catalogTerms('avl products')).toBe('');
+    expect(catalogTerms('other options')).toBe('');
   });
 
   it('returns empty when nothing product-like remains, which means browse', () => {

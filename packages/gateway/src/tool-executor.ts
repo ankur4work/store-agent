@@ -100,6 +100,12 @@ const NOISE = new Set([
   'old', 'year', 'years', 'kid', 'kids', 'son', 'daughter', 'wife', 'husband', 'friend',
   'rn', 'now', 'today', 'deal', 'deals', 'sale', 'discount', 'cheap', 'cheapest', 'expensive',
   'difference', 'between', 'compare', 'vs', 'versus', 'like', 'it', 'one', 'ones',
+  // Shorthand a shopper types instead of the word. "avl products" is not a
+  // product name, and treating it as one made the assistant apologise for
+  // failing to find a board called "avl" rather than simply listing what is
+  // in stock.
+  'avl', 'avail', 'av', 'prod', 'prods', 'product', 'products', 'item', 'items',
+  'pls', 'plz', 'please', 'options', 'option', 'other', 'others', 'more', 'all', 'everything',
 ]);
 
 /**
@@ -168,9 +174,16 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
           requested_query: query,
           query_used: attempt,
           note:
-            attempt === ''
-              ? 'No product matched the shopper\'s wording. These are products from the catalog, NOT matches — say you could not find what they asked for before offering them.'
-              : `No product matched "${query}". These matched the broader search "${attempt}".`,
+            attempt !== ''
+              ? `No product matched "${query}". These matched the broader search "${attempt}".`
+              : terms === ''
+                ? // The shopper named no product at all — "what do you sell",
+                  // "avl products", "other options". There is nothing to
+                  // apologise for, and apologising is what made the assistant
+                  // answer a browse request by regretting it could not find a
+                  // product called "avl". Just show them the store.
+                  'The shopper did not name a specific product, so this is the catalog. Answer their question directly with these — do not say you could not find a match.'
+                : 'No product matched the shopper\'s wording. These are products from the catalog, NOT matches — say you could not find what they asked for before offering them.',
         };
       }
     }

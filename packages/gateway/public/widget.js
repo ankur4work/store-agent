@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-10.3';
+  var BUILD = '2026-09-11.1';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -590,10 +590,14 @@ textarea::placeholder{color:var(--muted)}
     var rail = document.createElement('div');
     rail.className = 'rail';
     rail.innerHTML = '<h3></h3><div class="cards"></div>';
-    // Above the answer, not below it: the cards land ~44ms into the turn off
-    // the speculative search, while the model is still composing.
-    if (turnUi.bubble && turnUi.bubble.isConnected) {
-      els.log.insertBefore(rail, turnUi.bubble);
+    // AFTER the answer. Cards arrive first — ~44ms, off the speculative
+    // search, while the model is still composing — and putting them where
+    // they landed pushed the reply below the fold: a shopper saw pictures for
+    // a question they had not been answered yet, and had to scroll to find
+    // the words. Reading order beats arrival order, so the reply comes first
+    // and the products illustrate it.
+    if (turnUi.bubble && turnUi.bubble.isConnected && turnUi.bubble.nextSibling) {
+      els.log.insertBefore(rail, turnUi.bubble.nextSibling);
     } else {
       els.log.appendChild(rail);
     }
