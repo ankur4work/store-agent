@@ -11,7 +11,16 @@ export interface JsonRpcRequest {
 export interface JsonRpcResponse<T> {
   readonly jsonrpc: '2.0';
   readonly id: number;
-  readonly result?: { readonly structuredContent?: T; readonly isError?: boolean };
+  readonly result?: {
+    readonly structuredContent?: T;
+    readonly isError?: boolean;
+    /**
+     * Where a tool-level failure explains itself. An MCP tool error comes
+     * back as a normal JSON-RPC RESULT carrying `isError: true` and prose
+     * here — there is no `error` member and no `structuredContent`.
+     */
+    readonly content?: readonly { readonly type?: string; readonly text?: string }[];
+  };
   readonly error?: { readonly code: number; readonly message: string; readonly data?: unknown };
 }
 
@@ -142,6 +151,22 @@ export class UcpTransport {
           code: json.error.code,
           data: json.error.data,
         });
+      }
+      // A tool-level failure is a RESULT, not a JSON-RPC error: `isError:
+      // true` with the reason in `content`. Both were declared and neither
+      // was read, so every one of them surfaced as the same opaque "missing
+      // result.structuredContent" — which is true, and says nothing. A cart
+      // that would not open cost an afternoon for exactly that reason.
+      if (json.result?.isError === true || json.result?.content !== undefined) {
+        const said = (json.result.content ?? [])
+          .map((c) => c.text)
+          .filter((t): t is string => typeof t === 'string' && t !== '')
+          .join('; ');
+        if (json.result.structuredContent === undefined) {
+          throw new UcpRpcError(`UCP ${tool} → ${said === '' ? 'tool reported an error' : said}`, {
+            tool,
+          });
+        }
       }
       if (json.result?.structuredContent === undefined) {
         throw new UcpTransportError(`UCP ${tool} → missing result.structuredContent`, res.status, { tool });

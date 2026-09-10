@@ -94,6 +94,42 @@ describe('transport', () => {
     await expect(client.getCart('gid://shopify/Cart/nope')).rejects.toBeInstanceOf(UcpRpcError);
   });
 
+  /**
+   * A tool-level failure is a RESULT, not a JSON-RPC error: `isError: true`
+   * with the reason in `content`. Both fields were declared and neither was
+   * read, so every such failure surfaced as "missing result.structuredContent"
+   * — true, and useless. A cart that would not open cost an afternoon to
+   * diagnose because the server had said why and nothing looked.
+   */
+  it('surfaces what the tool actually said when it reports an error', async () => {
+    const fetchStub = (async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            isError: true,
+            content: [{ type: 'text', text: 'cart creation is not enabled for this merchant' }],
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
+
+    const client = new UcpClient(
+      new UcpTransport({
+        shopDomain: 'mock.test',
+        agentProfile: 'https://storeagent.tech/ucp-profile.json',
+        fetch: fetchStub,
+        endpoint: 'https://mock.test/ucp',
+        maxRetries: 0,
+      }),
+    );
+
+    await expect(client.createCart({ line_items: [{ variant_id: 'v1', quantity: 1 }] })).rejects.toThrow(
+      /cart creation is not enabled/,
+    );
+  });
+
   it('does not retry a non-retryable 4xx', async () => {
     const server = new MockUcpServer({ failNthCall: { tool: 'search_catalog', n: 1, status: 400 } });
     const client = make(server, { maxRetries: 3 });
