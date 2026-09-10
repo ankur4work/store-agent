@@ -444,12 +444,11 @@ describe('stat tiles', () => {
     expect(out).toContain('2,482');
   });
 
-  it('says Measuring rather than showing a revenue figure it cannot support', () => {
-    // The whole product rests on not overclaiming. A number a merchant acts
-    // on and that evaporates next month costs more than an empty state.
+  it('omits the revenue tile entirely rather than showing a placeholder', () => {
+    // A tile reading "Measuring" takes the space of a number and carries
+    // none. The Results panel below already says what is missing.
     const out = renderAdmin(withBilling());
-    expect(out).toContain('Measuring');
-    expect(out).not.toMatch(/Revenue earned<\/span>\s*<span class="value">\$/);
+    expect(out).not.toContain('Revenue earned');
   });
 
   it('shows the figure once the experiment can support one', () => {
@@ -459,7 +458,6 @@ describe('stat tiles', () => {
     } as Parameters<typeof renderAdmin>[0];
     const out = renderAdmin(vm);
     expect(out).toContain('$4,289.00');
-    expect(out).not.toContain('Measuring');
   });
 
   it('puts the live/paused state in the header where it is read first', () => {
@@ -568,9 +566,17 @@ describe('results panel honesty', () => {
     expect(renderAdmin(vm)).toContain('7 order(s)');
   });
 
-  it('suggests a different holdout when the current one is off', () => {
-    const vm = { ...viewModel({ holdoutFraction: 0.05 }), recommendedHoldout: 0.3 };
-    expect(renderAdmin(vm)).toContain('30%');
+  /**
+   * The holdout input is gone from the UI — picking an experiment parameter
+   * is our job to do well, not a number to ask a merchant to guess. What must
+   * NOT change is the stored value: the form still posts it, because saving
+   * an accent colour that silently resized the experiment would destroy
+   * months of accumulated measurement.
+   */
+  it('still posts the stored holdout, so saving appearance cannot alter the experiment', () => {
+    const out = renderAdmin(viewModel({ holdoutFraction: 0.35 }) as Parameters<typeof renderAdmin>[0]);
+    expect(out).toMatch(/name="holdoutFraction"[^>]*value="0\.35"/);
+    expect(out).not.toContain('Held-back share');
   });
 });
 
@@ -760,6 +766,8 @@ describe('plan chooser', () => {
     recommendedHoldout: 0.2,
     unmatchedOrders: 0,
     billing,
+    // Billing has its own route now — the dashboard does not carry it.
+    page: 'plan' as const,
   });
 
   /**

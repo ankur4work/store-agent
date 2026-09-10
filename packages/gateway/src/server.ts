@@ -526,6 +526,62 @@ export function createGateway(deps: GatewayDeps): Server {
       }
     }
 
+    /**
+     * The Plan route. Same shell, same auth, plan chooser instead of the
+     * dashboard — reachable from the app nav, so billing is somewhere a
+     * merchant goes rather than something in the way of everything else.
+     *
+     * Reconciles on load like `/admin` does: this is the page where a stale
+     * plan is most visible and most consequential.
+     */
+    if (url.pathname === '/admin/plan' && req.method === 'GET') {
+      const token = url.searchParams.get('id_token') ?? bearerToken(header(req, 'authorization'));
+      const verified = verifySessionToken(token ?? undefined, auth);
+      if (!verified.ok) {
+        const named = parseShopDomain(url.searchParams.get('shop'));
+        const installUrl =
+          named.ok && named.shop !== undefined
+            ? `/shopify/auth?shop=${encodeURIComponent(named.shop)}`
+            : undefined;
+        html(
+          res,
+          401,
+          renderUnauthenticated(verified.reason, installUrl),
+          named.ok ? named.shop : undefined,
+        );
+        return;
+      }
+
+      const shop = verified.shop;
+      await reconcileRepairingToken(shop, sessionTokenFrom(url, req));
+
+      const totals = await attribution.totals(shop);
+      const lift = analyze(totals.exposed, totals.holdout);
+      html(
+        res,
+        200,
+        renderAdmin({
+          page: 'plan',
+          shop,
+          apiKey: app.apiKey,
+          host: url.searchParams.get('host') ?? '',
+          settings: await settings.get(shop),
+          stats: {
+            activeSessions: await sessions.size(),
+            mode: (ucp ? 'live' : 'demo') as 'live' | 'demo',
+            model: config.models.workhorse,
+          },
+          lift,
+          liftSummary: describeLift(lift),
+          recommendedHoldout: recommendedHoldout(totals.exposed.sessions + totals.holdout.sessions),
+          unmatchedOrders: await attribution.unmatchedCount(shop),
+          ...(billing === undefined ? {} : { billing: billing.summary(shop) }),
+        }),
+        shop,
+      );
+      return;
+    }
+
     if (url.pathname === '/admin' && req.method === 'GET') {
       // Shopify puts `id_token` on the embedded app URL. Fall back to a bearer
       // header for direct fetches.

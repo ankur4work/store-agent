@@ -106,6 +106,31 @@ describe('coverage checks — the anti-fabrication net', () => {
     expect(v.violations[0]!.code).toBe('uncited_price');
   });
 
+  /**
+   * A dropped-cents price and an invented price are the same violation and
+   * need opposite corrections. Found live: the model wrote "$785" for a
+   * $785.95 board while listing several products, the retry was told only
+   * that 785.00 matched nothing, and it made the same edit again — so the
+   * shopper got an escalation for a price the catalog knew exactly.
+   */
+  it('tells the model the real price when it only dropped the cents', () => {
+    // $189.00 is in the fixture; "$189" parses to the same minor units, so
+    // use a genuine near-miss the catalog does not contain.
+    const v = validateGrounding({ reply: 'The overcoat is $189.50.', claims: [] }, [SEARCH_RESULT]);
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]!.code).toBe('uncited_price');
+    expect(v.violations[0]!.message).toContain('189.00');
+    expect(v.violations[0]!.message).toMatch(/display/);
+  });
+
+  it('does not suggest a nearest price for one that is simply invented', () => {
+    // Inviting "did you mean" on a distant value would hand the model a
+    // price it never had.
+    const v = validateGrounding({ reply: 'That coat is $99.00.', claims: [] }, [SEARCH_RESULT]);
+    expect(v.violations[0]!.message).toContain('appears in no tool result');
+    expect(v.violations[0]!.message).not.toContain('the catalog says');
+  });
+
   it('catches price assertions when no tool ran at all', () => {
     const v = validateGrounding({ reply: 'That coat is usually around $200.', claims: [] }, []);
     expect(v.ok).toBe(false);

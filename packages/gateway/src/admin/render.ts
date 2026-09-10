@@ -59,6 +59,13 @@ export interface AdminViewModel {
   };
   readonly saved?: boolean;
   readonly errors?: readonly string[];
+  /**
+   * Which route is being rendered. Billing lives on its own page: choosing a
+   * plan is a deliberate, occasional errand, and a chooser wedged between
+   * usage and appearance made the daily page longer for everyone who was not
+   * changing plan that day.
+   */
+  readonly page?: 'home' | 'plan';
 }
 
 const money = (minor: number): string =>
@@ -174,9 +181,10 @@ function renderTiles(vm: AdminViewModel): string {
     ${b === undefined ? '' : tile('Remaining', b.remaining.toLocaleString(), 'before extra usage is charged')}
     ${tile('Live conversations', vm.stats.activeSessions.toLocaleString(), 'happening right now')}
     ${
-      revenue === null
-        ? tile('Revenue earned', 'Measuring', 'a figure appears once the result is solid', true)
-        : tile('Revenue earned', money(revenue), 'more than the held-back group, this period')
+      // Shown only when there IS a figure. A tile reading "Measuring" occupies
+      // the space of a number and carries none — the Results panel below
+      // already explains what is still missing and why.
+      revenue === null ? '' : tile('Revenue earned', money(revenue), 'more than the held-back group')
     }
   </div>`;
 }
@@ -280,6 +288,7 @@ export function renderAdmin(vm: AdminViewModel): string {
   const s = vm.settings;
   const contrast = contrastWithWhite(s.accentColor);
   const accessible = accentIsAccessible(s.accentColor);
+  const plan = vm.page === 'plan';
 
   return `<!doctype html>
 <html lang="en">
@@ -428,21 +437,26 @@ export function renderAdmin(vm: AdminViewModel): string {
 </head>
 <body>
 <!--
-  App Bridge navigation. StoreAgent is a single admin page, so this declares
-  only the home route: the first link (or rel="home") is HIDDEN from the menu,
-  because the app name in Shopify's sidebar already links to it. Inventing
-  extra nav entries to look busier would be worse than having none.
+  App Bridge navigation. The first link (or rel="home") is HIDDEN from the
+  menu, because the app name in Shopify's sidebar already links to it — so
+  only Plan appears. Billing is its own route rather than a card on the
+  dashboard: choosing a plan is a deliberate, occasional errand, and sitting
+  it between usage and appearance made the daily page longer for everyone.
 -->
 <s-app-nav>
   <s-link href="/admin" rel="home">StoreAgent</s-link>
+  ${vm.billing === undefined ? '' : '<s-link href="/admin/plan">Plan</s-link>'}
 </s-app-nav>
 <div class="wrap">
 
   <header class="page">
     <div>
-      <h1>StoreAgent</h1>
-      <p class="lede">Answers shoppers’ questions from your live catalog, and measures what it earns
-        against a group who never see it.</p>
+      <h1>${plan ? 'Plan' : 'StoreAgent'}</h1>
+      <p class="lede">${
+        plan
+          ? 'What you are on, what you have used, and what the other plans cost.'
+          : 'Answers shoppers’ questions from your live catalog, and measures what it earns against a group who never see it.'
+      }</p>
     </div>
     <div class="meta">
       <span class="chip${s.enabled ? '' : ' grey'}">${s.enabled ? 'Live' : 'Paused'}</span>
@@ -450,8 +464,26 @@ export function renderAdmin(vm: AdminViewModel): string {
     </div>
   </header>
 
-  ${renderTiles(vm)}
+  ${plan ? renderPlanPage(vm) : renderTiles(vm)}
+  ${plan ? '' : renderHomeSections(vm)}
+</div>
+</body>
+</html>`;
+}
 
+/** The Plan route: usage and the chooser, nothing else. */
+function renderPlanPage(vm: AdminViewModel): string {
+  return vm.billing === undefined
+    ? '<section class="card"><h2>Plan</h2><div class="body"><p class="muted">Billing is not configured on this deployment.</p></div></section>'
+    : renderPlan(vm.billing);
+}
+
+/** Everything on the dashboard below the tiles. */
+function renderHomeSections(vm: AdminViewModel): string {
+  const s = vm.settings;
+  const contrast = contrastWithWhite(s.accentColor);
+  const accessible = accentIsAccessible(s.accentColor);
+  return `
   ${vm.saved ? '<div class="banner ok">Settings saved. The widget picks them up on the next page load.</div>' : ''}
   ${
     vm.errors && vm.errors.length
@@ -480,8 +512,6 @@ export function renderAdmin(vm: AdminViewModel): string {
       </div>
     </div>
   </section>
-
-  ${vm.billing === undefined ? '' : renderPlan(vm.billing)}
 
   <section class="card">
     <h2>Appearance</h2>
@@ -662,29 +692,17 @@ export function renderAdmin(vm: AdminViewModel): string {
     <div class="body">${renderResults(vm)}</div>
   </section>
 
-  <section class="card">
-    <h2>Measurement</h2>
-    <p class="hint">A slice of shoppers never sees the assistant, so there's something honest to compare against.</p>
-    <div class="body">
-      <div class="field">
-        <label for="holdoutFraction">Held-back share
-          <span class="sub">${(s.holdoutFraction * 100).toFixed(0)}%</span></label>
-        <input form="settingsForm" type="number" id="holdoutFraction" name="holdoutFraction"
-          min="0" max="0.5" step="0.05" value="${esc(s.holdoutFraction)}">
-        <span class="sub">
-          ${
-            Math.abs(s.holdoutFraction - vm.recommendedHoldout) < 0.001
-              ? 'Matches what we’d recommend for your traffic.'
-              : `We’d suggest ${(vm.recommendedHoldout * 100).toFixed(0)}% at your traffic. ` +
-                `A smaller share costs fewer sales but takes far longer to give you an answer — ` +
-                `the held-back group is the slower of the two to fill.`
-          }
-        </span>
-      </div>
-      <p class="muted" style="margin-top:10px">Set it to 0 to turn measurement off. You’ll get every sale, and
-        no way to know which ones the assistant earned.</p>
-    </div>
-  </section>
+  <!--
+    The Measurement card is gone. It was a bare number input asking a merchant
+    to pick an experiment parameter, which is our decision to make well, not
+    theirs to guess at.
+
+    The value still round-trips as a hidden field. Dropping the input without
+    this would post the settings form with no holdoutFraction, and saving an
+    accent colour would silently resize or switch off the experiment — the
+    measurement is months of accumulated data and must not be collateral.
+  -->
+  <input form="settingsForm" type="hidden" name="holdoutFraction" value="${esc(s.holdoutFraction)}">
 
   <section class="card">
     <h2>Turning it on</h2>
@@ -692,11 +710,7 @@ export function renderAdmin(vm: AdminViewModel): string {
       <p class="muted">Go to <strong>Online Store → Themes → Customise → App embeds</strong> and switch on
       <strong>StoreAgent</strong>. Nothing is added to your theme code, and you can turn it off there at any time.</p>
     </div>
-  </section>
-
-</div>
-</body>
-</html>`;
+  </section>`;
 }
 
 /** Minimal page for an unauthenticated or non-embedded hit. */

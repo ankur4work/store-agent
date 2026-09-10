@@ -1,5 +1,11 @@
 import { collectAvailability, detectShippingEstimate, detectStock } from './extract.js';
-import { collectMoneyFromResult, extractMoneyFromText, formatMinor, isDerivable } from './money.js';
+import {
+  collectMoneyFromResult,
+  extractMoneyFromText,
+  formatMinor,
+  isDerivable,
+  type Minor,
+} from './money.js';
 import type {
   Claim,
   GroundedResponse,
@@ -137,12 +143,22 @@ export function validateGrounding(
 
   for (const mentioned of replyMoney) {
     if (!isDerivable(mentioned, allSourceMoney)) {
+      // Distinguish "invented a price" from "dropped the cents off a real
+      // one". They read identically in the violation and need opposite
+      // corrections: one must not be stated at all, the other just has to be
+      // copied properly. Observed live — the model wrote "$785" for a $785.95
+      // board while listing several products, the retry was told only that
+      // 785.00 matched nothing, and it made the same edit again.
+      const nearest = nearestSource(mentioned, allSourceMoney);
       violations.push({
         code: 'uncited_price',
         severity: 'error',
         message:
-          `Reply states ${formatMinor(mentioned)}, which appears in no tool result this turn. ` +
-          `Every price shown to a shopper must be traceable to live catalog or cart data.`,
+          nearest === undefined
+            ? `Reply states ${formatMinor(mentioned)}, which appears in no tool result this turn. ` +
+              `Every price shown to a shopper must be traceable to live catalog or cart data.`
+            : `Reply states ${formatMinor(mentioned)} but the catalog says ${formatMinor(nearest)}. ` +
+              `Quote the "display" string exactly as given — never round a price or drop its cents.`,
         evidence: formatMinor(mentioned),
       });
     }
@@ -194,6 +210,27 @@ export function validateGrounding(
 
 function finalize(violations: readonly Violation[]): GroundingVerdict {
   return { ok: !violations.some((v) => v.severity === 'error'), violations };
+}
+
+/**
+ * The source price a stated one was probably meant to be.
+ *
+ * Only a genuine near-miss counts: under a dollar apart, which is a dropped
+ * or rounded cents figure rather than a different product. Anything further
+ * is a price the model should not have stated at all, and saying "did you
+ * mean" about it would invite it to quote a price it never had.
+ */
+function nearestSource(value: Minor, sources: readonly Minor[]): Minor | undefined {
+  let best: Minor | undefined;
+  let bestGap = 100; // exclusive: a full dollar apart is a different price
+  for (const s of sources) {
+    const gap = Math.abs(s - value);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = s;
+    }
+  }
+  return best;
 }
 
 /**
