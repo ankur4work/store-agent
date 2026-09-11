@@ -27,8 +27,35 @@ export class SqliteVectorStore implements VectorStore {
         built_at INTEGER NOT NULL,
         products INTEGER NOT NULL
       );
+      -- Keyed by image URL, not product: Shopify CDN URLs carry a version,
+      -- so a re-uploaded photo is a new key and is re-read automatically,
+      -- while re-indexing an unchanged catalog costs nothing. Not scoped to
+      -- a shop for the same reason a URL is already unique.
+      CREATE TABLE IF NOT EXISTS product_vision (
+        image_url  TEXT PRIMARY KEY,
+        attributes TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
     `);
   }
+
+  /** Image descriptions, shared across rebuilds. See search/vision.ts. */
+  readonly vision = {
+    get: (imageUrl: string): string | undefined => {
+      const row = this.db
+        .prepare('SELECT attributes FROM product_vision WHERE image_url = ?')
+        .get(imageUrl) as { attributes?: string } | undefined;
+      return row?.attributes === undefined ? undefined : String(row.attributes);
+    },
+    put: (imageUrl: string, attributes: string): void => {
+      this.db
+        .prepare(
+          `INSERT INTO product_vision (image_url, attributes, created_at) VALUES (?, ?, ?)
+           ON CONFLICT(image_url) DO UPDATE SET attributes = excluded.attributes`,
+        )
+        .run(imageUrl, attributes, Date.now());
+    },
+  };
 
   /**
    * One transaction, so a failed rebuild cannot leave a shop with half a

@@ -79,9 +79,16 @@ const billing =
  * the same SQLite file as everything else — see CatalogIndex for why an ANN
  * index is the wrong first step at a Shopify catalog's size.
  */
+const vectorStore = new SqliteVectorStore(db);
 const catalogIndex = new CatalogIndex({
-  store: new SqliteVectorStore(db),
+  store: vectorStore,
   embedding: { apiKey: config.openaiApiKey },
+  // Product photos are read and indexed as the words a shopper would use,
+  // which is the only way "open-toe" or "gold chain" can ever be found —
+  // merchants do not write those down. Cached per image URL, so a catalog
+  // is paid for once, not once per rebuild.
+  vision: { apiKey: config.openaiApiKey },
+  visionCache: vectorStore.vision,
   log: logger,
 });
 

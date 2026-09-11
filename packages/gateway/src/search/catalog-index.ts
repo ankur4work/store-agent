@@ -1,5 +1,6 @@
 import { EMBEDDING_DIMS, cosine, embed, type EmbeddingConfig } from './embeddings.js';
 import { productId, productText } from './product-text.js';
+import { describeAll, primaryImage, type VisionCache, type VisionConfig } from './vision.js';
 
 /**
  * Semantic product search.
@@ -45,6 +46,12 @@ export interface CatalogIndexDeps {
   readonly embedding: EmbeddingConfig;
   /** Rebuild when the index is older than this. Default 6 hours. */
   readonly maxAgeMs?: number;
+  /**
+   * Read product photos and index what they show. Absent leaves the index
+   * built from merchant text alone — see the note in build().
+   */
+  readonly vision?: VisionConfig;
+  readonly visionCache?: VisionCache;
   readonly log?: {
     info(event: string, fields?: Record<string, unknown>): void;
     warn(event: string, fields?: Record<string, unknown>): void;
@@ -92,8 +99,42 @@ export class CatalogIndex {
     if (inFlight !== undefined) return inFlight;
 
     const task = (async () => {
+      /**
+       * Read the photos first, and index what they show.
+       *
+       * Text search finds only what a merchant typed, and they type
+       * "Riviera Sandal", not "open toe, ankle strap, tan leather". The
+       * words a shopper uses are in the picture. Cached per image URL, so
+       * this is paid once per photo and not once per rebuild.
+       *
+       * Optional throughout: with no vision config the index is exactly
+       * what it was, built from text alone.
+       */
+      let seen = new Map<string, string>();
+      if (this.deps.vision !== undefined && this.deps.visionCache !== undefined) {
+        try {
+          seen = await describeAll(
+            products.map((p) => primaryImage(p)),
+            this.deps.visionCache,
+            this.deps.vision,
+          );
+        } catch {
+          // A vision outage degrades the index to text. It must never stop
+          // the catalog being searchable at all.
+        }
+      }
+
       const rows = products
-        .map((p) => ({ productId: productId(p), text: productText(p) }))
+        .map((p) => {
+          const described = seen.get(primaryImage(p)) ?? '';
+          const text = productText(p);
+          return {
+            productId: productId(p),
+            // Appended, never substituted: the merchant's own words stay
+            // authoritative, and the photo adds the vocabulary they omitted.
+            text: described === '' ? text : `${text}. Appearance: ${described}`,
+          };
+        })
         .filter((r) => r.productId !== '' && r.text !== '');
       if (rows.length === 0) {
         this.deps.log?.warn('catalog_index_empty', { shop });

@@ -4,6 +4,7 @@ import { CatalogIndex, MIN_SCORE } from '../src/search/catalog-index.js';
 import { SqliteVectorStore } from '../src/search/sqlite-vectors.js';
 import { EMBEDDING_DIMS, blobToVector, cosine, embed, vectorToBlob } from '../src/search/embeddings.js';
 import { productText } from '../src/search/product-text.js';
+import { describeAll, primaryImage } from '../src/search/vision.js';
 
 /**
  * Keyword search answers "which product contains these words". A shopper
@@ -32,6 +33,18 @@ function fakeEmbedder(byText: Record<string, Float32Array>) {
       { status: 200 },
     );
   }) as unknown as typeof fetch;
+}
+
+function memoryCache() {
+  const m = new Map<string, string>();
+  return { get: (k: string) => m.get(k), put: (k: string, v: string) => void m.set(k, v) };
+}
+
+/** The stored indexed text for a shop's single product. */
+function openDatabaseRow(store: SqliteVectorStore, shop: string): string | undefined {
+  return (store as unknown as { db: { prepare(q: string): { get(s: string): { text?: string } | undefined } } }).db
+    .prepare('SELECT text FROM catalog_vectors WHERE shop = ?')
+    .get(shop)?.text;
 }
 
 describe('what a product looks like to the index', () => {
@@ -109,6 +122,82 @@ describe('similarity', () => {
   it('returns 0 rather than NaN for an empty vector', () => {
     // A product with no text must rank last, not poison the sort.
     expect(cosine(new Float32Array(8), axis(1))).toBe(0);
+  });
+});
+
+/**
+ * Text search finds only what a merchant typed, and they type "Riviera
+ * Sandal" — not "open toe, ankle strap, tan leather". The words a shopper
+ * uses are in the photograph.
+ */
+describe('reading the product photo', () => {
+  const withImage = { id: 'p1', title: 'Riviera Sandal', media: [{ url: 'https://cdn/x.jpg?v=1' }] };
+
+  function visionStub(text: string) {
+    const calls: string[] = [];
+    const doFetch = (async (_u: unknown, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { messages: { content: { image_url?: { url: string } }[] }[] };
+      const img = body.messages[0]!.content.find((c) => c.image_url)?.image_url?.url ?? '';
+      calls.push(img);
+      return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { doFetch, calls };
+  }
+
+  it('describes an image as the vocabulary a shopper would search', async () => {
+    const { doFetch } = visionStub('tan leather, open toe, ankle strap, block heel');
+    const out = await describeAll([primaryImage(withImage)], memoryCache(), { apiKey: 'k', doFetch });
+    expect(out.get('https://cdn/x.jpg?v=1')).toContain('open toe');
+  });
+
+  it('reads each photo once, however often the catalog is rebuilt', async () => {
+    const cache = memoryCache();
+    const { doFetch, calls } = visionStub('tan leather, open toe');
+    await describeAll(['https://cdn/x.jpg?v=1'], cache, { apiKey: 'k', doFetch });
+    await describeAll(['https://cdn/x.jpg?v=1'], cache, { apiKey: 'k', doFetch });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('caches an unreadable image too, rather than paying for it every rebuild', async () => {
+    const cache = memoryCache();
+    const doFetch = (async () => new Response('nope', { status: 500 })) as unknown as typeof fetch;
+    await describeAll(['https://cdn/bad.jpg'], cache, { apiKey: 'k', doFetch });
+    expect(cache.get('https://cdn/bad.jpg')).toBe('');
+  });
+
+  it('indexes the appearance alongside the merchant text, never instead of it', async () => {
+    const store = new SqliteVectorStore(openDatabase({ path: ':memory:' }));
+    const vision = visionStub('tan leather, open toe, ankle strap');
+    const index = new CatalogIndex({
+      store,
+      embedding: { apiKey: 'k', doFetch: fakeEmbedder({}) },
+      vision: { apiKey: 'k', doFetch: vision.doFetch },
+      visionCache: memoryCache(),
+    });
+    await index.build('s.myshopify.com', [withImage]);
+
+    const row = (openDatabaseRow(store, 's.myshopify.com') ?? '') as string;
+    expect(row).toContain('Riviera Sandal'); // the merchant's words survive
+    expect(row).toContain('open toe'); // the photo's words are added
+  });
+
+  it('still builds a text index when vision is unavailable', async () => {
+    const store = new SqliteVectorStore(openDatabase({ path: ':memory:' }));
+    const index = new CatalogIndex({
+      store,
+      embedding: { apiKey: 'k', doFetch: fakeEmbedder({}) },
+      vision: { apiKey: 'k', doFetch: (async () => new Response('', { status: 500 })) as unknown as typeof fetch },
+      visionCache: memoryCache(),
+    });
+    await index.build('s.myshopify.com', [withImage]);
+    expect(store.count('s.myshopify.com')).toBe(1);
+  });
+
+  it('finds the first image wherever the payload puts it', () => {
+    expect(primaryImage({ image: 'a.jpg' })).toBe('a.jpg');
+    expect(primaryImage({ media: [{ url: 'b.jpg' }] })).toBe('b.jpg');
+    expect(primaryImage({ variants: [{ media: [{ url: 'c.jpg' }] }] })).toBe('c.jpg');
+    expect(primaryImage({ title: 'no photo' })).toBe('');
   });
 });
 
