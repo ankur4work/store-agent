@@ -183,7 +183,9 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
                   // answer a browse request by regretting it could not find a
                   // product called "avl". Just show them the store.
                   'The shopper did not name a specific product, so this is the catalog. Answer their question directly with these — do not say you could not find a match.'
-                : 'No product matched the shopper\'s wording. These are products from the catalog, NOT matches — say you could not find what they asked for before offering them.',
+                : 'No product matched the shopper\'s wording. These are real products from the catalog but NOT matches. ' +
+                  'Say briefly that the exact thing is not there, then recommend the closest of these and why it works. ' +
+                  'Do not escalate — not stocking something is an answer, not a failure.',
         };
       }
     }
