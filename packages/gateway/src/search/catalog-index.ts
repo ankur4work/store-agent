@@ -34,10 +34,17 @@ export interface StoredVector {
 
 export interface VectorStore {
   /** Replace the whole index for a shop, atomically. */
-  replace(shop: string, rows: readonly { productId: string; text: string; vector: Float32Array }[]): void;
+  replace(
+    shop: string,
+    rows: readonly { productId: string; text: string; vector: Float32Array }[],
+    now?: number,
+    version?: number,
+  ): void;
   all(shop: string): StoredVector[];
   /** Epoch ms of the last successful build, or undefined if never built. */
   builtAt(shop: string): number | undefined;
+  /** Recipe the stored vectors were built to. See INDEX_VERSION. */
+  version?(shop: string): number | undefined;
   count(shop: string): number;
 }
 
@@ -66,6 +73,13 @@ export interface SemanticHit {
 const DEFAULT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * What goes INTO the indexed text. Bump on any change to productText or the
+ * vision prompt, so every shop re-embeds rather than serving vectors built
+ * to an older recipe.
+ */
+export const INDEX_VERSION = 2;
+
+/**
  * Below this a "match" is noise.
  *
  * Cosine over this model puts genuinely unrelated text around 0.1–0.25, and
@@ -83,6 +97,13 @@ export class CatalogIndex {
   constructor(private readonly deps: CatalogIndexDeps) {}
 
   isStale(shop: string, now: number = Date.now()): boolean {
+    // A recipe change invalidates the index as surely as age does, and
+    // silently: adding product photos to the indexed text left a perfectly
+    // fresh index built from titles alone, which went on answering for six
+    // hours as though the new feature were switched off. Bump INDEX_VERSION
+    // whenever the indexed text changes and every shop rebuilds on the next
+    // search.
+    if (this.deps.store.version?.(shop) !== INDEX_VERSION) return true;
     const built = this.deps.store.builtAt(shop);
     if (built === undefined) return true;
     return now - built > (this.deps.maxAgeMs ?? DEFAULT_MAX_AGE_MS);
@@ -147,6 +168,8 @@ export class CatalogIndex {
       this.deps.store.replace(
         shop,
         rows.map((r, i) => ({ ...r, vector: vectors[i]! })),
+        Date.now(),
+        INDEX_VERSION,
       );
       this.deps.log?.info('catalog_indexed', { shop, products: rows.length });
     })()

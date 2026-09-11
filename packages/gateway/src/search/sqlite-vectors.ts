@@ -25,7 +25,8 @@ export class SqliteVectorStore implements VectorStore {
       CREATE TABLE IF NOT EXISTS catalog_index_meta (
         shop     TEXT PRIMARY KEY,
         built_at INTEGER NOT NULL,
-        products INTEGER NOT NULL
+        products INTEGER NOT NULL,
+        version  INTEGER NOT NULL DEFAULT 1
       );
       -- Keyed by image URL, not product: Shopify CDN URLs carry a version,
       -- so a re-uploaded photo is a new key and is re-read automatically,
@@ -66,6 +67,7 @@ export class SqliteVectorStore implements VectorStore {
     shop: string,
     rows: readonly { productId: string; text: string; vector: Float32Array }[],
     now: number = Date.now(),
+    version = 1,
   ): void {
     this.db.exec('BEGIN');
     try {
@@ -78,10 +80,11 @@ export class SqliteVectorStore implements VectorStore {
       }
       this.db
         .prepare(
-          `INSERT INTO catalog_index_meta (shop, built_at, products) VALUES (?, ?, ?)
-           ON CONFLICT(shop) DO UPDATE SET built_at = excluded.built_at, products = excluded.products`,
+          `INSERT INTO catalog_index_meta (shop, built_at, products, version) VALUES (?, ?, ?, ?)
+           ON CONFLICT(shop) DO UPDATE SET built_at = excluded.built_at,
+             products = excluded.products, version = excluded.version`,
         )
-        .run(shop, now, rows.length);
+        .run(shop, now, rows.length, version);
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
@@ -94,6 +97,13 @@ export class SqliteVectorStore implements VectorStore {
       .prepare('SELECT product_id, vec FROM catalog_vectors WHERE shop = ?')
       .all(shop) as { product_id: string; vec: Uint8Array }[];
     return rows.map((r) => ({ productId: String(r.product_id), vector: blobToVector(r.vec) }));
+  }
+
+  version(shop: string): number | undefined {
+    const row = this.db
+      .prepare('SELECT version FROM catalog_index_meta WHERE shop = ?')
+      .get(shop) as { version?: number } | undefined;
+    return row?.version === undefined ? undefined : Number(row.version);
   }
 
   builtAt(shop: string): number | undefined {

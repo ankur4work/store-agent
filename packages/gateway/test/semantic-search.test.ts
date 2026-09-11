@@ -262,6 +262,23 @@ describe('searching by meaning', () => {
     expect(calls.n).toBe(1);
   });
 
+  /**
+   * Adding product photos to the indexed text left a perfectly fresh index
+   * built from titles alone, which went on answering for six hours as
+   * though the new feature had never shipped. A recipe change invalidates
+   * an index as surely as age does.
+   */
+  it('rebuilds when the indexing recipe changes, not only when it ages', async () => {
+    const store = new SqliteVectorStore(openDatabase({ path: ':memory:' }));
+    const index = new CatalogIndex({ store, embedding: { apiKey: 'k', doFetch: fakeEmbedder({}) } });
+    // An index written by an older build of the app.
+    store.replace(SHOP, [{ productId: 'p1', text: 'old recipe', vector: axis(1) }], Date.now(), 1);
+    expect(index.isStale(SHOP)).toBe(true);
+
+    await index.build(SHOP, [sandal]);
+    expect(index.isStale(SHOP)).toBe(false);
+  });
+
   it('treats a never-built index as stale and a fresh one as current', async () => {
     const { index } = indexWith(fakeEmbedder({ [productText(sandal)]: axis(1) }));
     expect(index.isStale(SHOP)).toBe(true);
