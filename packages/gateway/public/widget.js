@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.1';
+  var BUILD = '2026-09-11.2';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -748,6 +748,45 @@ textarea::placeholder{color:var(--muted)}
     }
   }
 
+  /**
+   * The short rising chime a mic makes when it opens.
+   *
+   * Every voice UI a shopper has used — Google, YouTube, a phone assistant —
+   * marks the moment it starts listening with a sound, and they have learned
+   * to wait for it. Ours opened in silence, so there was no signal to speak
+   * against: people talked before it was recording, or waited for something
+   * that never came and were endpointed on their own hesitation.
+   *
+   * Synthesised rather than a file: two oscillator notes cost nothing, need
+   * no asset on the critical path, and cannot 404 on a merchant's CDN.
+   */
+  function cue(kind) {
+    try {
+      if (!voice.ctx) return;
+      if (voice.ctx.state === 'suspended' && voice.ctx.resume) voice.ctx.resume();
+      var now = voice.ctx.currentTime;
+      // Up to start, down to finish — the direction people already read as
+      // "go" and "done".
+      var notes = kind === 'start' ? [660, 880] : [660, 440];
+      notes.forEach(function (hz, i) {
+        var osc = voice.ctx.createOscillator();
+        var gain = voice.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = hz;
+        // Quiet, and shaped — a square-edged beep at full volume in a
+        // shopper's ear is a reason to close the widget.
+        gain.gain.setValueAtTime(0.0001, now + i * 0.07);
+        gain.gain.exponentialRampToValueAtTime(0.06, now + i * 0.07 + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.07 + 0.07);
+        osc.connect(gain).connect(voice.ctx.destination);
+        osc.start(now + i * 0.07);
+        osc.stop(now + i * 0.07 + 0.08);
+      });
+    } catch (e) {
+      /* a missing chime must never stop the mic working */
+    }
+  }
+
   function setVoiceState(s) {
     if (els.mic) els.mic.dataset.state = s;
     if (els.status) {
@@ -810,7 +849,10 @@ textarea::placeholder{color:var(--muted)}
     rec.start(100);
     setVoiceState('listening');
     voiceDiag('capture_start');
+    // The analyser is created inside monitorSilence, so the chime has to
+    // follow it — it plays through the same AudioContext.
     monitorSilence();
+    cue('start');
   }
 
   function pickMime() {
@@ -963,15 +1005,32 @@ textarea::placeholder{color:var(--muted)}
       });
       var d = await r.json();
       var text = (d && d.text ? d.text : '').trim();
-      if (!text) { if (voice.on) startCapture(); return; }
+      // Nothing heard. Ending the turn says so; restarting silently did not.
+      if (!text) { voiceDiag('transcript_empty'); endVoiceTurn(); return; }
       els.live.textContent = text;
       addMsg('user', text);
       state.messages.push({ role: 'user', text: text });
       persist();
       stream(text, true);
     } catch (e) {
-      if (voice.on) startCapture();
+      voiceDiag('transcribe_error', { error: String((e && e.message) || e) });
+      endVoiceTurn();
     }
+  }
+
+  /**
+   * Close the voice turn: chime down, release the microphone, back to idle.
+   *
+   * Called from every path a turn can end on — spoken answer finished,
+   * nothing transcribed, transcription failed, the turn errored. Each of
+   * those used to restart capture instead, so a failure was indistinguishable
+   * from success and the mic stayed open through both.
+   */
+  function endVoiceTurn() {
+    if (!voice.on) return;
+    cue('end');
+    voiceDiag('turn_end');
+    stopVoice(true);
   }
 
   function enqueueSpeech(text) {
@@ -983,7 +1042,16 @@ textarea::placeholder{color:var(--muted)}
     var text = voice.queue.shift();
     if (!text) {
       voice.playing = null;
-      if (voice.on) startCapture(); // hand the turn back
+      // ONE SHOT: press, speak, get answered, done — the way every mic a
+      // shopper has used behaves.
+      //
+      // This used to hand the turn straight back and start listening again.
+      // An always-open mic is a different product: it holds the microphone
+      // indefinitely, records the room between questions, and gives no
+      // moment where the shopper can tell whether it is still listening. It
+      // also meant a failed turn looped silently, which is most of why voice
+      // looked dead rather than broken.
+      endVoiceTurn();
       return;
     }
     try {
@@ -1164,6 +1232,10 @@ textarea::placeholder{color:var(--muted)}
             if (turnUi.rail && turnUi.rail.querySelector('.card.skel')) dropRail();
             els.status.textContent = d.grounded ? 'Ready' : 'Passed to the team';
             persist();
+            // A turn that produced no audio never reaches playNext, so
+            // nothing would close it and the microphone would stay open on a
+            // finished conversation.
+            if (isVoice && !voice.playing && voice.queue.length === 0) endVoiceTurn();
           } else if (ev === 'error') {
             flush();
             bubble.textContent = d.message;

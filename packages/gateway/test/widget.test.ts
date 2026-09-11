@@ -291,6 +291,30 @@ describe('widget voice endpointing', () => {
     expect(vad()).toMatch(/heardNothing/);
   });
 
+  /**
+   * The behaviour of every mic a shopper has already used: press, a chime,
+   * speak, get answered, done. Ours opened silently and then listened
+   * forever — holding the microphone between questions, recording the room,
+   * and giving no moment where you could tell it had stopped.
+   */
+  it('chimes when it opens, so there is something to speak against', () => {
+    expect(SRC).toContain("cue('start')");
+    expect(SRC).toMatch(/function cue\(kind\)/);
+  });
+
+  it('ends the turn instead of listening again', () => {
+    expect(SRC).toContain('function endVoiceTurn()');
+    // The old hand-back is gone from the playback drain.
+    expect(SRC).not.toMatch(/startCapture\(\); \/\/ hand the turn back/);
+  });
+
+  it('closes the turn on every ending, not just the successful one', () => {
+    // Empty transcript, transcription error, and a turn with no audio all
+    // used to restart capture — so a failure looked exactly like success.
+    const ends = SRC.match(/endVoiceTurn\(\)/g) ?? [];
+    expect(ends.length).toBeGreaterThanOrEqual(4);
+  });
+
   it('reports the endpoint decision to the server, not just the console', () => {
     expect(vad()).toMatch(/voiceDiag\('endpoint', reading\)/);
     expect(vad()).toMatch(/reason = quietLongEnough \? 'silence'/);
