@@ -173,16 +173,26 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
 
     try {
       if (index.isStale(shop)) {
-        // Build from the catalog itself. `read_products` is what makes this
-        // worth doing: the payload carries descriptions, tags, product type
-        // and every variant's option values — the merchant's own words for
-        // colour, cut, material and occasion, which is exactly the
-        // vocabulary a shopper describes and a title search never sees.
-        const full = (await ucp!.searchCatalog(
-          { query: '', pagination: { limit: 250 } },
-          signal,
-        )) as unknown as { products?: readonly unknown[] };
-        await index.build(shop, full.products ?? []);
+        /**
+         * Build in the BACKGROUND and let this turn fall through.
+         *
+         * Embedding a catalog takes seconds — measured at 12.8s against the
+         * live store — and awaiting it here put that in front of a shopper
+         * who asked one question. No search result is worth thirteen
+         * seconds of a spinner.
+         *
+         * So the first shopper after a deploy silently pays nothing and
+         * gets keyword search, which is what they would have had anyway,
+         * and every shopper after that gets meaning. `build` de-duplicates
+         * concurrent callers, so a burst of traffic still embeds once.
+         */
+        void (async () => {
+          const full = (await ucp!.searchCatalog(
+            { query: '', pagination: { limit: 250 } },
+          )) as unknown as { products?: readonly unknown[] };
+          await index.build(shop, full.products ?? []);
+        })().catch(() => undefined);
+        return undefined;
       }
 
       const hits = await index.search(shop, query, limit);
