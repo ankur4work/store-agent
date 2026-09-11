@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import vm from 'node:vm';
+import { THRESHOLDS } from '@storeagent/voice';
 
 /**
  * The widget decides whether the product appears at all, and it had no tests.
@@ -313,6 +314,49 @@ describe('widget voice endpointing', () => {
     // used to restart capture — so a failure looked exactly like success.
     const ends = SRC.match(/endVoiceTurn\(\)/g) ?? [];
     expect(ends.length).toBeGreaterThanOrEqual(4);
+  });
+
+  /**
+   * packages/voice/src/endpoint.ts has carried transcript-aware endpointing
+   * since Phase 3 and it never ran: it needs a transcript, and the widget
+   * only had loudness, so every utterance waited the same 550ms. Interim
+   * text finally gives it something to read.
+   */
+  it('varies the silence window with what was actually said', () => {
+    expect(SRC).toMatch(/function silenceWindowFor\(transcript\)/);
+    expect(SRC).toMatch(/silenceWindowFor\(voice\.interim\)/);
+  });
+
+  it('keeps its thresholds identical to the server endpointer', () => {
+    // Read from the package rather than restated here: two copies of a
+    // number is how they drift, and a test that hard-codes both copies
+    // drifts along with them.
+    expect(SRC).toContain(`ENDPOINT_COMPLETE_MS = ${THRESHOLDS.complete}`);
+    expect(SRC).toContain(`ENDPOINT_SILENCE_MS = ${THRESHOLDS.base}`);
+    expect(SRC).toContain(`ENDPOINT_HANGING_MS = ${THRESHOLDS.hanging}`);
+  });
+
+  it('waits longer on a trailing conjunction than a finished question', () => {
+    const fn = SRC.slice(SRC.indexOf('function silenceWindowFor'), SRC.indexOf('function startRecognition'));
+    expect(fn).toContain('ENDPOINT_HANGING_MS');
+    expect(fn).toContain('QUESTION_OPENERS');
+  });
+
+  it('shows interim text without depending on it', () => {
+    // Display only — the authoritative transcript still comes from the
+    // server, which is language-locked and the same in every browser.
+    expect(SRC).toContain('function startRecognition()');
+    expect(SRC).toMatch(/rec\.interimResults = true/);
+    // Firefox has no SpeechRecognition; absence must change nothing else.
+    expect(SRC).toMatch(/if \(!SR\) return null;/);
+  });
+
+  it('releases the recogniser with the recorder', () => {
+    // Otherwise a second microphone consumer stays alive through
+    // transcription and the spoken answer.
+    expect(SRC).toMatch(/function stopRecognition\(\)/);
+    const onstop = SRC.slice(SRC.indexOf('rec.onstop = function'), SRC.indexOf('rec.start(100)'));
+    expect(onstop).toContain('stopRecognition()');
   });
 
   it('reports the endpoint decision to the server, not just the console', () => {

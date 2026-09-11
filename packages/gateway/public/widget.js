@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.2';
+  var BUILD = '2026-09-11.3';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -711,6 +711,8 @@ textarea::placeholder{color:var(--muted)}
   var voice = {
     on: false,
     recorder: null,
+    recognition: null,
+    interim: '',
     stream: null,
     chunks: [],
     queue: [],
@@ -824,6 +826,7 @@ textarea::placeholder{color:var(--muted)}
 
   function stopVoice(full) {
     cancelAnimationFrame(voice.raf);
+    stopRecognition();
     if (voice.recorder && voice.recorder.state !== 'inactive') voice.recorder.stop();
     if (full && voice.stream) voice.stream.getTracks().forEach(function (t) { t.stop(); });
     if (full) {
@@ -841,6 +844,10 @@ textarea::placeholder{color:var(--muted)}
     voice.recorder = rec;
     rec.ondataavailable = function (e) { if (e.data.size) voice.chunks.push(e.data); };
     rec.onstop = function () {
+      // The recogniser has done its job once the utterance is over; leaving
+      // it running would keep a second microphone consumer alive through
+      // transcription and the spoken answer.
+      stopRecognition();
       var blob = new Blob(voice.chunks, { type: rec.mimeType });
       voiceDiag('recorder_stopped', { bytes: blob.size, type: rec.mimeType });
       if (blob.size > 1200) transcribeAndSend(blob);
@@ -848,7 +855,10 @@ textarea::placeholder{color:var(--muted)}
     };
     rec.start(100);
     setVoiceState('listening');
-    voiceDiag('capture_start');
+    voice.interim = '';
+    if (els.live) els.live.textContent = 'Listening…';
+    voice.recognition = startRecognition();
+    voiceDiag('capture_start', { interim: !!voice.recognition });
     // The analyser is created inside monitorSilence, so the chime has to
     // follow it — it plays through the same AudioContext.
     monitorSilence();
@@ -880,10 +890,90 @@ textarea::placeholder{color:var(--muted)}
   // the wait by what was actually said — 260ms after a finished question,
   // 1100ms after "something warm and" — but it needs a transcript, and here
   // there is only loudness. `base` is the right choice when nothing is known.
-  var ENDPOINT_SILENCE_MS = 550; // THRESHOLDS.base
+  // Mirrors THRESHOLDS in packages/voice/src/endpoint.ts. Pinned by a test,
+  // because two copies of a number is how they drift.
+  var ENDPOINT_COMPLETE_MS = 260;  // a finished question — answer promptly
+  var ENDPOINT_SILENCE_MS = 550;   // nothing conclusive either way
+  var ENDPOINT_HANGING_MS = 1100;  // ends mid-thought — do not cut in
   var MIN_SPEECH_MS = 250;       // shorter than this is a cough, not a turn
   var MAX_UTTERANCE_MS = 20000;  // a hard stop, so noise cannot record forever
   var IDLE_GIVE_UP_MS = 8000;    // heard nothing at all — mic muted or dead
+
+  /** Words that almost never end an utterance. Mirrors endpoint.ts. */
+  var HANGING = (
+    "and but or so because if when while that which the a an my your this these those some any " +
+    "to for with about from in on at of like um uh er hmm well maybe actually just is are was " +
+    "were do does can could would should i i'm it's its you we they he she"
+  ).split(' ');
+  var QUESTION_OPENERS =
+    /^(?:do|does|did|is|are|was|were|can|could|will|would|should|have|has|what|when|where|why|who|which|how)\b/i;
+
+  /**
+   * How long to wait on silence, given what has been said so far.
+   *
+   * The server has carried this logic since Phase 3 and it has never run: it
+   * needs a transcript, and the widget only ever had loudness, so every
+   * utterance got the same 550ms. 400ms after "how much is the wool coat?"
+   * means finished; the same 400ms after "something warm and" means still
+   * thinking, and cutting in there is both rude and wrong.
+   *
+   * With interim text there is finally something to read.
+   */
+  function silenceWindowFor(transcript) {
+    var text = (transcript || '').trim();
+    if (text === '') return ENDPOINT_SILENCE_MS;
+    var lastWord = (/([a-z']+)[^a-z']*$/i.exec(text) || ['', ''])[1].toLowerCase();
+    if (HANGING.indexOf(lastWord) !== -1) return ENDPOINT_HANGING_MS;
+    if (/[.!?]$/.test(text)) return ENDPOINT_COMPLETE_MS;
+    if (QUESTION_OPENERS.test(text) && text.split(/\s+/).length >= 3) return ENDPOINT_COMPLETE_MS;
+    return ENDPOINT_SILENCE_MS;
+  }
+
+  /**
+   * Live interim text, from the browser's own recogniser.
+   *
+   * Display only. The authoritative transcript still comes from the server,
+   * which is language-locked and identical in every browser — this just
+   * fills the gap between speaking and being answered, which was silent and
+   * made the widget feel like it had stopped responding.
+   *
+   * It also, finally, gives the endpointer a transcript to judge.
+   *
+   * Firefox has no SpeechRecognition; there it simply does not run and
+   * everything else behaves exactly as before.
+   */
+  function startRecognition() {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return null;
+    try {
+      var rec = new SR();
+      rec.lang = (SCRIPT && SCRIPT.dataset.lang) || 'en-US';
+      rec.interimResults = true;
+      rec.continuous = true;
+      rec.onresult = function (e) {
+        var text = '';
+        for (var i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
+        voice.interim = text.trim();
+        if (voice.interim && els.live) els.live.textContent = voice.interim;
+      };
+      // A recogniser that dies must never take the recording with it.
+      rec.onerror = function () {};
+      rec.onend = function () {};
+      rec.start();
+      return rec;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function stopRecognition() {
+    if (!voice.recognition) return;
+    try {
+      voice.recognition.onresult = null;
+      voice.recognition.stop();
+    } catch (e) {}
+    voice.recognition = null;
+  }
 
   function monitorSilence() {
     if (!voice.ctx) {
@@ -954,8 +1044,10 @@ textarea::placeholder{color:var(--muted)}
       }
 
       var recording = voice.recorder && voice.recorder.state === 'recording';
+      // Varies with what has actually been said, where a transcript exists.
+      var window_ = silenceWindowFor(voice.interim);
       var quietLongEnough =
-        voice.spokeMs > MIN_SPEECH_MS && now - voice.silenceSince > ENDPOINT_SILENCE_MS;
+        voice.spokeMs > MIN_SPEECH_MS && now - voice.silenceSince > window_;
       // UNCONDITIONAL. The previous version required speech to have been
       // detected before it would fire, which made it useless in exactly the
       // case it existed for: when speech detection is what failed, the
@@ -972,6 +1064,8 @@ textarea::placeholder{color:var(--muted)}
         threshold: Math.round(threshold * 10) / 10,
         spokeMs: Math.round(voice.spokeMs),
         elapsedMs: Math.round(now - startedAt),
+        waitMs: window_,
+        words: voice.interim ? voice.interim.split(/s+/).length : 0,
       };
 
       if (recording && (quietLongEnough || tooLong || heardNothing)) {
