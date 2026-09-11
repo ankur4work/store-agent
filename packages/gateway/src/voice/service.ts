@@ -103,6 +103,11 @@ export async function transcribe(
    */
   const container = contentType.split(';')[0]!.trim().toLowerCase();
 
+  const hint =
+    cfg.transcriptionHint ??
+    'Shopping questions about products, sizes, colours, prices, availability, ' +
+      'shipping and returns. Product names may be brand names.';
+
   const upload = async (type: string): Promise<Response> => {
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(audio)], { type }), `turn.${extensionFor(type)}`);
@@ -120,12 +125,7 @@ export async function transcribe(
      * — anchors the decode without pinning the language, so a shopper who
      * really is speaking another language still gets transcribed in it.
      */
-    form.append(
-      'prompt',
-      cfg.transcriptionHint ??
-        'Shopping questions about products, sizes, colours, prices, availability, ' +
-          'shipping and returns. Product names may be brand names.',
-    );
+    form.append('prompt', hint);
     return doFetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
       headers: { authorization: `Bearer ${cfg.apiKey}` },
@@ -171,7 +171,22 @@ export async function transcribe(
     throw new VoiceError(`transcription failed (${res.status}): ${detail}`, 502);
   }
   const body = (await res.json()) as { text?: unknown };
-  return typeof body.text === 'string' ? body.text.trim() : '';
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+
+  /**
+   * Drop a transcript that is just the prompt read back.
+   *
+   * The `prompt` parameter biases the decode, and when there is nothing
+   * intelligible to decode the model returns the prompt itself as the
+   * transcript. It is confident, well-formed, and completely fabricated —
+   * so "Shopping questions about products, sizes, prices, shipping and
+   * returns." appeared in the chat as though the shopper had said it, and
+   * the assistant answered it.
+   *
+   * Silence must read as silence. Compared on words rather than exactly,
+   * because the echo comes back with different casing and punctuation.
+   */
+  return echoesPrompt(text, hint) ? '' : text;
 }
 
 /** Container extensions the transcription endpoint accepts. */
@@ -214,4 +229,33 @@ export async function synthesize(
   });
   if (!res.ok) throw new VoiceError(`speech synthesis failed (${res.status})`, 502);
   return res.arrayBuffer();
+}
+
+/**
+ * Is this transcript just the prompt being read back?
+ *
+ * Compared on word overlap rather than string equality: the echo returns
+ * with different casing, punctuation and occasionally a dropped clause, so
+ * an exact match would catch almost none of them. A genuine shopper
+ * question shares a few words with the hint at most — "prices", "shipping"
+ * — and never most of it.
+ */
+export function echoesPrompt(text: string, hint: string): boolean {
+  const words = (s: string): string[] =>
+    s
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+
+  const said = words(text);
+  const prompt = new Set(words(hint));
+  if (said.length === 0 || prompt.size === 0) return false;
+  // Short utterances are the risky ones to judge, but they are also where a
+  // real question lives ("how much is this"), so require real length before
+  // calling it an echo.
+  if (said.length < 5) return false;
+
+  const overlap = said.filter((w) => prompt.has(w)).length / said.length;
+  return overlap >= 0.8;
 }

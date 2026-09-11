@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extensionFor, transcribe } from '../src/voice/service.js';
+import { echoesPrompt, extensionFor, transcribe } from '../src/voice/service.js';
 
 /**
  * Every voice turn failed with 400 "Audio file might be corrupted or
@@ -84,6 +84,36 @@ describe('transcription upload', () => {
 
     await transcribe(Buffer.from('a'), 'audio/webm', { ...CFG, language: '' }, doFetch);
     expect(langs).toEqual([null]);
+  });
+
+  /**
+   * The `prompt` parameter biases the decode, and with nothing
+   * intelligible to decode the model returns the prompt itself as the
+   * transcript — confident, well-formed and entirely fabricated. "Shopping
+   * questions about products, sizes, prices, shipping and returns."
+   * appeared in the chat as though the shopper had said it, and the
+   * assistant answered it.
+   */
+  it('drops a transcript that is just the prompt read back', async () => {
+    const hint = 'Shopping questions about products, sizes, prices, shipping and returns.';
+    const doFetch = (async () =>
+      new Response(JSON.stringify({ text: hint }), { status: 200 })) as unknown as typeof fetch;
+    const text = await transcribe(Buffer.from('a'), 'audio/webm', { ...CFG, transcriptionHint: hint }, doFetch);
+    expect(text).toBe('');
+  });
+
+  it('catches the echo through casing and punctuation changes', () => {
+    const hint = 'Shopping questions about products, sizes, prices, shipping and returns.';
+    expect(echoesPrompt('shopping questions about products sizes prices shipping and returns', hint)).toBe(true);
+  });
+
+  it('never mistakes a real question for the prompt', () => {
+    const hint = 'Shopping questions about products, sizes, colours, prices, availability, shipping and returns.';
+    // Shares "prices", "shipping" and "returns" with the hint and is still
+    // plainly a shopper talking.
+    expect(echoesPrompt('what are your shipping prices and returns policy like', hint)).toBe(false);
+    expect(echoesPrompt('how much is the hydrogen snowboard', hint)).toBe(false);
+    expect(echoesPrompt('do you have it in blue', hint)).toBe(false);
   });
 
   it('names the file for its container, not its codec', () => {

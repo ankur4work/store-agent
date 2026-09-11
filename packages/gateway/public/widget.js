@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.5';
+  var BUILD = '2026-09-11.6';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -204,7 +204,15 @@
 
 /* ---------- panel: scales out of the launcher, not teleported ------------ */
 .panel{
-  position:fixed;right:22px;bottom:22px;width:404px;height:min(640px,calc(100dvh - 44px));
+  /* 360x520, not 404x640.
+     At 404x640 the panel took most of a laptop viewport — on a 900px-tall
+     screen it covered the hero, the product, and the buy button, which is
+     the page a shopper is trying to read while asking about it. An
+     assistant that obscures the thing being discussed is working against
+     itself. The cap is on the taller dimension because height is what
+     swallows a page; the width only had to stop the product cards
+     wrapping, and 360 still fits two. */
+  position:fixed;right:22px;bottom:22px;width:360px;height:min(520px,calc(100dvh - 112px));
   background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:var(--r);
   display:flex;flex-direction:column;overflow:hidden;contain:layout paint;
   box-shadow:0 1px 2px rgba(0,0,0,.06),0 24px 70px -18px rgba(0,0,0,.35);

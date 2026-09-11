@@ -629,3 +629,23 @@ describe('brand tokens', () => {
     expect(r.pinned['--sa-radius']).toContain('8px');
   });
 });
+
+/**
+ * At 404x640 the panel took most of a laptop viewport — on a 900px-tall
+ * screen it covered the hero, the product and the buy button, which is the
+ * page the shopper is reading while asking about it.
+ */
+describe('widget panel footprint', () => {
+  const panel = () => SRC.slice(SRC.indexOf('.panel{'), SRC.indexOf('.panel.on'));
+
+  it('leaves the page it is discussing visible', () => {
+    expect(panel()).toContain('width:360px');
+    expect(panel()).toMatch(/height:min\(520px/);
+  });
+
+  it('still fits two product cards side by side', () => {
+    // 360 - 32 padding = 328 usable; two 156px cards plus an 11px gap = 323.
+    const card = SRC.slice(SRC.indexOf('.card{flex:'), SRC.indexOf('@keyframes pop'));
+    expect(card).toContain('flex:0 0 156px');
+  });
+});
