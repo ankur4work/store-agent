@@ -55,21 +55,49 @@ export async function transcribe(
   if (audio.length === 0) throw new VoiceError('empty audio', 400);
   if (audio.length > MAX_AUDIO_BYTES) throw new VoiceError('audio too large', 413);
 
-  const form = new FormData();
-  // The filename extension must match the actual container, not just the
-  // declared MIME type — a mislabelled upload is rejected upstream, and the
-  // failure surfaces as an opaque 502. Found by the round-trip check: our own
-  // TTS returns ogg/opus, which was being uploaded as `turn.webm`.
-  form.append('file', new Blob([new Uint8Array(audio)], { type: contentType }), `turn.${extensionFor(contentType)}`);
-  form.append('model', cfg.sttModel);
-  // Bias transcription toward how shoppers actually speak to a store assistant.
-  form.append('prompt', 'Shopping questions about products, sizes, prices, shipping and returns.');
+  /**
+   * Strip the codec parameter before uploading.
+   *
+   * A browser MediaRecorder reports `audio/webm;codecs=opus`, and that string
+   * was passed through verbatim as the upload's MIME type. Transcription
+   * answered 400 "Audio file might be corrupted or unsupported" for every
+   * voice turn — the recording was fine (18KB to 129KB of clean audio, with
+   * speech and silence correctly detected), and the parameter alone was
+   * enough to have the file rejected.
+   *
+   * The container is what matters; the codec inside it is the decoder's
+   * business. The filename extension must match that container too — our own
+   * TTS returns ogg/opus and was once uploaded as `turn.webm`.
+   */
+  const container = contentType.split(';')[0]!.trim().toLowerCase();
 
-  const res = await doFetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { authorization: `Bearer ${cfg.apiKey}` },
-    body: form,
-  });
+  const upload = async (type: string): Promise<Response> => {
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(audio)], { type }), `turn.${extensionFor(type)}`);
+    form.append('model', cfg.sttModel);
+    // Bias transcription toward how shoppers actually speak to a store assistant.
+    form.append('prompt', 'Shopping questions about products, sizes, prices, shipping and returns.');
+    return doFetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${cfg.apiKey}` },
+      body: form,
+    });
+  };
+
+  let res = await upload(container);
+
+  /**
+   * One retry as ogg, for opus specifically.
+   *
+   * webm and ogg are both just containers around the same opus stream, and a
+   * MediaRecorder webm carries no duration in its header — some decoders
+   * refuse it. Relabelling costs one request on a path that has already
+   * failed, and turns a dead voice turn into a working one. Only attempted
+   * for the ambiguous case, and only once.
+   */
+  if (res.status === 400 && container === 'audio/webm') {
+    res = await upload('audio/ogg');
+  }
   if (!res.ok) {
     // The reason, truncated and redacted.
     //
