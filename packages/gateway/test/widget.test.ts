@@ -342,6 +342,42 @@ describe('widget voice endpointing', () => {
     expect(fn).toContain('QUESTION_OPENERS');
   });
 
+  /**
+   * A listening indicator that loops on a timer says "working" whether or
+   * not anything is being heard — a dead microphone animates exactly like a
+   * live one. That ambiguity is a large part of why this feature took three
+   * attempts to diagnose, so the bars are driven by the real signal in both
+   * directions.
+   */
+  it('drives the waveform from the microphone analyser, not a timer', () => {
+    expect(SRC).toMatch(/function drawWave\(buf, gain\)/);
+    expect(SRC).toMatch(/drawWave\(buf, 2\.2\)/);
+    // No keyframe animation standing in for a signal.
+    expect(SRC).not.toMatch(/@keyframes\s+wave/);
+  });
+
+  it('animates the reply from the spoken audio too', () => {
+    // Otherwise the bars freeze the moment the shopper stops talking, right
+    // through the part where the assistant is answering.
+    expect(SRC).toMatch(/function watchPlayback\(audio\)/);
+    expect(SRC).toMatch(/createMediaElementSource/);
+  });
+
+  it('keeps the reply audible when routing it through the analyser', () => {
+    // A MediaElementSource re-routes the element; without reconnecting to
+    // the destination the assistant animates and says nothing.
+    expect(SRC).toMatch(/src\.connect\(an\)\.connect\(voice\.ctx\.destination\)/);
+  });
+
+  it('rests the bars visibly rather than collapsing them to nothing', () => {
+    // Fully collapsed reads as broken, which is the opposite of the point.
+    expect(SRC).toMatch(/Math\.max\(0\.12,/);
+  });
+
+  it('honours prefers-reduced-motion without hiding the state', () => {
+    expect(SRC).toMatch(/prefers-reduced-motion:reduce\)\{[\s\S]{0,200}\.wave i\{transition:none/);
+  });
+
   it('shows interim text without depending on it', () => {
     // Display only — the authoritative transcript still comes from the
     // server, which is language-locked and the same in every browser.

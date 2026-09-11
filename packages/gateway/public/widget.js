@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.3';
+  var BUILD = '2026-09-11.4';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -323,6 +323,26 @@ textarea::placeholder{color:var(--muted)}
 .voicebar{display:none;align-items:center;gap:9px;padding:9px 16px 0;font-size:12.5px;color:var(--muted)}
 .voicebar.on{display:flex}
 .voicebar .live{flex:1;color:var(--ink);font-style:italic}
+
+/* ---------- waveform ----------------------------------------------------
+   Driven by the real signal in both directions: the microphone analyser
+   while listening, the TTS output while speaking. A looping animation would
+   have been a third of the code and a lie — it says "working" while a dead
+   mic looks identical to a live one, which is precisely the confusion that
+   made voice so hard to diagnose here.
+
+   Bars, not a canvas: eleven divs scale on the compositor, cost nothing to
+   animate, and inherit the merchant's accent colour for free. */
+.wave{display:flex;align-items:center;gap:2px;height:18px;flex:0 0 auto}
+.wave i{width:2px;height:100%;border-radius:2px;background:var(--accent);opacity:.35;
+  transform:scaleY(.15);transform-origin:center;transition:transform .07s linear,opacity .07s linear}
+.wave.live i{opacity:.9}
+.wave.speaking i{background:var(--accent);opacity:.75}
+@media (prefers-reduced-motion:reduce){
+  /* Still shows state, without the motion. */
+  .wave i{transition:none;transform:scaleY(.5)}
+  .wave.live i,.wave.speaking i{transform:scaleY(.7)}
+}
 .voicebar button{background:none;border:0;color:var(--muted);cursor:pointer;font:inherit;
   text-decoration:underline;padding:0}
 
@@ -412,7 +432,9 @@ textarea::placeholder{color:var(--muted)}
       '<div class="log" aria-live="polite"></div>' +
       '<div class="chips"></div>' +
       '</div>' +
-      '<div class="voicebar"><span class="live">Listening…</span>' +
+      '<div class="voicebar"><span class="wave">' +
+      '<i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>' +
+      '</span><span class="live">Listening…</span>' +
       '<button type="button" class="voiceoff">Stop voice</button></div>' +
       '<form><div class="field"><textarea rows="1" placeholder="Ask about fit, shipping, anything…" aria-label="Message"></textarea></div>' +
       '<button class="mic" type="button" aria-label="Talk instead of typing">' +
@@ -434,6 +456,8 @@ textarea::placeholder{color:var(--muted)}
     els.send = p.querySelector('.send');
     els.mic = p.querySelector('.mic');
     els.voicebar = p.querySelector('.voicebar');
+    els.wave = p.querySelector('.voicebar .wave');
+    els.waveBars = [].slice.call(p.querySelectorAll('.voicebar .wave i'));
     els.live = p.querySelector('.voicebar .live');
 
     els.mic.addEventListener('click', toggleVoice);
@@ -762,6 +786,66 @@ textarea::placeholder{color:var(--muted)}
    * Synthesised rather than a file: two oscillator notes cost nothing, need
    * no asset on the critical path, and cannot 404 on a merchant's CDN.
    */
+  /**
+   * Paint the bars from a frequency spectrum.
+   *
+   * `buf` is the analyser's byte data; the bars sample across it so the
+   * shape reflects the actual voice rather than one averaged number moving
+   * every bar together. A floor of 0.12 keeps the bars visible at rest —
+   * collapsed to nothing reads as broken, which is the opposite of what a
+   * listening indicator is for.
+   */
+  function drawWave(buf, gain) {
+    var bars = els.waveBars;
+    if (!bars || !bars.length) return;
+    var per = Math.max(1, Math.floor(buf.length / bars.length));
+    for (var i = 0; i < bars.length; i++) {
+      var sum = 0;
+      for (var j = 0; j < per; j++) sum += buf[i * per + j] || 0;
+      var v = (sum / per / 255) * (gain || 1);
+      bars[i].style.transform = 'scaleY(' + Math.max(0.12, Math.min(1, v)).toFixed(3) + ')';
+    }
+  }
+
+  /** Collapse the bars to rest. */
+  function idleWave() {
+    if (els.wave) els.wave.className = 'wave';
+    (els.waveBars || []).forEach(function (b) {
+      b.style.transform = 'scaleY(0.15)';
+    });
+  }
+
+  /**
+   * Animate the bars from the SPOKEN audio while the assistant replies.
+   *
+   * A second analyser, on the playback element rather than the microphone.
+   * Without it the bars freeze the moment the shopper stops talking and the
+   * widget looks hung through the part where it is actually answering.
+   */
+  function watchPlayback(audio) {
+    try {
+      if (!voice.ctx) return;
+      if (voice.ctx.state === 'suspended' && voice.ctx.resume) voice.ctx.resume();
+      var src = voice.ctx.createMediaElementSource(audio);
+      var an = voice.ctx.createAnalyser();
+      an.fftSize = 128;
+      // Through the analyser AND on to the speakers — a MediaElementSource
+      // re-routes the audio, so skipping this connection mutes the reply.
+      src.connect(an).connect(voice.ctx.destination);
+      var buf = new Uint8Array(an.frequencyBinCount);
+      if (els.wave) els.wave.className = 'wave speaking';
+      var tick = function () {
+        if (voice.playing !== audio) return idleWave();
+        an.getByteFrequencyData(buf);
+        drawWave(buf, 1.6);
+        voice.playRaf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) {
+      // Safari throws if an element is re-sourced. The reply still plays.
+    }
+  }
+
   function cue(kind) {
     try {
       if (!voice.ctx) return;
@@ -826,7 +910,9 @@ textarea::placeholder{color:var(--muted)}
 
   function stopVoice(full) {
     cancelAnimationFrame(voice.raf);
+    cancelAnimationFrame(voice.playRaf);
     stopRecognition();
+    idleWave();
     if (voice.recorder && voice.recorder.state !== 'inactive') voice.recorder.stop();
     if (full && voice.stream) voice.stream.getTracks().forEach(function (t) { t.stop(); });
     if (full) {
@@ -855,6 +941,7 @@ textarea::placeholder{color:var(--muted)}
     };
     rec.start(100);
     setVoiceState('listening');
+    if (els.wave) els.wave.className = 'wave live';
     voice.interim = '';
     if (els.live) els.live.textContent = 'Listening…';
     voice.recognition = startRecognition();
@@ -999,6 +1086,8 @@ textarea::placeholder{color:var(--muted)}
     function tick() {
       if (!voice.on) return;
       voice.analyser.getByteFrequencyData(buf);
+      // The same data the endpointer reads, shown to the shopper.
+      drawWave(buf, 2.2);
       var sum = 0;
       for (var i = 0; i < buf.length; i++) sum += buf[i];
       var level = sum / buf.length;
@@ -1159,6 +1248,7 @@ textarea::placeholder{color:var(--muted)}
       var audio = new Audio(url);
       voice.playing = audio;
       setVoiceState('speaking');
+      watchPlayback(audio);
       audio.onended = function () { URL.revokeObjectURL(url); playNext(); };
       audio.onerror = function () { URL.revokeObjectURL(url); playNext(); };
       await audio.play();
