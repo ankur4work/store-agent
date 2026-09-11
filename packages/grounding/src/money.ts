@@ -146,11 +146,20 @@ export function restoreCents(
 ): { readonly reply: string; readonly repaired: readonly string[] } {
   const repaired: string[] = [];
 
-  // `(?!\d)` so the whole number is matched, and `(?!\.\d)` so a figure that
-  // already carries cents is left alone — while a price ending a sentence
-  // ("starts at $9.") still qualifies, because that full stop is punctuation
-  // rather than a decimal point.
-  const out = reply.replace(/([$£€¥])\s?(\d[\d,]*)(?!\d)(?!\.\d)/g, (whole, symbol: string, digits: string) => {
+  // Matches a whole-dollar figure written either way: "$9" or "$9.00".
+  //
+  // The first version took only the bare form, on the theory that explicit
+  // cents are an assertion rather than an abbreviation. Against the live
+  // store the model wrote "$9.00" for a $9.95 wax, so the rule excluded the
+  // exact case it was built for. Both spellings say the same wrong thing —
+  // whole dollars where the catalog has cents.
+  //
+  // A NON-ZERO cents value is still untouchable: "$9.50" is a specific claim
+  // about a price, not a rounding of one, and it must fail rather than be
+  // quietly rewritten.
+  const out = reply.replace(
+    /([$£€¥])\s?(\d[\d,]*)(?:\.00)?(?!\d)(?!\.\d)/g,
+    (whole, symbol: string, digits: string) => {
     const stated = Math.round(Number.parseFloat(digits.replace(/,/g, '')) * 100);
     if (!Number.isFinite(stated)) return whole;
     // Already a real price: nothing to repair.
@@ -165,7 +174,8 @@ export function restoreCents(
     const exact = `${symbol}${digits}.${String(candidates[0]! % 100).padStart(2, '0')}`;
     repaired.push(`${whole.trim()}→${exact}`);
     return exact;
-  });
+    },
+  );
 
   return { reply: out, repaired };
 }

@@ -50,11 +50,20 @@ describe('restoring cents on an abbreviated price', () => {
     expect(r.reply).toBe('It is $42.');
   });
 
-  it('does not touch a figure written with cents, even a wrong one', () => {
-    // "$9.00" is an assertion, not an abbreviation. It must still fail
-    // validation rather than be silently corrected.
-    const r = restoreCents('It is $9.00.', SOURCES);
-    expect(r.reply).toBe('It is $9.00.');
+  it('repairs the explicit whole-dollar spelling too', () => {
+    // The live failure. The first version took only the bare "$9", on the
+    // theory that explicit cents are an assertion — and the model wrote
+    // "$9.00" for the $9.95 wax, so the rule excluded the case it was built
+    // for. Both spellings say the same wrong thing.
+    const r = restoreCents('Selling Plans Ski Wax is $9.00.', SOURCES);
+    expect(r.reply).toBe('Selling Plans Ski Wax is $9.95.');
+  });
+
+  it('never touches a non-zero cents value, which is a specific claim', () => {
+    // "$9.50" is an assertion about a price, not a rounding of one. It must
+    // fail validation rather than be quietly rewritten to $9.95.
+    const r = restoreCents('It is $9.50.', SOURCES);
+    expect(r.reply).toBe('It is $9.50.');
     expect(r.repaired).toEqual([]);
   });
 
