@@ -40,6 +40,11 @@ export interface VoiceConfig {
    * every language at once, which a single merchant's store is not.
    */
   readonly language?: string;
+  /**
+   * Vocabulary hint for the decoder. Anchors a short, noisy utterance
+   * without pinning its language — see the `prompt` field below.
+   */
+  readonly transcriptionHint?: string;
 }
 
 export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
@@ -47,9 +52,19 @@ export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
   sttModel: 'gpt-4o-transcribe',
   ttsModel: 'gpt-4o-mini-tts',
   voice: 'alloy',
-  // Overridden per deployment by VOICE_LANGUAGE. A default of "detect" is
-  // what produced an English question transcribed into Urdu script.
-  language: 'en',
+  /**
+   * Unset = detect, which is what a store serving shoppers in several
+   * languages needs.
+   *
+   * Forcing English fixed a real failure — an English question came back in
+   * Urdu script — but fixed it by removing the capability. Detection is
+   * instead made reliable the way it is meant to be: the `prompt` below
+   * carries the storefront's own vocabulary, which is what anchors a short
+   * utterance, and a shopper speaking Urdu is then transcribed in Urdu and
+   * answered in Urdu.
+   *
+   * Set VOICE_LANGUAGE to an ISO-639-1 code to pin a single-language store.
+   */
 };
 
 export class VoiceError extends Error {
@@ -95,8 +110,22 @@ export async function transcribe(
     // Tell it the language rather than letting it guess from a noisy second
     // of audio. See VoiceConfig.language.
     if (cfg.language !== undefined && cfg.language !== '') form.append('language', cfg.language);
-    // Bias transcription toward how shoppers actually speak to a store assistant.
-    form.append('prompt', 'Shopping questions about products, sizes, prices, shipping and returns.');
+    /**
+     * Bias transcription toward how shoppers speak to a store assistant.
+     *
+     * This is what makes detection safe enough to leave on. A second of
+     * audio is thin evidence for a language, and the misdetection that put
+     * an English question into Urdu script happened on exactly that. A
+     * prompt full of the vocabulary actually expected — the shop's own words
+     * — anchors the decode without pinning the language, so a shopper who
+     * really is speaking another language still gets transcribed in it.
+     */
+    form.append(
+      'prompt',
+      cfg.transcriptionHint ??
+        'Shopping questions about products, sizes, colours, prices, availability, ' +
+          'shipping and returns. Product names may be brand names.',
+    );
     return doFetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
       headers: { authorization: `Bearer ${cfg.apiKey}` },

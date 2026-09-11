@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.4';
+  var BUILD = '2026-09-11.5';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1394,6 +1394,31 @@ textarea::placeholder{color:var(--muted)}
           if (ev === 'session') {
             state.sessionId = d.sessionId;
             persist();
+          } else if (ev === 'trace') {
+            /**
+             * Say what it is doing while it does it.
+             *
+             * A shop assistant says "let me check" and walks off; they do
+             * not stare at you in silence and then recite an answer. The
+             * search takes a second or two and the panel showed three
+             * animated dots for all of it — identical to the dots shown
+             * while the model thinks, so the shopper could not tell whether
+             * anything was happening on their behalf.
+             *
+             * Only until the first real text arrives, and only if nothing
+             * has been painted yet, so it can never overwrite an answer.
+             */
+            if (!shown && d && d.type === 'tool_start') {
+              var doing =
+                d.detail === 'search_catalog' || d.detail === 'get_product'
+                  ? 'Checking the catalog…'
+                  : d.detail === 'get_policy'
+                    ? 'Checking the store policy…'
+                    : d.detail === 'add_to_cart'
+                      ? 'Adding that to your cart…'
+                      : null;
+              if (doing) els.status.textContent = doing;
+            }
           } else if (ev === 'products') {
             renderCards(d.products, d.products.length === 1 ? 'The match' : 'What I found');
           } else if (ev === 'delta') {

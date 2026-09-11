@@ -477,6 +477,25 @@ describe('widget product cards', () => {
   });
 });
 
+describe('saying what it is doing', () => {
+  /**
+   * A shop assistant says "let me check" and walks off. The panel showed
+   * three animated dots through the catalog search — the same dots shown
+   * while the model thinks — so a shopper could not tell whether anything
+   * was happening on their behalf.
+   */
+  it('names the work in progress instead of showing generic dots', () => {
+    expect(SRC).toContain('Checking the catalog…');
+    expect(SRC).toContain('Checking the store policy…');
+    expect(SRC).toContain('Adding that to your cart…');
+  });
+
+  it('never lets progress text overwrite an answer', () => {
+    // Guarded on nothing having been painted yet.
+    expect(SRC).toMatch(/if \(!shown && d && d\.type === 'tool_start'\)/);
+  });
+});
+
 describe('widget diagnostics', () => {
   /**
    * Every non-render path used to be silent, so holdout, disabled, and
