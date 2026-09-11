@@ -47,6 +47,7 @@ import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
 import type { CatalogIndex } from './search/catalog-index.js';
+import { withVariantImages } from './search/variant-image.js';
 import { BillingApiError } from './billing/shopify-billing.js';
 import {
   MemorySettingsStore,
@@ -1173,7 +1174,12 @@ export function createGateway(deps: GatewayDeps): Server {
        * An empty list clears the rail, which is the honest state when the
        * answer mentions nothing.
        */
-      send('products', { products: named, final: true });
+      // The card shows the variant the conversation named — the white pair,
+      // not whichever colourway the merchant featured. See variant-image.ts.
+      send('products', {
+        products: withVariantImages(named, `${body.message} ${result.reply}`),
+        final: true,
+      });
 
       // A turn reaches a human two ways: the loop gave up (`escalated`) or the
       // agent chose to hand off (`handedOff`). A client asking "did this reach

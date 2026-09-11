@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.8';
+  var BUILD = '2026-09-11.9';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -756,7 +756,10 @@ textarea::placeholder{color:var(--muted)}
       });
 
       // Demo fixtures carry `image`; real UCP payloads carry `media[]`.
-      var img = p.image || (p.media && p.media[0] && p.media[0].url) || '';
+      // display_image is the variant the conversation named — the white
+      // pair, not whichever colourway the merchant set as primary. Correct
+      // words under a contradicting picture is worse than no picture.
+      var img = p.display_image || p.image || (p.media && p.media[0] && p.media[0].url) || '';
 
       // An anchor, not a button: clicking a product goes to the product page,
       // so it must behave like a link — middle-click, ctrl-click and "open in
