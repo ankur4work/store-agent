@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.7';
+  var BUILD = '2026-09-11.8';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -204,15 +204,16 @@
 
 /* ---------- panel: scales out of the launcher, not teleported ------------ */
 .panel{
-  /* 360x520, not 404x640.
-     At 404x640 the panel took most of a laptop viewport — on a 900px-tall
-     screen it covered the hero, the product, and the buy button, which is
-     the page a shopper is trying to read while asking about it. An
-     assistant that obscures the thing being discussed is working against
-     itself. The cap is on the taller dimension because height is what
-     swallows a page; the width only had to stop the product cards
-     wrapping, and 360 still fits two. */
-  position:fixed;right:22px;bottom:22px;width:360px;height:min(520px,calc(100dvh - 112px));
+  /* 352x440, down from 404x640 in two steps.
+     At full size the panel covered the hero, the product and the buy
+     button — the page a shopper is reading while asking about it. An
+     assistant that obscures the thing being discussed works against
+     itself. Height takes the deeper cut because height is what swallows a
+     page; the width only had to keep two product cards side by side, and
+     352 still does (352 - 32 padding = 320; two 156px cards + 11px gap =
+     323, which scrolls by one card rather than wrapping).
+     Voice opens smaller still — see .panel.compact. */
+  position:fixed;right:22px;bottom:22px;width:352px;height:min(440px,calc(100dvh - 132px));
   background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:var(--r);
   display:flex;flex-direction:column;overflow:hidden;contain:layout paint;
   box-shadow:0 1px 2px rgba(0,0,0,.06),0 24px 70px -18px rgba(0,0,0,.35);
@@ -249,7 +250,17 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
 .msg{max-width:87%;padding:10px 13px;font-size:14.5px;line-height:1.55;white-space:pre-wrap;
   word-wrap:break-word;border-radius:14px;animation:rise .34s var(--ease) both}
 @keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
-.msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:5px}
+/* A TINT of the accent, not the accent itself.
+   Solid brand colour on every shopper bubble turns the transcript into a
+   column of flat blocks — loud against a light theme, harsh against a dark
+   one, and it spends the accent on the least important thing on screen.
+   The accent belongs on the one control you want pressed. A wash of it
+   still reads as "this was you", and the text stays ink, so contrast holds
+   whatever colour the merchant picks. */
+.msg.user{align-self:flex-end;border-bottom-right-radius:5px;
+  background:color-mix(in srgb,var(--accent) 14%,var(--paper));
+  color:var(--ink);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 22%,transparent)}
 .msg.bot{align-self:flex-start;background:var(--sunk);border-bottom-left-radius:5px}
 .dots{display:inline-flex;gap:4px;padding:3px 1px}
 .dots i{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.3;
@@ -353,6 +364,22 @@ textarea::placeholder{color:var(--muted)}
 
    Bars, not a canvas: eleven divs scale on the compositor, cost nothing to
    animate, and inherit the merchant's accent colour for free. */
+/* ---------- compact: the voice-first state ------------------------------
+   What the launcher opens into. Tall enough for the waveform, the live
+   transcript and one answer, and no taller — a shopper who tapped a
+   microphone is listening, not reading, and a full-height panel over the
+   product they are asking about is the thing they were complaining about.
+   It grows to the full conversation the moment there is one. */
+.panel.compact{height:min(212px,calc(100dvh - 132px))}
+.panel.compact .rail,
+.panel.compact .chips,
+.panel.compact .intro{display:none}
+.panel.compact .log{padding:10px 16px 0}
+.panel.compact .msg{font-size:14px;max-width:100%}
+/* Only the latest exchange: older turns are what the expanded panel is for. */
+.panel.compact .msg:not(:nth-last-child(-n+2)){display:none}
+.panel.compact .voicebar{padding-top:6px}
+
 .wave{display:flex;align-items:center;gap:2px;height:18px;flex:0 0 auto}
 .wave i{width:2px;height:100%;border-radius:2px;background:var(--accent);opacity:.35;
   transform:scaleY(.15);transform-origin:center;transition:transform .07s linear,opacity .07s linear}
@@ -553,16 +580,51 @@ textarea::placeholder{color:var(--muted)}
   function toggle() {
     state.open ? close() : open();
   }
-  function open() {
+  /**
+   * Tapping the launcher starts LISTENING, it does not open a chat box.
+   *
+   * Opening a text panel and focusing a textarea says "type your question",
+   * which is the slower thing to do and, on a phone, the awkward one. A
+   * shopper who taps a microphone-shaped button has already said what they
+   * want to do. So the panel opens small, in voice mode, already
+   * listening — the keyboard never appears and no one has to find the mic.
+   *
+   * The full conversation is one tap away and arrives automatically as soon
+   * as anything is typed or answered; nothing is removed, only reordered.
+   */
+  function open(opts) {
     build();
     state.open = true;
     launcher.classList.add('away');
     launcher.classList.remove('nudge');
+    var voiceFirst = !opts || opts.voice !== false;
     requestAnimationFrame(function () {
       els.panel.classList.add('show');
-      els.input.focus({ preventScroll: true });
+      if (voiceFirst && canListen()) {
+        els.panel.classList.add('compact');
+        // Not focused: focusing a textarea raises the mobile keyboard over
+        // the thing the shopper is trying to talk to.
+        if (!voice.on) void toggleVoice();
+      } else {
+        els.panel.classList.remove('compact');
+        els.input.focus({ preventScroll: true });
+      }
     });
     persist();
+  }
+
+  /** Voice needs a microphone and a recorder; without them, open to text. */
+  function canListen() {
+    return !!(
+      navigator.mediaDevices &&
+      navigator.mediaDevices.getUserMedia &&
+      typeof MediaRecorder !== 'undefined'
+    );
+  }
+
+  /** Grow to the full conversation — typing, or an answer worth reading. */
+  function expand() {
+    if (els.panel) els.panel.classList.remove('compact');
   }
   function close() {
     state.open = false;
@@ -582,6 +644,8 @@ textarea::placeholder{color:var(--muted)}
 
   function addMsg(role, text, instant) {
     els.intro.hidden = true;
+    // A typed message means the shopper wants the full conversation.
+    if (role === 'user' && !voice.on) expand();
     var d = document.createElement('div');
     d.className = 'msg ' + role;
     if (instant) d.style.animation = 'none';
@@ -1459,7 +1523,19 @@ textarea::placeholder{color:var(--muted)}
               if (doing) els.status.textContent = doing;
             }
           } else if (ev === 'products') {
-            renderCards(d.products, d.products.length === 1 ? 'The match' : 'What I found');
+            /**
+             * The FINAL list replaces the early one, empty included.
+             *
+             * The early cards are whatever the first search returned, sent
+             * fast so something is on screen while the model writes. For a
+             * query that matched nothing that is the browse fallback — so
+             * "cheapest shoes" in a snowboard shop showed a gift card and a
+             * snowboard under "What I found", beside a reply that had found
+             * nothing. Clearing is the honest state, and the pictures are
+             * what a shopper believes over the words.
+             */
+            if (d.final && d.products.length === 0) dropRail();
+            else renderCards(d.products, d.products.length === 1 ? 'The match' : 'What I found');
           } else if (ev === 'delta') {
             pending += d.text;
             schedule();
@@ -1478,6 +1554,9 @@ textarea::placeholder{color:var(--muted)}
             if (shown !== d.reply) bubble.textContent = d.reply;
             state.messages.push({ role: 'bot', text: d.reply });
             if (turnUi.rail && turnUi.rail.querySelector('.card.skel')) dropRail();
+            // Products to look at, or an answer too long to hear comfortably,
+            // are both reasons to stop being a voice bubble.
+            if (turnUi.rail || String(d.reply || '').length > 220) expand();
             els.status.textContent = d.grounded ? 'Ready' : 'Passed to the team';
             persist();
             // A turn that produced no audio never reaches playNext, so

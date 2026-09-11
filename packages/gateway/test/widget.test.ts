@@ -639,12 +639,18 @@ describe('widget panel footprint', () => {
   const panel = () => SRC.slice(SRC.indexOf('.panel{'), SRC.indexOf('.panel.on'));
 
   it('leaves the page it is discussing visible', () => {
-    expect(panel()).toContain('width:360px');
-    expect(panel()).toMatch(/height:min\(520px/);
+    expect(panel()).toContain('width:352px');
+    expect(panel()).toMatch(/height:min\(440px/);
+  });
+
+  it('opens smaller still for voice, which is the default', () => {
+    expect(SRC).toMatch(/\.panel\.compact\{height:min\(212px/);
   });
 
   it('still fits two product cards side by side', () => {
-    // 360 - 32 padding = 328 usable; two 156px cards plus an 11px gap = 323.
+    // 352 - 32 padding = 320 usable; two 156px cards plus an 11px gap = 323,
+    // so the second card is a few pixels proud and the rail scrolls by one
+    // card rather than wrapping — which is the intended behaviour.
     const card = SRC.slice(SRC.indexOf('.card{flex:'), SRC.indexOf('@keyframes pop'));
     expect(card).toContain('flex:0 0 156px');
   });
@@ -675,5 +681,61 @@ describe('voice as the primary input', () => {
     // transliterated into English captions.
     expect(SRC).toMatch(/document\.documentElement\.getAttribute\('lang'\)/);
     expect(SRC).toMatch(/navigator\.language/);
+  });
+});
+
+/**
+ * A shopper who taps a microphone-shaped button has already said what they
+ * want to do. Opening a text panel and focusing a textarea told them to
+ * type instead — the slower thing, and on a phone the awkward one.
+ */
+describe('launcher opens into listening, not typing', () => {
+  it('starts the microphone instead of focusing the composer', () => {
+    expect(SRC).toMatch(/if \(voiceFirst && canListen\(\)\)/);
+    expect(SRC).toMatch(/if \(!voice\.on\) void toggleVoice\(\)/);
+  });
+
+  it('does not raise the keyboard over the thing being discussed', () => {
+    const open = SRC.slice(SRC.indexOf('function open(opts)'), SRC.indexOf('function canListen'));
+    // focus() only on the text path, never the voice one.
+    expect(open).toMatch(/\} else \{[\s\S]{0,160}els\.input\.focus/);
+  });
+
+  it('falls back to text where the browser has no microphone', () => {
+    expect(SRC).toMatch(/function canListen\(\)/);
+    expect(SRC).toMatch(/typeof MediaRecorder !== 'undefined'/);
+  });
+
+  it('opens small and grows only when there is something to read', () => {
+    expect(SRC).toMatch(/\.panel\.compact\{height:min\(212px/);
+    expect(SRC).toMatch(/turnUi\.rail \|\| String\(d\.reply \|\| ''\)\.length > 220\) expand\(\)/);
+  });
+});
+
+describe('widget colour', () => {
+  /**
+   * Solid brand colour on every shopper bubble turns the transcript into a
+   * column of flat blocks, and spends the accent on the least important
+   * thing on screen. It belongs on the control you want pressed.
+   */
+  it('tints the shopper bubble rather than filling it with the accent', () => {
+    const bubble = SRC.slice(SRC.indexOf('.msg.user{'), SRC.indexOf('.msg.bot{'));
+    expect(bubble).toContain('color-mix(in srgb,var(--accent) 14%,var(--paper))');
+    // Ink text, so contrast survives whatever accent the merchant sets.
+    expect(bubble).toContain('color:var(--ink)');
+    expect(bubble).not.toMatch(/background:var\(--accent\)(;|\})/);
+  });
+});
+
+/**
+ * Early cards are whatever the FIRST search returned, sent fast so
+ * something is on screen while the model writes. For a query that matched
+ * nothing that is the browse fallback — so "cheapest shoes" in a snowboard
+ * shop showed a gift card and a snowboard under "What I found", beside a
+ * reply that had found nothing. The pictures are what a shopper believes.
+ */
+describe('cards never outlive the answer', () => {
+  it('clears the rail when the final answer names no product', () => {
+    expect(SRC).toMatch(/if \(d\.final && d\.products\.length === 0\) dropRail\(\)/);
   });
 });

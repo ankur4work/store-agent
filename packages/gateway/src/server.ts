@@ -1159,9 +1159,21 @@ export function createGateway(deps: GatewayDeps): Server {
         const title = (p as { title?: unknown }).title;
         return typeof title === 'string' && title !== '' && result.reply.includes(title);
       });
-      if (named.length > 0 && named.length !== products.length) {
-        send('products', { products: named, final: true });
-      }
+      /**
+       * ALWAYS sent, including empty.
+       *
+       * This used to fire only when the count changed, so an answer that
+       * named no products at all left the early cards on screen — and the
+       * early cards are whatever the first search returned, which for an
+       * unmatched query is the browse fallback. Asked for "cheapest shoes",
+       * a snowboard shop showed a gift card and a snowboard under "WHAT I
+       * FOUND", beside a reply that had found nothing. The pictures
+       * contradicted the words and the pictures are what people believe.
+       *
+       * An empty list clears the rail, which is the honest state when the
+       * answer mentions nothing.
+       */
+      send('products', { products: named, final: true });
 
       // A turn reaches a human two ways: the loop gave up (`escalated`) or the
       // agent chose to hand off (`handedOff`). A client asking "did this reach
