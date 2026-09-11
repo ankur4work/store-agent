@@ -411,11 +411,66 @@ export function renderAdmin(vm: AdminViewModel): string {
 </html>`;
 }
 
-/** The Plan route: usage and the chooser, nothing else. */
+/**
+ * The Plan route: usage and the chooser, nothing else.
+ *
+ * The script travels WITH the buttons. Moving billing to its own page left
+ * the click handlers behind in the dashboard's script block, so the chooser
+ * rendered perfectly and every button was inert — no error, no console
+ * message, nothing to click. A control and the code that makes it work
+ * belong in the same place for exactly this reason.
+ */
 function renderPlanPage(vm: AdminViewModel): string {
-  return vm.billing === undefined
-    ? '<section class="card"><h2>Plan</h2><div class="body"><p class="muted">Billing is not configured on this deployment.</p></div></section>'
-    : renderPlan(vm.billing);
+  if (vm.billing === undefined) {
+    return '<section class="card"><h2>Plan</h2><div class="body"><p class="muted">Billing is not configured on this deployment.</p></div></section>';
+  }
+  return `${renderPlan(vm.billing)}
+  <div class="errors" id="planErrors" role="alert" aria-live="polite" hidden></div>
+  <script>
+    (function () {
+      var errs = document.getElementById('planErrors');
+      function showErrors(list) {
+        errs.innerHTML = '<strong>Could not change plan:</strong><ul>' +
+          list.map(function (e) { return '<li>' + String(e).replace(/[<>]/g, '') + '</li>'; }).join('') +
+          '</ul>';
+        errs.hidden = false;
+      }
+
+      // The merchant is sent to Shopify's own approval screen — nothing is
+      // charged here. It must open at the TOP window: the admin runs in an
+      // iframe and Shopify's confirmation page refuses to render inside
+      // one, so a plain redirect shows a blank frame and the upgrade dies
+      // silently.
+      document.querySelectorAll('.planBtn').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          var plan = btn.getAttribute('data-plan');
+          if (plan === 'free' &&
+              !confirm('Cancel your subscription and return to the Free plan?')) return;
+          btn.disabled = true;
+          errs.hidden = true;
+          try {
+            var token = '';
+            try { token = await window.shopify.idToken(); } catch (err) {}
+            var res = await fetch('/admin/billing/subscribe', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+              body: JSON.stringify({ plan: plan }),
+            });
+            var body = await res.json().catch(function () { return {}; });
+            if (body.confirmationUrl) { window.top.location.href = body.confirmationUrl; return; }
+            if (res.ok) { location.reload(); return; }
+            showErrors(body.errors || ['Please try again.']);
+          } catch (err) {
+            // A dead button with a silent failure is what this page just
+            // shipped. Whatever goes wrong, say something.
+            showErrors([String((err && err.message) || err)]);
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    })();
+  </script>`;
 }
 
 /** Everything on the dashboard below the tiles. */
@@ -546,31 +601,6 @@ function renderHomeSections(vm: AdminViewModel): string {
             else showErrors(body.errors || ['Could not save.']);
           });
 
-          // Plan changes. The merchant is sent to Shopify's own approval
-          // screen — nothing is charged here. It must open at the TOP window:
-          // the admin runs in an iframe and Shopify's confirmation page
-          // refuses to render inside one, so a plain redirect shows a blank
-          // frame and the upgrade silently dies.
-          document.querySelectorAll('.planBtn').forEach(function (btn) {
-            btn.addEventListener('click', async function () {
-              var plan = btn.getAttribute('data-plan');
-              if (plan === 'free' &&
-                  !confirm('Cancel your subscription and return to the Free plan?')) return;
-              btn.disabled = true;
-              var token = '';
-              try { token = await window.shopify.idToken(); } catch (err) {}
-              var res = await fetch('/admin/billing/subscribe', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
-                body: JSON.stringify({ plan: plan }),
-              });
-              var body = await res.json().catch(function () { return {}; });
-              btn.disabled = false;
-              if (body.confirmationUrl) window.top.location.href = body.confirmationUrl;
-              else if (res.ok) location.reload();
-              else showErrors(body.errors || ['Could not change plan.']);
-            });
-          });
 
           // Self-heal a stale plan.
           //

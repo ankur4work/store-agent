@@ -762,6 +762,31 @@ describe('plan chooser', () => {
    * A merchant deciding whether to upgrade had to leave the page to find out
    * what a plan cost or included — the two facts the decision is made on.
    */
+  /**
+   * Moving billing to its own route left the click handlers behind in the
+   * dashboard's script block, so the chooser rendered perfectly and every
+   * button was inert — no error, no console message, nothing. A control and
+   * the code that makes it work have to ship together.
+   */
+  it('ships the click handler on the page that has the buttons', () => {
+    const html = renderAdmin(vm());
+    expect(html).toContain("querySelectorAll('.planBtn')");
+    expect(html).toContain('/admin/billing/subscribe');
+  });
+
+  it('says something when a plan change fails', () => {
+    // A dead button that fails silently is what this page shipped.
+    const html = renderAdmin(vm());
+    expect(html).toContain('planErrors');
+    expect(html).toMatch(/catch \(err\) \{[\s\S]{0,200}showErrors/);
+  });
+
+  it('sends the merchant to Shopify at the TOP window, not inside the frame', () => {
+    // Shopify's approval page refuses to be framed; a plain redirect shows
+    // a blank frame and the upgrade dies silently.
+    expect(renderAdmin(vm())).toContain('window.top.location.href = body.confirmationUrl');
+  });
+
   it('shows the price and allowance at the point of choice', () => {
     const html = renderAdmin(vm());
     expect(html).toContain('$49.00');
