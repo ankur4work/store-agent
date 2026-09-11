@@ -825,11 +825,27 @@ export function createGateway(deps: GatewayDeps): Server {
 
   async function handleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
+      const contentType = header(req, 'content-type') ?? 'audio/webm';
       const audio = await readRawBody(req, MAX_AUDIO_BYTES);
-      const text = await transcribe(audio, header(req, 'content-type') ?? 'audio/webm', voiceConfig);
+      const text = await transcribe(audio, contentType, voiceConfig);
+      // An empty transcript is a SUCCESS on the wire and a dead end for the
+      // shopper: the widget quietly starts listening again, so a mic that
+      // recorded perfectly well looks like it does nothing. Worth a line —
+      // it is indistinguishable from a failure from the outside.
+      if (text === '') {
+        log.warn('voice_transcript_empty', { bytes: audio.length, contentType });
+      }
       json(res, 200, { text });
     } catch (err) {
       const status = err instanceof VoiceError ? err.status : 500;
+      // Never the audio, never the transcript — the reason, the format and
+      // the size, which is what distinguishes a rejected container from a
+      // bad key from an oversized upload.
+      log.error('voice_transcribe_failed', {
+        status,
+        contentType: header(req, 'content-type') ?? null,
+        reason: err instanceof Error ? err.message : String(err),
+      });
       json(res, status, { error: 'transcription_failed' });
     }
   }

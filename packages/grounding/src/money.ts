@@ -118,6 +118,58 @@ export function isDerivable(value: Minor, sources: readonly Minor[]): boolean {
   return false;
 }
 
+/**
+ * Restore the cents on a price the model abbreviated.
+ *
+ * Models shorten prices in prose — "$9" for a $9.95 wax, "$785" for a
+ * $785.95 board — especially in lists and ranges. The guard is right to
+ * refuse: $9 is not the price, and a shopper who reads it has been
+ * misinformed. But refusing threw away an otherwise correct answer and sent
+ * the shopper to a human for a price the catalog knew exactly, and no amount
+ * of instruction stopped the model doing it.
+ *
+ * So the text is repaired instead of rejected. The rules are deliberately
+ * narrow, because this writes prices a shopper will read:
+ *
+ *   - only a BARE dollar amount, written without cents ("$9", never "$9.00")
+ *   - only when that amount matches no real price on its own
+ *   - only when exactly ONE catalog price shares its whole-dollar part, so
+ *     there is nothing to choose between
+ *
+ * Anything else is left alone and fails validation as before. The result is
+ * always a price that came from the catalog — the repair can only replace an
+ * abbreviation with the full value it abbreviated, never invent one.
+ */
+export function restoreCents(
+  reply: string,
+  sources: readonly Minor[],
+): { readonly reply: string; readonly repaired: readonly string[] } {
+  const repaired: string[] = [];
+
+  // `(?!\d)` so the whole number is matched, and `(?!\.\d)` so a figure that
+  // already carries cents is left alone — while a price ending a sentence
+  // ("starts at $9.") still qualifies, because that full stop is punctuation
+  // rather than a decimal point.
+  const out = reply.replace(/([$£€¥])\s?(\d[\d,]*)(?!\d)(?!\.\d)/g, (whole, symbol: string, digits: string) => {
+    const stated = Math.round(Number.parseFloat(digits.replace(/,/g, '')) * 100);
+    if (!Number.isFinite(stated)) return whole;
+    // Already a real price: nothing to repair.
+    if (sources.includes(stated)) return whole;
+
+    const candidates = sources.filter((s) => s > stated && s < stated + 100);
+    if (candidates.length !== 1) return whole;
+
+    // Append the cents to the digits AS WRITTEN, rather than reformatting
+    // from the minor units — that would turn "$1,025" into "$1025.95" and
+    // quietly restyle the model's prose while fixing the price.
+    const exact = `${symbol}${digits}.${String(candidates[0]! % 100).padStart(2, '0')}`;
+    repaired.push(`${whole.trim()}→${exact}`);
+    return exact;
+  });
+
+  return { reply: out, repaired };
+}
+
 /** Human-readable rendering for violation messages. Major units. */
 export function formatMinor(v: Minor): string {
   return (v / 100).toFixed(2);

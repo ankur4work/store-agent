@@ -6,6 +6,7 @@ export {
   collectMoneyFromResult,
   isDerivable,
   formatMinor,
+  restoreCents,
   type Minor,
 } from './money.js';
 export { detectStock, detectShippingEstimate, collectAvailability, type StockPolarity } from './extract.js';

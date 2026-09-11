@@ -71,9 +71,27 @@ export async function transcribe(
     body: form,
   });
   if (!res.ok) {
-    // Never echo the upstream body — it can contain request detail we do not
-    // want in logs, and the shopper cannot act on it anyway.
-    throw new VoiceError(`transcription failed (${res.status})`, 502);
+    // The reason, truncated and redacted.
+    //
+    // This used to report the status alone, on the grounds that the upstream
+    // body might carry request detail. It carries the answer: "Invalid file
+    // format" and "model not found" are the same 400 here and need opposite
+    // fixes. A mic that recorded 27KB and silently restarted was diagnosed
+    // down to this line, which had thrown the explanation away.
+    //
+    // The shopper never sees it — it goes to the log, which is why it is
+    // stripped of anything key-shaped first.
+    let detail = '';
+    try {
+      detail = (await res.text())
+        .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+        .slice(0, 200)
+        .replace(/\s+/g, ' ')
+        .trim();
+    } catch {
+      detail = 'no body';
+    }
+    throw new VoiceError(`transcription failed (${res.status}): ${detail}`, 502);
   }
   const body = (await res.json()) as { text?: unknown };
   return typeof body.text === 'string' ? body.text.trim() : '';

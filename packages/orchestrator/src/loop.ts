@@ -1,6 +1,8 @@
 import {
   GROUNDED_RESPONSE_SCHEMA,
   GroundingTripwire,
+  collectMoneyFromResult,
+  restoreCents,
   settledPrefix,
   validateGrounding,
   violationsToFeedback,
@@ -60,6 +62,11 @@ export interface TurnEvent {
      * logs showed a clean turn and said nothing about why.
      */
     | 'tool_error'
+    /**
+     * A bare price in the reply was expanded to the catalog's exact value.
+     * Rare and worth seeing: it means the model is abbreviating prices.
+     */
+    | 'price_repaired'
     | 'escalated';
   readonly detail?: string;
 }
@@ -279,10 +286,33 @@ export class Orchestrator {
         };
       }
 
-      const parsed = parseGrounded(outcome.text);
+      let parsed = parseGrounded(outcome.text);
       if (parsed === undefined) {
         emit({ type: 'escalated', detail: 'unparseable structured output' });
         return this.escalate(events, chosenRoute, toolResults, fingerprint, usage, attempts);
+      }
+
+      /**
+       * Put the cents back before judging the answer.
+       *
+       * The model abbreviates prices in prose — "$9" for a $9.95 wax, "$785"
+       * for a $785.95 board — most often in lists and ranges. The guard was
+       * right to refuse those, and refusing cost the shopper a correct answer
+       * and a trip to a human for a price the catalog knew exactly. Hiding
+       * the raw amounts and naming the exact string in the retry both helped
+       * and neither stopped it.
+       *
+       * `restoreCents` only ever replaces a bare dollar figure with the one
+       * catalog price that shares its whole-dollar part, so the text it
+       * produces came from the catalog by construction. Validation then runs
+       * on the REPAIRED text, unchanged and just as strict: anything it could
+       * not repair still fails, and the shopper still never sees a price that
+       * is not real.
+       */
+      const restored = restoreCents(parsed.reply, collectMoneyFromResult(toolResults.map((r) => r.result)));
+      if (restored.repaired.length > 0) {
+        parsed = { ...parsed, reply: restored.reply };
+        emit({ type: 'price_repaired', detail: restored.repaired.join(', ') });
       }
 
       // The shopper's own words go in: a budget they named ("under $700") is
