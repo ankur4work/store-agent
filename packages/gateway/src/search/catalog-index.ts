@@ -149,7 +149,19 @@ export class CatalogIndex {
         rows.map((r, i) => ({ ...r, vector: vectors[i]! })),
       );
       this.deps.log?.info('catalog_indexed', { shop, products: rows.length });
-    })().finally(() => this.building.delete(shop));
+    })()
+      .catch((err: unknown) => {
+        // Never silently. A background build that fails leaves search
+        // permanently on keywords, looking exactly like a feature that was
+        // never switched on — which is precisely how this one first shipped
+        // doing nothing at all.
+        this.deps.log?.warn('catalog_index_failed', {
+          shop,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      })
+      .finally(() => this.building.delete(shop));
 
     this.building.set(shop, task);
     return task;

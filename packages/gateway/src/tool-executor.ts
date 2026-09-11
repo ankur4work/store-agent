@@ -24,6 +24,7 @@ export interface ToolExecutorDeps {
   readonly onCartChange?: (cartId: string) => void;
   /** Absent until embeddings are configured; search then stays keyword-only. */
   readonly catalogIndex?: CatalogIndex;
+  readonly log?: { warn(event: string, fields?: Record<string, unknown>): void };
 }
 
 /**
@@ -189,7 +190,15 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
         pagination: { limit: 250 },
       })) as unknown as { products?: readonly unknown[] };
       await index.build(session.shopDomain, full.products ?? []);
-    })().catch(() => undefined);
+    })().catch((err: unknown) => {
+      // Swallowed so a shopper's turn is never affected, but reported —
+      // CatalogIndex logs the reason, and this covers the catalog fetch
+      // that happens before it.
+      deps.log?.warn('catalog_warm_failed', {
+        shop: session.shopDomain,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   async function semanticSearch(

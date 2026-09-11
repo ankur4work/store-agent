@@ -1028,6 +1028,7 @@ export function createGateway(deps: GatewayDeps): Server {
       session,
       ucp,
       ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
+      log,
       onCartChange: (cartId) => {
         send('cart', { cartId });
         // The second join path: order → cart → session, for the exposed arm.
