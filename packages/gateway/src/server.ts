@@ -821,7 +821,15 @@ export function createGateway(deps: GatewayDeps): Server {
     json(res, 404, { error: 'not_found' });
   }
 
-  const voiceConfig = { apiKey: config.openaiApiKey, ...DEFAULT_VOICE };
+  // VOICE_LANGUAGE overrides the storefront language for transcription; the
+  // empty string restores auto-detection for a genuinely multilingual store.
+  const voiceConfig = {
+    apiKey: config.openaiApiKey,
+    ...DEFAULT_VOICE,
+    ...(process.env['VOICE_LANGUAGE'] === undefined
+      ? {}
+      : { language: process.env['VOICE_LANGUAGE'] }),
+  };
 
   async function handleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {

@@ -26,6 +26,20 @@ export interface VoiceConfig {
   readonly sttModel: string;
   readonly ttsModel: string;
   readonly voice: string;
+  /**
+   * ISO-639-1 code for the storefront's language.
+   *
+   * Left unset, transcription auto-detects — and it detects from a few
+   * hundred milliseconds of a shopper in a room with background noise, which
+   * it gets wrong. A spoken English question came back transcribed in Urdu
+   * script; the model then answered in Urdu, correctly, to a shopper who had
+   * spoken English.
+   *
+   * A storefront has one language and we know it, so there is nothing to
+   * detect. Auto-detection is only the right default for an app that serves
+   * every language at once, which a single merchant's store is not.
+   */
+  readonly language?: string;
 }
 
 export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
@@ -33,6 +47,9 @@ export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
   sttModel: 'gpt-4o-transcribe',
   ttsModel: 'gpt-4o-mini-tts',
   voice: 'alloy',
+  // Overridden per deployment by VOICE_LANGUAGE. A default of "detect" is
+  // what produced an English question transcribed into Urdu script.
+  language: 'en',
 };
 
 export class VoiceError extends Error {
@@ -75,6 +92,9 @@ export async function transcribe(
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(audio)], { type }), `turn.${extensionFor(type)}`);
     form.append('model', cfg.sttModel);
+    // Tell it the language rather than letting it guess from a noisy second
+    // of audio. See VoiceConfig.language.
+    if (cfg.language !== undefined && cfg.language !== '') form.append('language', cfg.language);
     // Bias transcription toward how shoppers actually speak to a store assistant.
     form.append('prompt', 'Shopping questions about products, sizes, prices, shipping and returns.');
     return doFetch('https://api.openai.com/v1/audio/transcriptions', {

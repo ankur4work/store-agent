@@ -56,6 +56,36 @@ describe('transcription upload', () => {
     expect(uploads).toHaveLength(2);
   });
 
+  /**
+   * Auto-detection reads the language off a second of a shopper in a noisy
+   * room and gets it wrong: a spoken English question came back transcribed
+   * in Urdu script, and the model then answered in Urdu — correctly, to
+   * someone who had spoken English. A storefront has one language and we
+   * know it, so there is nothing to detect.
+   */
+  it('tells transcription the language instead of letting it guess', async () => {
+    const langs: (string | null)[] = [];
+    const doFetch = (async (_u: unknown, init: { body: FormData }) => {
+      langs.push(init.body.get('language') as string | null);
+      return new Response(JSON.stringify({ text: 'hello' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await transcribe(Buffer.from('a'), 'audio/webm', { ...CFG, language: 'en' }, doFetch);
+    expect(langs).toEqual(['en']);
+  });
+
+  it('restores auto-detection when the language is cleared', async () => {
+    // An genuinely multilingual storefront sets VOICE_LANGUAGE to empty.
+    const langs: (string | null)[] = [];
+    const doFetch = (async (_u: unknown, init: { body: FormData }) => {
+      langs.push(init.body.get('language') as string | null);
+      return new Response(JSON.stringify({ text: 'hello' }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await transcribe(Buffer.from('a'), 'audio/webm', { ...CFG, language: '' }, doFetch);
+    expect(langs).toEqual([null]);
+  });
+
   it('names the file for its container, not its codec', () => {
     expect(extensionFor('audio/webm')).toBe('webm');
     expect(extensionFor('audio/ogg')).toBe('ogg');
