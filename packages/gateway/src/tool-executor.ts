@@ -162,6 +162,36 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
    * Never blocks the turn: an index that is cold, stale or failing falls
    * straight through to keyword search.
    */
+  /**
+   * Warm the index in the BACKGROUND, on any search.
+   *
+   * Two things this must not do, both learned the hard way.
+   *
+   * It must not block: embedding a catalog took 12.8s against the live
+   * store, and awaiting it put that in front of a shopper who asked one
+   * question. No search result is worth thirteen seconds of a spinner.
+   *
+   * And it must not wait for a keyword MISS to trigger. Building only when
+   * keyword search came back empty meant the index stayed cold through
+   * every successful search — so it was never warm at the moment it was
+   * finally needed, which is exactly the moment the shopper asked for
+   * something the words could not find.
+   *
+   * `build` de-duplicates concurrent callers, so a burst embeds once.
+   */
+  function warmIndex(): void {
+    const index = deps.catalogIndex;
+    if (index === undefined || ucp === undefined) return;
+    if (!index.isStale(session.shopDomain)) return;
+    void (async () => {
+      const full = (await ucp.searchCatalog({
+        query: '',
+        pagination: { limit: 250 },
+      })) as unknown as { products?: readonly unknown[] };
+      await index.build(session.shopDomain, full.products ?? []);
+    })().catch(() => undefined);
+  }
+
   async function semanticSearch(
     query: string,
     limit: number,
@@ -172,29 +202,7 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
     if (index === undefined || query.trim() === '') return undefined;
 
     try {
-      if (index.isStale(shop)) {
-        /**
-         * Build in the BACKGROUND and let this turn fall through.
-         *
-         * Embedding a catalog takes seconds — measured at 12.8s against the
-         * live store — and awaiting it here put that in front of a shopper
-         * who asked one question. No search result is worth thirteen
-         * seconds of a spinner.
-         *
-         * So the first shopper after a deploy silently pays nothing and
-         * gets keyword search, which is what they would have had anyway,
-         * and every shopper after that gets meaning. `build` de-duplicates
-         * concurrent callers, so a burst of traffic still embeds once.
-         */
-        void (async () => {
-          const full = (await ucp!.searchCatalog(
-            { query: '', pagination: { limit: 250 } },
-          )) as unknown as { products?: readonly unknown[] };
-          await index.build(shop, full.products ?? []);
-        })().catch(() => undefined);
-        return undefined;
-      }
-
+      if (index.isStale(shop)) return undefined;
       const hits = await index.search(shop, query, limit);
       if (hits.length === 0) return undefined;
 
@@ -282,6 +290,8 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
           const query = String(input['query'] ?? '');
           const limit = typeof input['limit'] === 'number' ? input['limit'] : 6;
           if (ucp) {
+            // Kick the index along on every search, never on the miss alone.
+            warmIndex();
             // Keyword first: when the shopper names a product it is exact,
             // cheaper, and needs no index. Meaning is the fallback for the
             // descriptions keywords cannot reach.
