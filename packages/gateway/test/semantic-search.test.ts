@@ -104,6 +104,24 @@ describe('vector storage', () => {
     expect(store.all('b.myshopify.com')[0]!.productId).toBe('p2');
   });
 
+  /**
+   * CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
+   * so a column added later reaches no deployed database. Every catalog
+   * search then failed with "no such column: version" and fell back to
+   * keywords — the same mistake as the shops table, repeated in a file
+   * written after that one was fixed.
+   */
+  it('adds a new column to a table an older build already created', () => {
+    const db = openDatabase({ path: ':memory:' });
+    // An index table as an earlier release left it, without `version`.
+    db.exec(`CREATE TABLE catalog_index_meta (
+      shop TEXT PRIMARY KEY, built_at INTEGER NOT NULL, products INTEGER NOT NULL);`);
+
+    const store = new SqliteVectorStore(db);
+    store.replace('a.myshopify.com', [{ productId: 'p1', text: 't', vector: axis(1) }], 1, 2);
+    expect(store.version('a.myshopify.com')).toBe(2);
+  });
+
   it('purges the index with the shop, because it is derived data', () => {
     const store = new SqliteVectorStore(openDatabase({ path: ':memory:' }));
     store.replace('a.myshopify.com', [{ productId: 'p1', text: 't', vector: axis(1) }]);

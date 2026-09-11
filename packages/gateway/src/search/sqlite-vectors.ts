@@ -38,6 +38,29 @@ export class SqliteVectorStore implements VectorStore {
         created_at INTEGER NOT NULL
       );
     `);
+
+    /**
+     * Add columns to a table that already exists.
+     *
+     * `CREATE TABLE IF NOT EXISTS` does nothing to a deployed table, so the
+     * `version` column above reached no database that had already run this
+     * code once — and every catalog search then failed with "no such
+     * column: version", which the executor swallowed into keyword-only
+     * search.
+     *
+     * The same mistake as the shops table earlier, in a file written after
+     * that one was fixed. SQLite has no ADD COLUMN IF NOT EXISTS; the throw
+     * on an existing column IS the check.
+     */
+    for (const [table, column, type] of [
+      ['catalog_index_meta', 'version', 'INTEGER NOT NULL DEFAULT 1'],
+    ] as const) {
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      } catch {
+        // Already present.
+      }
+    }
   }
 
   /** Image descriptions, shared across rebuilds. See search/vision.ts. */
