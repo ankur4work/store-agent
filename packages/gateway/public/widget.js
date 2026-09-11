@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.6';
+  var BUILD = '2026-09-11.7';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -311,17 +311,29 @@ form{display:flex;align-items:flex-end;gap:8px;padding:12px 14px;flex:0 0 auto;
 textarea{flex:1;border:0;background:none;color:inherit;resize:none;outline:none;
   font-size:14.5px;line-height:1.45;padding:11px 13px;max-height:104px;min-height:42px}
 textarea::placeholder{color:var(--muted)}
-.send{width:42px;height:42px;flex:0 0 auto;border:0;border-radius:12px;cursor:pointer;
-  background:var(--accent);color:#fff;display:grid;place-items:center;
-  transition:transform .18s var(--ease),opacity .18s}
+/* Quiet, because the mic beside it is the primary action now. Still a
+   full-size target — demoting it visually must not demote it to the thumb. */
+.send{width:42px;height:42px;flex:0 0 auto;border:1px solid var(--line);border-radius:12px;cursor:pointer;
+  background:var(--paper);color:var(--ink);display:grid;place-items:center;
+  transition:transform .18s var(--ease),opacity .18s,background .18s}
+.send:not(:disabled):hover{background:var(--sunk)}
 .send:disabled{opacity:.32;cursor:default}
 .send:not(:disabled):hover{transform:translateY(-1px) scale(1.03)}
 .send:not(:disabled):active{transform:scale(.94)}
 .send:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.mic{width:42px;height:42px;flex:0 0 auto;border:1px solid var(--line);border-radius:12px;cursor:pointer;
-  background:var(--paper);color:var(--ink);display:grid;place-items:center;position:relative;
+/* ---------- the microphone is the primary input -------------------------
+   It used to be a bordered outline button beside a filled send arrow, so
+   the accent colour said "typing is the real way to use this" and voice
+   read as a secondary affordance. It is the other way round: speaking a
+   question is faster than typing it, and on a phone it is the only
+   comfortable way. The mic is now the filled, larger control and send is
+   the quiet one — the same relationship, reversed. */
+.mic{width:48px;height:48px;flex:0 0 auto;border:0;border-radius:14px;cursor:pointer;
+  background:var(--accent);color:#fff;display:grid;place-items:center;position:relative;
+  box-shadow:0 1px 2px rgba(0,0,0,.10),0 8px 20px -8px color-mix(in srgb,var(--accent) 60%,transparent);
   transition:background .18s,border-color .18s,transform .18s var(--ease),color .18s}
-.mic:hover{background:var(--sunk)}
+.mic:hover{transform:translateY(-1px) scale(1.03)}
+.mic:active{transform:scale(.95)}
 .mic:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .mic[data-state=listening]{background:var(--accent);color:#fff;border-color:var(--accent)}
 .mic[data-state=listening]::after{content:'';position:absolute;inset:-4px;border-radius:14px;
@@ -1042,7 +1054,26 @@ textarea::placeholder{color:var(--muted)}
     if (!SR) return null;
     try {
       var rec = new SR();
-      rec.lang = (SCRIPT && SCRIPT.dataset.lang) || 'en-US';
+      /**
+       * The storefront's language, then the browser's — never a hard-coded
+       * en-US.
+       *
+       * A shopper on a Spanish storefront speaking Spanish got interim text
+       * in English, because the recogniser had been pinned to en-US and
+       * will cheerfully transliterate whatever it hears into the language
+       * it was told to expect. `<html lang>` is what the merchant's theme
+       * declares, which is the best available statement of who the shop is
+       * for; the browser's own language is the fallback.
+       *
+       * The authoritative transcript is unaffected either way — the server
+       * detects the language independently — so a wrong guess here costs
+       * the live caption, not the answer.
+       */
+      rec.lang =
+        (SCRIPT && SCRIPT.dataset.lang) ||
+        document.documentElement.getAttribute('lang') ||
+        navigator.language ||
+        'en-US';
       rec.interimResults = true;
       rec.continuous = true;
       rec.onresult = function (e) {

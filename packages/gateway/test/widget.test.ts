@@ -649,3 +649,31 @@ describe('widget panel footprint', () => {
     expect(card).toContain('flex:0 0 156px');
   });
 });
+
+/**
+ * Speaking a question is faster than typing it, and on a phone it is the
+ * only comfortable way — but the mic was an outline button beside a filled
+ * send arrow, so the accent colour said typing was the real input.
+ */
+describe('voice as the primary input', () => {
+  const mic = () => SRC.slice(SRC.indexOf('.mic{'), SRC.indexOf('.mic:focus-visible'));
+  const send = () => SRC.slice(SRC.indexOf('.send{'), SRC.indexOf('.send:disabled'));
+
+  it('gives the accent colour to the mic, not the send button', () => {
+    expect(mic()).toContain('background:var(--accent)');
+    expect(send()).toContain('background:var(--paper)');
+  });
+
+  it('makes the mic the larger target', () => {
+    expect(mic()).toContain('width:48px');
+    // Demoted visually, but still a full-size target for a thumb.
+    expect(send()).toContain('width:42px');
+  });
+
+  it('takes the interim language from the storefront, never a hard-coded en-US', () => {
+    // A Spanish storefront pinned to en-US gets Spanish speech
+    // transliterated into English captions.
+    expect(SRC).toMatch(/document\.documentElement\.getAttribute\('lang'\)/);
+    expect(SRC).toMatch(/navigator\.language/);
+  });
+});

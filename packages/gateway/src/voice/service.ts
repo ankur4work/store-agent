@@ -103,10 +103,23 @@ export async function transcribe(
    */
   const container = contentType.split(';')[0]!.trim().toLowerCase();
 
+  /**
+   * A short list of nouns, not a sentence, and deliberately so.
+   *
+   * The previous hint was a full English sentence, which did two things
+   * wrong at once. It pulled detection toward English — a decoder told to
+   * expect English prose will transliterate a Spanish shopper into English
+   * rather than transcribe them — and being well-formed prose it was
+   * exactly the kind of text the model echoes back verbatim when the audio
+   * is unintelligible, which is how it ended up in the chat as a shopper's
+   * message.
+   *
+   * Bare nouns still anchor the shopping vocabulary, carry almost no
+   * grammar to pull the language with them, and are short enough that an
+   * echo is both rarer and easier to recognise.
+   */
   const hint =
-    cfg.transcriptionHint ??
-    'Shopping questions about products, sizes, colours, prices, availability, ' +
-      'shipping and returns. Product names may be brand names.';
+    cfg.transcriptionHint ?? 'products, sizes, colours, prices, availability, shipping, returns';
 
   const upload = async (type: string): Promise<Response> => {
     const form = new FormData();
