@@ -3,6 +3,7 @@ import type { ToolExecutor } from '@storeagent/orchestrator';
 import { DEMO_POLICIES, searchDemoCatalog } from './catalog-fixture.js';
 import { formatMinor } from '@storeagent/grounding';
 import type { Session } from './sessions.js';
+import type { CatalogIndex } from './search/catalog-index.js';
 
 /**
  * Wires the model's tool calls to real systems.
@@ -21,6 +22,8 @@ export interface ToolExecutorDeps {
   readonly session: Session;
   readonly ucp?: UcpClient | undefined;
   readonly onCartChange?: (cartId: string) => void;
+  /** Absent until embeddings are configured; search then stays keyword-only. */
+  readonly catalogIndex?: CatalogIndex;
 }
 
 /**
@@ -147,6 +150,76 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
    * browse as a match. Grounding is unaffected either way, since the products
    * are real catalog rows whichever query produced them.
    */
+  /**
+   * Rank the catalog by MEANING, for the queries keywords cannot reach.
+   *
+   * Tried before the broadening fallbacks, because "open-toe shoes" and "a
+   * black bag with a gold chain" are not thin keyword matches — they are
+   * zero keyword matches, and the fallback would answer them by listing the
+   * shop. Semantic search either finds something genuinely close or returns
+   * nothing, which is a better answer than an arbitrary browse.
+   *
+   * Never blocks the turn: an index that is cold, stale or failing falls
+   * straight through to keyword search.
+   */
+  async function semanticSearch(
+    query: string,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown> | undefined> {
+    const index = deps.catalogIndex;
+    const shop = session.shopDomain;
+    if (index === undefined || query.trim() === '') return undefined;
+
+    try {
+      if (index.isStale(shop)) {
+        // Build from the catalog itself. `read_products` is what makes this
+        // worth doing: the payload carries descriptions, tags, product type
+        // and every variant's option values — the merchant's own words for
+        // colour, cut, material and occasion, which is exactly the
+        // vocabulary a shopper describes and a title search never sees.
+        const full = (await ucp!.searchCatalog(
+          { query: '', pagination: { limit: 250 } },
+          signal,
+        )) as unknown as { products?: readonly unknown[] };
+        await index.build(shop, full.products ?? []);
+      }
+
+      const hits = await index.search(shop, query, limit);
+      if (hits.length === 0) return undefined;
+
+      // Resolve ids back to live catalog rows rather than serving a copy
+      // from the index — prices and availability must never come from a
+      // cache that is up to six hours old.
+      const resolved = await ucp!.lookupCatalogChunked(
+        hits.map((h) => h.productId),
+        undefined,
+        signal,
+      );
+      const products = (resolved as unknown as { products?: readonly unknown[] }).products ?? [];
+      if (products.length === 0) return undefined;
+
+      // Back into relevance order; lookup returns them however it likes.
+      const rank = new Map(hits.map((h, i) => [h.productId, i]));
+      const ordered = [...products].sort(
+        (a, b) =>
+          (rank.get(String((a as { id?: unknown }).id)) ?? 99) -
+          (rank.get(String((b as { id?: unknown }).id)) ?? 99),
+      );
+
+      return {
+        products: ordered,
+        matched_by: 'meaning',
+        note:
+          'Matched on meaning rather than wording, so the shopper\'s words may appear nowhere in ' +
+          'these products. Check each one really answers what they asked before recommending it.',
+      };
+    } catch {
+      // Cold, stale, rate-limited or misconfigured — keyword search still works.
+      return undefined;
+    }
+  }
+
   async function searchBroadening(
     query: string,
     limit: number,
@@ -198,7 +271,18 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
         case 'search_catalog': {
           const query = String(input['query'] ?? '');
           const limit = typeof input['limit'] === 'number' ? input['limit'] : 6;
-          if (ucp) return withDisplayPrices(await searchBroadening(query, limit, signal));
+          if (ucp) {
+            // Keyword first: when the shopper names a product it is exact,
+            // cheaper, and needs no index. Meaning is the fallback for the
+            // descriptions keywords cannot reach.
+            const direct = (await ucp.searchCatalog({ query, pagination: { limit } }, signal)) as unknown as {
+              products?: readonly unknown[];
+            };
+            if ((direct.products?.length ?? 0) > 0) return withDisplayPrices(direct);
+            const bymeaning = await semanticSearch(query, limit, signal);
+            if (bymeaning !== undefined) return withDisplayPrices(bymeaning);
+            return withDisplayPrices(await searchBroadening(query, limit, signal));
+          }
           return withDisplayPrices(searchDemoCatalog(query, limit));
         }
 

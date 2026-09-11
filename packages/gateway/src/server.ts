@@ -46,6 +46,7 @@ import {
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
+import type { CatalogIndex } from './search/catalog-index.js';
 import { BillingApiError } from './billing/shopify-billing.js';
 import {
   MemorySettingsStore,
@@ -96,6 +97,8 @@ export interface GatewayDeps {
   readonly billing?: BillingService;
   readonly telemetry?: Telemetry;
   readonly logger?: Logger;
+  /** Semantic catalog search. Absent leaves search keyword-only. */
+  readonly catalogIndex?: CatalogIndex;
 }
 
 export function createGateway(deps: GatewayDeps): Server {
@@ -1024,6 +1027,7 @@ export function createGateway(deps: GatewayDeps): Server {
     const executor = createToolExecutor({
       session,
       ucp,
+      ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
       onCartChange: (cartId) => {
         send('cart', { cartId });
         // The second join path: order → cart → session, for the exposed arm.

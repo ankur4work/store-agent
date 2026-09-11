@@ -11,6 +11,8 @@ import { BillingService } from './billing/service.js';
 import { Telemetry } from './observability/telemetry.js';
 import { createLogger } from './observability/logger.js';
 import { freshShop } from './shopify/token-lifecycle.js';
+import { CatalogIndex } from './search/catalog-index.js';
+import { SqliteVectorStore } from './search/sqlite-vectors.js';
 
 // From packages/gateway/dist/src/main.js up to the repo root.
 const envPath = fileURLToPath(new URL('../../../../.env', import.meta.url));
@@ -69,7 +71,22 @@ const billing =
         },
       });
 
+/**
+ * Semantic catalog search.
+ *
+ * Built lazily on the first search and refreshed on a TTL, so a deployment
+ * that never sees a shopper never pays to embed anything. Vectors live in
+ * the same SQLite file as everything else — see CatalogIndex for why an ANN
+ * index is the wrong first step at a Shopify catalog's size.
+ */
+const catalogIndex = new CatalogIndex({
+  store: new SqliteVectorStore(db),
+  embedding: { apiKey: config.openaiApiKey },
+  log: logger,
+});
+
 const server = createGateway({
+  catalogIndex,
   config,
   telemetry,
   logger,
