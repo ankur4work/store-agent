@@ -174,6 +174,16 @@ export function carryForward(
   return query;
 }
 
+/**
+ * When each shop last had its index rebuilt by a search miss.
+ *
+ * Module scope deliberately: a tool executor is built per turn, so a counter
+ * held inside one would reset on every message and the cooldown it exists to
+ * enforce would never once fire.
+ */
+const lastForcedBuild = new Map<string, number>();
+const FORCE_REBUILD_COOLDOWN_MS = 10 * 60 * 1000;
+
 export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   const { session, ucp } = deps;
   const safeCart = ucp ? new SafeCart(ucp) : undefined;
@@ -227,13 +237,7 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
     const index = deps.catalogIndex;
     if (index === undefined || ucp === undefined) return;
     if (!index.isStale(session.shopDomain)) return;
-    void (async () => {
-      const full = (await ucp.searchCatalog({
-        query: '',
-        pagination: { limit: 250 },
-      })) as unknown as { products?: readonly unknown[] };
-      await index.build(session.shopDomain, full.products ?? []);
-    })().catch((err: unknown) => {
+    void rebuildIndex().catch((err: unknown) => {
       // Swallowed so a shopper's turn is never affected, but reported —
       // CatalogIndex logs the reason, and this covers the catalog fetch
       // that happens before it.
@@ -242,6 +246,53 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
         err: err instanceof Error ? err.message : String(err),
       });
     });
+  }
+
+  async function rebuildIndex(): Promise<void> {
+    const full = (await ucp!.searchCatalog({
+      query: '',
+      pagination: { limit: 250 },
+    })) as unknown as { products?: readonly unknown[] };
+    await deps.catalogIndex!.build(session.shopDomain, full.products ?? []);
+  }
+
+  /**
+   * A semantic miss might mean the index has never seen the product.
+   *
+   * The index rebuilds on a six-hour TTL, so a product added after the last
+   * build is invisible to meaning-based search until that elapses — while
+   * keyword search finds it immediately, because that goes straight to the
+   * live catalog. The result is a store that answers "can you show me some
+   * shoes" with four pairs of shoes and then, one question later, "I
+   * couldn't find any open-toe shoes in the catalog — this store may not
+   * carry footwear." Both answers from the same catalog, seconds apart.
+   *
+   * A merchant who adds a product and immediately asks about it is the
+   * normal case, not an edge one, and "wait six hours" is not an answer. So
+   * a miss triggers one rebuild and one retry: if the product was simply
+   * missing from the index, the retry finds it.
+   *
+   * Rate-limited, because a genuine miss ("do you sell cars") must not
+   * re-embed the catalog on every turn. One rebuild per window at worst.
+   */
+  async function refreshedAfterMiss(): Promise<boolean> {
+    const index = deps.catalogIndex;
+    if (index === undefined || ucp === undefined) return false;
+    const now = Date.now();
+    const shop = session.shopDomain;
+    if (now - (lastForcedBuild.get(shop) ?? 0) < FORCE_REBUILD_COOLDOWN_MS) return false;
+    lastForcedBuild.set(shop, now);
+    try {
+      await rebuildIndex();
+      deps.log?.warn('catalog_index_rebuilt_on_miss', { shop: session.shopDomain });
+      return true;
+    } catch (err: unknown) {
+      deps.log?.warn('catalog_warm_failed', {
+        shop: session.shopDomain,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
   }
 
   async function semanticSearch(
@@ -359,6 +410,13 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
             if ((direct.products?.length ?? 0) > 0) return withDisplayPrices(direct);
             const bymeaning = await semanticSearch(query, limit, signal);
             if (bymeaning !== undefined) return withDisplayPrices(bymeaning);
+            // Nothing by wording, nothing by meaning. Before telling the
+            // shopper the store does not stock it, make sure the index has
+            // actually seen the catalog as it is now.
+            if (await refreshedAfterMiss()) {
+              const retry = await semanticSearch(query, limit, signal);
+              if (retry !== undefined) return withDisplayPrices(retry);
+            }
             return withDisplayPrices(await searchBroadening(query, limit, signal));
           }
           return withDisplayPrices(searchDemoCatalog(query, limit));
