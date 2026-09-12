@@ -354,3 +354,28 @@ describe('falling back to an acoustic model', () => {
     expect(out).toBe('');
   });
 });
+
+/**
+ * The UCP endpoint bills on a complexity budget, not a request count, and a
+ * rebuild — 250 products in one call — is the most expensive thing we do.
+ *
+ * A rebuild is triggered by a search finding nothing, and a rate-limited
+ * search finds nothing. So the recovery fed the failure: 429, rebuild, more
+ * budget spent, more 429. Every turn ended in "the product catalog isn't
+ * available right now" and turns crept past twenty seconds.
+ */
+describe('standing down while the storefront is refusing us', () => {
+  it('treats a rate limit or server error as a refusal', async () => {
+    const { noteCatalogRefusal } = await import('../src/tool-executor.js');
+    expect(noteCatalogRefusal('a.myshopify.com', new Error('UCP search_catalog → HTTP 429'))).toBe(true);
+    expect(noteCatalogRefusal('a.myshopify.com', new Error('UCP search_catalog → HTTP 503'))).toBe(true);
+  });
+
+  it('does not stand down for an ordinary miss', async () => {
+    // A 404 on one product says nothing about the budget, and refusing to
+    // index because of it would be its own outage.
+    const { noteCatalogRefusal } = await import('../src/tool-executor.js');
+    expect(noteCatalogRefusal('b.myshopify.com', new Error('UCP get_product → HTTP 404'))).toBe(false);
+    expect(noteCatalogRefusal('b.myshopify.com', new Error('socket hang up'))).toBe(false);
+  });
+});

@@ -182,7 +182,37 @@ export function carryForward(
  * enforce would never once fire.
  */
 const lastForcedBuild = new Map<string, number>();
-const FORCE_REBUILD_COOLDOWN_MS = 10 * 60 * 1000;
+const FORCE_REBUILD_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * When the storefront last refused us, per shop.
+ *
+ * The UCP endpoint bills on a complexity budget, not a request count, and a
+ * rebuild is the most expensive thing we do — 250 products in one call. A
+ * rebuild is also triggered by a search finding nothing, and a rate-limited
+ * search finds nothing. So the recovery fed the failure: 429, rebuild, more
+ * budget spent, more 429, and every turn ending in "the product catalog
+ * isn't available right now" while turns crept to twenty seconds.
+ *
+ * While the storefront is refusing us, the one thing not to do is spend
+ * more of the budget on speculative work.
+ */
+const lastRefusal = new Map<string, number>();
+const REFUSAL_QUIET_MS = 5 * 60 * 1000;
+
+/** Note that the storefront refused us, so speculative work stands down. */
+export function noteCatalogRefusal(shop: string, err: unknown, now = Date.now()): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  // Rate limit or upstream failure. A 404 on one product is not a reason to
+  // stop indexing.
+  if (!/HTTP (?:429|5\d\d)/.test(msg)) return false;
+  lastRefusal.set(shop, now);
+  return true;
+}
+
+function recentlyRefused(shop: string, now = Date.now()): boolean {
+  return now - (lastRefusal.get(shop) ?? 0) < REFUSAL_QUIET_MS;
+}
 
 export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   const { session, ucp } = deps;
@@ -236,6 +266,7 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   function warmIndex(): void {
     const index = deps.catalogIndex;
     if (index === undefined || ucp === undefined) return;
+    if (recentlyRefused(session.shopDomain)) return;
     if (!index.isStale(session.shopDomain)) return;
     void rebuildIndex().catch((err: unknown) => {
       // Swallowed so a shopper's turn is never affected, but reported —
@@ -251,7 +282,10 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   async function rebuildIndex(): Promise<void> {
     const full = (await ucp!.searchCatalog({
       query: '',
-      pagination: { limit: 250 },
+      // 250 in one call is the single most expensive request we make against
+      // a complexity-budgeted endpoint. A catalog larger than this was always
+      // going to be truncated anyway; taking less of the budget matters more.
+      pagination: { limit: 100 },
     })) as unknown as { products?: readonly unknown[] };
     await deps.catalogIndex!.build(session.shopDomain, full.products ?? []);
   }
@@ -280,6 +314,9 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
     if (index === undefined || ucp === undefined) return false;
     const now = Date.now();
     const shop = session.shopDomain;
+    // A miss during a rate limit says nothing about the index, and paying
+    // to rebuild it is what turned one 429 into every turn failing.
+    if (recentlyRefused(shop, now)) return false;
     if (now - (lastForcedBuild.get(shop) ?? 0) < FORCE_REBUILD_COOLDOWN_MS) return false;
     lastForcedBuild.set(shop, now);
     try {
@@ -404,9 +441,23 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
             // Keyword first: when the shopper names a product it is exact,
             // cheaper, and needs no index. Meaning is the fallback for the
             // descriptions keywords cannot reach.
-            const direct = (await ucp.searchCatalog({ query, pagination: { limit } }, signal)) as unknown as {
-              products?: readonly unknown[];
-            };
+            let direct: { products?: readonly unknown[] };
+            try {
+              direct = (await ucp.searchCatalog({ query, pagination: { limit } }, signal)) as unknown as {
+                products?: readonly unknown[];
+              };
+            } catch (err: unknown) {
+              // A refusal has to be recorded before it propagates, or the
+              // next turn cheerfully spends more of the budget that just ran
+              // out — which is how one rate limit became every turn failing.
+              if (noteCatalogRefusal(session.shopDomain, err)) {
+                deps.log?.warn('catalog_refused', {
+                  shop: session.shopDomain,
+                  err: err instanceof Error ? err.message : String(err),
+                });
+              }
+              throw err;
+            }
             if ((direct.products?.length ?? 0) > 0) return withDisplayPrices(direct);
             const bymeaning = await semanticSearch(query, limit, signal);
             if (bymeaning !== undefined) return withDisplayPrices(bymeaning);
