@@ -180,4 +180,24 @@ describe('brevity', () => {
     // A rule with no reason gets argued away by the next instruction.
     expect(prefix).toContain('cannot skim speech');
   });
+
+  it('shows no worked example with prices in it', () => {
+    /**
+     * The first version of this section carried an example list built from
+     * four of the merchant's real products at their real prices. The model
+     * quoted the example instead of the tool result, the tripwire retracted
+     * the answer twice, and the turn escalated to a human — on a catalog
+     * that had answered correctly minutes earlier.
+     *
+     * Scoped to this section rather than the whole prefix: money elsewhere
+     * is legitimate. The grounding rules must show what a `display` field
+     * looks like, and the merchant's own policy summary quotes a free
+     * shipping threshold. What cannot appear is a model answer with prices
+     * in it, because that is a template, and templates get filled in.
+     */
+    const start = prefix.indexOf('## Be brief');
+    const section = prefix.slice(start, prefix.indexOf('\n## ', start + 5));
+    expect(start).toBeGreaterThan(-1);
+    expect(section).not.toMatch(/[$£€₹]\s?\d/);
+  });
 });

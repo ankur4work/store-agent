@@ -1331,6 +1331,24 @@ export function createGateway(deps: GatewayDeps): Server {
         attempts: result.attempts,
         ttftMs: firstDeltaAt === undefined ? null : firstDeltaAt - startedTurnAt,
         ms: Date.now() - startedTurnAt,
+        /**
+         * WHY grounding failed, not just that it did.
+         *
+         * `grounded:false, escalated:true, attempts:2` with no tool error
+         * says the tripwire fired twice and tells you nothing about what it
+         * caught — and the cause turned out to be prices copied out of an
+         * example in the system prompt rather than read from a tool result.
+         * That took a code read to find and a violation code would have
+         * named it. Codes only: the retracted text is the shopper's answer
+         * and never goes in a log.
+         */
+        ...(result.events.some((e) => e.type === 'grounding_retry')
+          ? {
+              violations: result.events
+                .filter((e) => e.type === 'grounding_retry')
+                .map((e) => e.detail),
+            }
+          : {}),
         // A tool that threw is worth a line whether or not grounding failed:
         // the shopper is being told something is broken, and until now that
         // sentence was the only record of it anywhere.
