@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { looksFabricated, mismatchesLanguage } from '../src/voice/service.js';
 import { carryForward } from '../src/tool-executor.js';
 
@@ -288,5 +288,69 @@ describe('webhooks registered under the admin path', () => {
     expect(await post('/admin/shopify/webhooks')).toBe(401);
 
     await new Promise<void>((r) => server.close(() => r()));
+  });
+});
+
+/**
+ * gpt-4o-transcribe is a language model doing transcription, and handed
+ * audio it cannot decode it does not fall silent — it writes a fluent
+ * sentence in whatever language it lands on. whisper-1 is acoustic: told
+ * the language, it transcribes it or returns nothing.
+ */
+describe('falling back to an acoustic model', () => {
+  const audio = Buffer.from('fake audio bytes');
+  const cfg = {
+    apiKey: 'sk-test',
+    sttModel: 'gpt-4o-transcribe',
+    fallbackSttModel: 'whisper-1',
+    ttsModel: 't',
+    voice: 'alloy',
+    language: 'en',
+  };
+
+  const replies = (...texts: string[]): typeof globalThis.fetch => {
+    let n = 0;
+    return (async (_url: unknown, init: unknown) => {
+      const form = (init as { body: FormData }).body;
+      models.push(String(form.get('model')));
+      const text = texts[n++] ?? '';
+      return new Response(JSON.stringify({ text }), { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+  };
+  let models: string[] = [];
+  beforeEach(() => {
+    models = [];
+  });
+
+  it('retries on the acoustic model when the primary invents a language', async () => {
+    const { transcribe } = await import('../src/voice/service.js');
+    const out = await transcribe(
+      audio,
+      'audio/wav',
+      cfg,
+      replies('Konuşmamı da bırakmam.', 'show me white sneakers'),
+    );
+    expect(out).toBe('show me white sneakers');
+    expect(models).toEqual(['gpt-4o-transcribe', 'whisper-1']);
+  });
+
+  it('retries when the primary hears nothing', async () => {
+    const { transcribe } = await import('../src/voice/service.js');
+    const out = await transcribe(audio, 'audio/wav', cfg, replies('', 'do you have these in black'));
+    expect(out).toBe('do you have these in black');
+  });
+
+  it('does not retry when the primary was fine', async () => {
+    const { transcribe } = await import('../src/voice/service.js');
+    const out = await transcribe(audio, 'audio/wav', cfg, replies('show me some shoes'));
+    expect(out).toBe('show me some shoes');
+    expect(models).toEqual(['gpt-4o-transcribe']);
+  });
+
+  it('discards a fallback that is also in the wrong language', async () => {
+    // Being the second opinion does not make it right.
+    const { transcribe } = await import('../src/voice/service.js');
+    const out = await transcribe(audio, 'audio/wav', cfg, replies('Kaņepju piens.', 'Покажите обувь'));
+    expect(out).toBe('');
   });
 });

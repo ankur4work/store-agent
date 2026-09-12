@@ -45,6 +45,22 @@ export interface VoiceConfig {
    * without pinning its language — see the `prompt` field below.
    */
   readonly transcriptionHint?: string;
+  /**
+   * Pure-ASR model tried when the primary invents instead of transcribing.
+   *
+   * `gpt-4o-transcribe` is a language model doing transcription, and it
+   * behaves like one: handed audio it cannot decode it does not fall
+   * silent, it writes a fluent sentence in whatever language it lands on.
+   * One English question produced Urdu, Turkish, Latvian and Russian on
+   * four consecutive attempts. `whisper-1` is an acoustic model with no
+   * such instinct — given `language` it either transcribes or returns
+   * nothing.
+   *
+   * Kept as a fallback rather than the default: the primary is better on
+   * accented speech and shop vocabulary when the audio is good, and this
+   * only costs a second request on turns that already failed.
+   */
+  readonly fallbackSttModel?: string;
   /** Reports decisions a caller cannot otherwise see. See voice_prompt_echo. */
   readonly log?: { warn(event: string, fields?: Record<string, unknown>): void };
 }
@@ -52,6 +68,8 @@ export interface VoiceConfig {
 export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
   // Verified present in GET /v1/models on 2026-09-02.
   sttModel: 'gpt-4o-transcribe',
+  // Verified present in GET /v1/models on 2026-09-12.
+  fallbackSttModel: 'whisper-1',
   ttsModel: 'gpt-4o-mini-tts',
   voice: 'alloy',
   /**
@@ -141,10 +159,10 @@ export async function transcribe(
    */
   const hint = cfg.transcriptionHint ?? '';
 
-  const upload = async (type: string): Promise<Response> => {
+  const upload = async (type: string, model: string = cfg.sttModel): Promise<Response> => {
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(audio)], { type }), `turn.${extensionFor(type)}`);
-    form.append('model', cfg.sttModel);
+    form.append('model', model);
     // Tell it the language rather than letting it guess from a noisy second
     // of audio. See VoiceConfig.language.
     if (cfg.language !== undefined && cfg.language !== '') form.append('language', cfg.language);
@@ -248,8 +266,9 @@ export async function transcribe(
       got: dominantScript(text),
       words: text.split(/\s+/).length,
     });
-    return '';
+    return retryWithAcousticModel(audio, container, cfg, doFetch, upload);
   }
+  if (text === '') return retryWithAcousticModel(audio, container, cfg, doFetch, upload);
   return text;
 }
 
@@ -356,6 +375,58 @@ export function mismatchesLanguage(text: string, language?: string): boolean {
     return foreign / letters.length > 0.05;
   }
   return false;
+}
+
+/**
+ * Second attempt on a model that does not make things up.
+ *
+ * Reached only when the primary returned nothing usable — either an empty
+ * transcript or a confident sentence in a language the shopper did not ask
+ * for. Both mean the same thing: the audio did not decode into what the
+ * primary expected, and being a language model, it wrote something anyway.
+ *
+ * whisper-1 is acoustic. Told the language, it transcribes that language
+ * or returns nothing, which is the behaviour a shopper needs — being asked
+ * to repeat yourself is recoverable, being answered in Latvian is not.
+ *
+ * The result is held to the same standard: a fallback that also comes back
+ * in the wrong language is discarded too, rather than trusted for having
+ * been the second opinion.
+ */
+async function retryWithAcousticModel(
+  audio: Buffer,
+  container: string,
+  cfg: VoiceConfig,
+  doFetch: typeof globalThis.fetch,
+  upload: (type: string, model: string) => Promise<Response>,
+): Promise<string> {
+  const fallback = cfg.fallbackSttModel;
+  if (fallback === undefined || fallback === '' || fallback === cfg.sttModel) return '';
+
+  try {
+    const res = await upload(container, fallback);
+    if (!res.ok) {
+      cfg.log?.warn('voice_fallback_failed', { model: fallback, status: res.status });
+      return '';
+    }
+    const body = (await res.json()) as { text?: unknown };
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (text === '' || mismatchesLanguage(text, cfg.language)) {
+      cfg.log?.warn('voice_fallback_unusable', {
+        model: fallback,
+        got: text === '' ? 'empty' : dominantScript(text),
+      });
+      return '';
+    }
+    cfg.log?.warn('voice_fallback_rescued', { model: fallback, words: text.split(/\s+/).length });
+    return text;
+  } catch (err: unknown) {
+    cfg.log?.warn('voice_fallback_failed', {
+      model: fallback,
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    return '';
+  }
 }
 
 /** Container extensions the transcription endpoint accepts. */
