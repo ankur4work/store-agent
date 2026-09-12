@@ -45,6 +45,8 @@ export interface VoiceConfig {
    * without pinning its language — see the `prompt` field below.
    */
   readonly transcriptionHint?: string;
+  /** Reports decisions a caller cannot otherwise see. See voice_prompt_echo. */
+  readonly log?: { warn(event: string, fields?: Record<string, unknown>): void };
 }
 
 export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
@@ -185,6 +187,12 @@ export async function transcribe(
   }
   const body = (await res.json()) as { text?: unknown };
   const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (text === '') {
+    // Upstream heard nothing in audio the browser thought was speech. A
+    // distinct event from the echo filter below, because the fixes are
+    // opposite: one is a recording problem, the other is ours.
+    cfg.log?.warn('voice_upstream_empty', { bytes: audio.length, container });
+  }
 
   /**
    * Drop a transcript that is just the prompt read back.
@@ -199,7 +207,16 @@ export async function transcribe(
    * Silence must read as silence. Compared on words rather than exactly,
    * because the echo comes back with different casing and punctuation.
    */
-  return echoesPrompt(text, hint) ? '' : text;
+  if (echoesPrompt(text, hint)) {
+    // Logged, because "the model heard nothing" and "we discarded what it
+    // heard" are the same empty string to every caller — and a filter that
+    // silently eats real speech is indistinguishable from a broken
+    // microphone. Words only: never the transcript, which is shopper
+    // speech.
+    cfg.log?.warn('voice_prompt_echo', { words: text.split(/\s+/).length });
+    return '';
+  }
+  return text;
 }
 
 /** Container extensions the transcription endpoint accepts. */
