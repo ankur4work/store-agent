@@ -161,6 +161,13 @@ describe('answers in a language we did not ask for', () => {
     expect(mismatchesLanguage('Konuşmamı da bırakmam.', 'en')).toBe(true);
   });
 
+  it('rejects a Latin-script language carrying just one diacritic', () => {
+    // Latvian for "hemp milk", invented on an English storefront with
+    // English selected. One accent in twelve letters cleared the old 15%
+    // threshold, so it was answered — in Latvian.
+    expect(mismatchesLanguage('Kaņepju piens.', 'en')).toBe(true);
+  });
+
   it('keeps real English, including the odd borrowed word', () => {
     expect(mismatchesLanguage('can you show me the best one', 'en')).toBe(false);
     expect(mismatchesLanguage('do you have these in black', 'en')).toBe(false);

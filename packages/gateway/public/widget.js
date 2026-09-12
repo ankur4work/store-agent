@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.6';
+  var BUILD = '2026-09-12.7';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1253,6 +1253,21 @@ textarea::placeholder{color:var(--muted)}
    */
   function silenceWindowFor(transcript) {
     var text = (transcript || '').trim();
+    /**
+     * No recogniser means no evidence, so do not cut in.
+     *
+     * The 550ms default assumes we read the transcript and found nothing
+     * conclusive. When the browser has no SpeechRecognition at all there is
+     * no transcript to read, and every utterance silently took the
+     * shortest-but-one window — so an ordinary mid-sentence pause ended the
+     * turn. The diagnostics show it plainly: `interim:false` on every
+     * capture, and one turn endpointed on 426ms of speech.
+     *
+     * A fragment is worse than a wait. Half a sentence is not transcribed
+     * as half a sentence — the decoder fills the gap, and that invention
+     * is where "Kaņepju piens" came from on an English storefront.
+     */
+    if (text === '' && !voice.recognition) return ENDPOINT_HANGING_MS;
     if (text === '') return ENDPOINT_SILENCE_MS;
     var lastWord = (/([a-z']+)[^a-z']*$/i.exec(text) || ['', ''])[1].toLowerCase();
     if (HANGING.indexOf(lastWord) !== -1) return ENDPOINT_HANGING_MS;

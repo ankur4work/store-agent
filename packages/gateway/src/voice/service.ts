@@ -341,8 +341,19 @@ export function mismatchesLanguage(text: string, language?: string): boolean {
   if (language === 'en') {
     const letters = [...text].filter((c) => /\p{L}/u.test(c));
     if (letters.length < 6) return false;
+    /**
+     * 15% was too generous. "Kaņepju piens." — Latvian for hemp milk,
+     * invented on an English storefront with English selected — carries one
+     * diacritic in twelve letters, so it scored 8% and was let through,
+     * answered in Latvian.
+     *
+     * English is written in ASCII. A borrowed "café" inside a real sentence
+     * is a handful of letters among thirty and still passes; a two-word
+     * fragment built around an accented letter is not English, and the
+     * shopper asked for English.
+     */
     const foreign = letters.filter((c) => !/[a-zA-Z]/.test(c)).length;
-    return foreign / letters.length > 0.15;
+    return foreign / letters.length > 0.05;
   }
   return false;
 }
