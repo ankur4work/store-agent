@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-11.9';
+  var BUILD = '2026-09-12.1';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -370,15 +370,42 @@ textarea::placeholder{color:var(--muted)}
    microphone is listening, not reading, and a full-height panel over the
    product they are asking about is the thing they were complaining about.
    It grows to the full conversation the moment there is one. */
-.panel.compact{height:min(212px,calc(100dvh - 132px))}
+/* A SQUARE. Tapping the launcher opens this, already listening.
+   Square because it is not a transcript — it is one object doing one
+   thing, and a wide short bar reads as a document that got cut off. The
+   waveform sits in the middle of it with room on every side, which is what
+   makes the listening state legible from across a desk. */
+.panel.compact{width:320px;height:320px}
 .panel.compact .rail,
 .panel.compact .chips,
 .panel.compact .intro{display:none}
-.panel.compact .log{padding:10px 16px 0}
-.panel.compact .msg{font-size:14px;max-width:100%}
+/* The conversation is centred in the remaining space rather than stacked
+   from the top, so a one-line answer sits in the middle of the square
+   instead of clinging to the header. */
+.panel.compact .scroll{display:flex;flex-direction:column;justify-content:center}
+.panel.compact .log{padding:0 18px;gap:8px}
+.panel.compact .msg{font-size:14px;max-width:100%;text-align:center;
+  background:none;box-shadow:none;padding:2px 0}
+.panel.compact .msg.user{color:var(--muted);font-size:13px;align-self:center}
+.panel.compact .msg.bot{align-self:center}
 /* Only the latest exchange: older turns are what the expanded panel is for. */
 .panel.compact .msg:not(:nth-last-child(-n+2)){display:none}
-.panel.compact .voicebar{padding-top:6px}
+/* The waveform becomes the subject of the square, not a detail beside a
+   label — it is the only thing on screen that is actually moving. */
+.panel.compact .voicebar{flex-direction:column;gap:10px;padding:4px 18px 2px}
+.panel.compact .wave{height:44px;gap:3px}
+.panel.compact .wave i{width:3px}
+.panel.compact .live{text-align:center;font-style:normal;font-size:13px}
+/* Typing is still possible, just not the invitation. */
+.panel.compact form{padding:10px 14px}
+.panel.compact textarea{min-height:38px;font-size:14px}
+
+@media (max-width:480px){
+  /* Still square, still anchored to the thumb, never a full-height sheet —
+     a shopper who tapped a microphone did not ask to lose the page. */
+  .panel.compact{width:min(320px,calc(100vw - 32px));height:min(320px,calc(100vw - 32px));
+    left:auto;right:16px;bottom:16px;border-radius:var(--r)}
+}
 
 .wave{display:flex;align-items:center;gap:2px;height:18px;flex:0 0 auto}
 .wave i{width:2px;height:100%;border-radius:2px;background:var(--accent);opacity:.35;

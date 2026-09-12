@@ -643,8 +643,10 @@ describe('widget panel footprint', () => {
     expect(panel()).toMatch(/height:min\(440px/);
   });
 
-  it('opens smaller still for voice, which is the default', () => {
-    expect(SRC).toMatch(/\.panel\.compact\{height:min\(212px/);
+  it('opens as a square for voice, which is the default', () => {
+    // Square because it is one object doing one thing; a wide short bar
+    // reads as a transcript that got cut off.
+    expect(SRC).toMatch(/\.panel\.compact\{width:320px;height:320px\}/);
   });
 
   it('still fits two product cards side by side', () => {
@@ -707,7 +709,7 @@ describe('launcher opens into listening, not typing', () => {
   });
 
   it('opens small and grows only when there is something to read', () => {
-    expect(SRC).toMatch(/\.panel\.compact\{height:min\(212px/);
+    expect(SRC).toMatch(/\.panel\.compact\{width:320px;height:320px\}/);
     expect(SRC).toMatch(/turnUi\.rail \|\| String\(d\.reply \|\| ''\)\.length > 220\) expand\(\)/);
   });
 });
@@ -737,5 +739,29 @@ describe('widget colour', () => {
 describe('cards never outlive the answer', () => {
   it('clears the rail when the final answer names no product', () => {
     expect(SRC).toMatch(/if \(d\.final && d\.products\.length === 0\) dropRail\(\)/);
+  });
+});
+
+describe('the square voice box', () => {
+  const compact = () => SRC.slice(SRC.indexOf('.panel.compact{'), SRC.indexOf('@media (max-width:480px)'));
+
+  it('is square, not a wide short bar', () => {
+    expect(compact()).toContain('width:320px;height:320px');
+  });
+
+  it('centres the conversation in it rather than stacking from the top', () => {
+    // A one-line answer should sit in the middle of the square, not cling
+    // to the header with dead space beneath it.
+    expect(compact()).toMatch(/\.panel\.compact \.scroll\{[^}]*justify-content:center/);
+  });
+
+  it('makes the waveform the subject, since it is the only thing moving', () => {
+    expect(compact()).toMatch(/\.panel\.compact \.wave\{height:44px/);
+  });
+
+  it('stays a square on a phone instead of becoming a full-height sheet', () => {
+    // A shopper who tapped a microphone did not ask to lose the page.
+    const mobile = SRC.slice(SRC.indexOf('@media (max-width:480px)'));
+    expect(mobile).toMatch(/\.panel\.compact\{width:min\(320px,calc\(100vw - 32px\)\)/);
   });
 });
