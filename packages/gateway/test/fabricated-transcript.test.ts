@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksFabricated } from '../src/voice/service.js';
+import { looksFabricated, mismatchesLanguage } from '../src/voice/service.js';
 import { carryForward } from '../src/tool-executor.js';
 
 /**
@@ -140,5 +140,49 @@ describe('cross-origin headers the widget actually sends', () => {
 
     expect(sent.length).toBeGreaterThan(0);
     for (const h of sent) expect(advertised).toContain(h);
+  });
+});
+
+/**
+ * Both of these reached a shopper. The server log said `header:"en"
+ * using:"en"` for each — we asked for English and the decoder answered in
+ * something else, because `language` is a hint it is free to ignore when
+ * the audio is too quiet to decode.
+ */
+describe('answers in a language we did not ask for', () => {
+  it('rejects a different writing system outright', () => {
+    // "You don't understand?" — nobody said this.
+    expect(mismatchesLanguage('آپ کو سمجھ نہیں؟', 'en')).toBe(true);
+    expect(mismatchesLanguage('मुझे जूते दिखाओ', 'en')).toBe(true);
+    expect(mismatchesLanguage('Покажите мне обувь', 'en')).toBe(true);
+  });
+
+  it('rejects Turkish, which hides in the same script as English', () => {
+    expect(mismatchesLanguage('Konuşmamı da bırakmam.', 'en')).toBe(true);
+  });
+
+  it('keeps real English, including the odd borrowed word', () => {
+    expect(mismatchesLanguage('can you show me the best one', 'en')).toBe(false);
+    expect(mismatchesLanguage('do you have these in black', 'en')).toBe(false);
+    expect(mismatchesLanguage('is the café blend in stock today', 'en')).toBe(false);
+  });
+
+  it('accepts each language in its own script', () => {
+    // The point is not to force English — it is to get what was asked for.
+    expect(mismatchesLanguage('मुझे जूते दिखाओ', 'hi')).toBe(false);
+    expect(mismatchesLanguage('آپ کو سمجھ نہیں؟', 'ur')).toBe(false);
+    expect(mismatchesLanguage('Konuşmamı da bırakmam.', 'tr')).toBe(false);
+    expect(mismatchesLanguage('¿tienen zapatos blancos?', 'es')).toBe(false);
+  });
+
+  it('does nothing when no language was pinned', () => {
+    // Auto-detect has nothing to be measured against.
+    expect(mismatchesLanguage('Konuşmamı da bırakmam.', undefined)).toBe(false);
+    expect(mismatchesLanguage('Konuşmamı da bırakmam.', '')).toBe(false);
+  });
+
+  it('does not guess for a language it has no script for', () => {
+    // A wrong guess here silently eats real speech, so it abstains.
+    expect(mismatchesLanguage('anything at all', 'xx')).toBe(false);
   });
 });

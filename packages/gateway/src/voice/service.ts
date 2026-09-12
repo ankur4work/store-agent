@@ -234,7 +234,117 @@ export async function transcribe(
     cfg.log?.warn('voice_prompt_echo', { words: text.split(/\s+/).length });
     return '';
   }
+
+  /**
+   * Answered in a language we did not ask for — treat as not heard.
+   *
+   * Returning '' puts this on the same path as silence: the widget says it
+   * did not catch that and the shopper tries again. Logged with the script
+   * rather than the text, which is shopper speech even when invented.
+   */
+  if (mismatchesLanguage(text, cfg.language)) {
+    cfg.log?.warn('voice_language_mismatch', {
+      asked: cfg.language ?? null,
+      got: dominantScript(text),
+      words: text.split(/\s+/).length,
+    });
+    return '';
+  }
   return text;
+}
+
+/**
+ * Which writing system each language is actually written in.
+ *
+ * Only the codes a storefront realistically declares. An unlisted code is
+ * not guessed at — the check simply does not run, because a wrong guess
+ * here silently eats real speech.
+ */
+const SCRIPT_FOR_LANGUAGE: Readonly<Record<string, string>> = {
+  en: 'Latin', fr: 'Latin', es: 'Latin', de: 'Latin', it: 'Latin', pt: 'Latin',
+  nl: 'Latin', sv: 'Latin', da: 'Latin', nb: 'Latin', fi: 'Latin', pl: 'Latin',
+  cs: 'Latin', tr: 'Latin', id: 'Latin', ms: 'Latin', vi: 'Latin', ro: 'Latin',
+  hu: 'Latin', hr: 'Latin', sk: 'Latin', lt: 'Latin', lv: 'Latin', et: 'Latin',
+  hi: 'Devanagari', mr: 'Devanagari', ne: 'Devanagari',
+  ur: 'Arabic', ar: 'Arabic', fa: 'Arabic',
+  ru: 'Cyrillic', uk: 'Cyrillic', bg: 'Cyrillic', sr: 'Cyrillic',
+  el: 'Greek', he: 'Hebrew', th: 'Thai', ko: 'Hangul',
+  zh: 'Han', ja: 'Han',
+};
+
+const SCRIPT_PATTERNS: readonly (readonly [string, RegExp])[] = [
+  ['Latin', /\p{Script=Latin}/u],
+  ['Arabic', /\p{Script=Arabic}/u],
+  ['Devanagari', /\p{Script=Devanagari}/u],
+  ['Cyrillic', /\p{Script=Cyrillic}/u],
+  ['Han', /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}/u],
+  ['Hangul', /\p{Script=Hangul}/u],
+  ['Greek', /\p{Script=Greek}/u],
+  ['Hebrew', /\p{Script=Hebrew}/u],
+  ['Thai', /\p{Script=Thai}/u],
+];
+
+/** The writing system most of this text is in, or '' if it has no letters. */
+export function dominantScript(text: string): string {
+  const counts = new Map<string, number>();
+  for (const ch of text) {
+    if (!/\p{L}/u.test(ch)) continue;
+    for (const [name, re] of SCRIPT_PATTERNS) {
+      if (re.test(ch)) {
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+        break;
+      }
+    }
+  }
+  let best = '';
+  let most = 0;
+  for (const [name, n] of counts) {
+    if (n > most) {
+      most = n;
+      best = name;
+    }
+  }
+  return best;
+}
+
+/**
+ * Did the decoder answer in a language we did not ask for?
+ *
+ * We send `language`, and `gpt-4o-transcribe` treats it as a hint rather
+ * than a constraint. On quiet or unclear audio it stops transcribing and
+ * starts inventing, and what it invents lands in an arbitrary language: an
+ * English question on an `en` storefront came back as Urdu once and as
+ * Turkish the next time — "Konuşmamı da bırakmam", which is not a
+ * translation of anything that was said. The server log confirmed
+ * `header:"en" using:"en"` for both.
+ *
+ * We cannot make the model obey. We can refuse to believe an answer that
+ * is obviously not what we asked for, and a shopper repeating themselves
+ * once is far better than the assistant answering a question nobody asked
+ * in a language nobody in the conversation speaks.
+ *
+ * Two checks, because there are two ways to be wrong. A different writing
+ * system is conclusive. Turkish is the harder case — it is Latin script,
+ * like English — so for English alone an unusual density of non-ASCII
+ * letters (ş, ı, ğ) is taken as the same evidence. Ratio, not presence, so
+ * "café" or "naïve" in a real sentence survives.
+ */
+export function mismatchesLanguage(text: string, language?: string): boolean {
+  if (language === undefined || language === '') return false;
+  const expected = SCRIPT_FOR_LANGUAGE[language];
+  if (expected === undefined) return false;
+
+  const actual = dominantScript(text);
+  if (actual === '') return false;
+  if (actual !== expected) return true;
+
+  if (language === 'en') {
+    const letters = [...text].filter((c) => /\p{L}/u.test(c));
+    if (letters.length < 6) return false;
+    const foreign = letters.filter((c) => !/[a-zA-Z]/.test(c)).length;
+    return foreign / letters.length > 0.15;
+  }
+  return false;
 }
 
 /** Container extensions the transcription endpoint accepts. */
