@@ -24,6 +24,25 @@ export interface ShopSettings {
    * fill it. See `recommendedHoldout`.
    */
   holdoutFraction: number;
+  /**
+   * Language the microphone listens in. An ISO-639-1 code, or 'auto'.
+   *
+   * Not derivable from the storefront, which is why it is a setting a
+   * merchant sets rather than something we detect. An Indian store renders
+   * `<html lang="en">` and its shoppers speak Hindi; a Dubai store is
+   * English and its shoppers speak Arabic. Following the page language
+   * would transcribe both as English and return nonsense, confidently.
+   *
+   * Auto-detection is not the answer either: from a second of quiet audio
+   * the decoder guesses, and it guessed Urdu and then Turkish for the same
+   * English sentence on this store. Hindi and Urdu are the same spoken
+   * language in two scripts, so no amount of listening can separate them —
+   * only the merchant knows.
+   *
+   * Defaults to English because a wrong pin is recoverable by the shopper
+   * repeating themselves, while a wrong guess is answered out loud.
+   */
+  voiceLanguage: string;
   updatedAt: number;
 }
 
@@ -34,7 +53,47 @@ export const DEFAULT_SETTINGS: Omit<ShopSettings, 'shop' | 'updatedAt'> = {
   greeting: '',
   enabled: true,
   holdoutFraction: 0.2,
+  voiceLanguage: 'en',
 };
+
+/**
+ * Languages offered in the admin, and the only values accepted.
+ *
+ * A closed list, because the value is sent to the transcription API and a
+ * free-text field is both a validation problem and a support problem. Add
+ * a code here and it appears in the dropdown.
+ */
+export const VOICE_LANGUAGES: readonly (readonly [string, string])[] = [
+  ['en', 'English'],
+  ['hi', 'Hindi'],
+  ['es', 'Spanish'],
+  ['fr', 'French'],
+  ['de', 'German'],
+  ['pt', 'Portuguese'],
+  ['it', 'Italian'],
+  ['nl', 'Dutch'],
+  ['ar', 'Arabic'],
+  ['ur', 'Urdu'],
+  ['bn', 'Bengali'],
+  ['ta', 'Tamil'],
+  ['te', 'Telugu'],
+  ['mr', 'Marathi'],
+  ['gu', 'Gujarati'],
+  ['pa', 'Punjabi'],
+  ['tr', 'Turkish'],
+  ['ru', 'Russian'],
+  ['ja', 'Japanese'],
+  ['ko', 'Korean'],
+  ['zh', 'Chinese'],
+  ['id', 'Indonesian'],
+  ['vi', 'Vietnamese'],
+  ['th', 'Thai'],
+  ['pl', 'Polish'],
+  ['sv', 'Swedish'],
+  // Last on purpose. It is the behaviour that produced Urdu and Turkish
+  // transcripts of an English sentence, so it is a choice, not a default.
+  ['auto', 'Detect automatically'],
+];
 
 export interface SettingsStore {
   get(shop: string): Promise<ShopSettings>;
@@ -95,6 +154,11 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
     errors.push('holdoutFraction must be between 0 and 0.5');
   }
 
+  const voiceLanguage = String(input['voiceLanguage'] ?? DEFAULT_SETTINGS.voiceLanguage).trim();
+  if (!VOICE_LANGUAGES.some(([code]) => code === voiceLanguage)) {
+    errors.push('voiceLanguage must be one of the supported languages');
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   return {
@@ -108,6 +172,7 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
       greeting,
       enabled,
       holdoutFraction,
+      voiceLanguage,
       updatedAt: Date.now(),
     },
   };

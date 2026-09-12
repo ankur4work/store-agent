@@ -1,6 +1,11 @@
 import type { Incrementality } from '@storeagent/attribution';
 import { PLANS, PLAN_ORDER } from '@storeagent/billing';
-import { accentIsAccessible, contrastWithWhite, type ShopSettings } from './settings.js';
+import {
+  accentIsAccessible,
+  contrastWithWhite,
+  VOICE_LANGUAGES,
+  type ShopSettings,
+} from './settings.js';
 
 /**
  * Server-rendered merchant admin.
@@ -532,6 +537,19 @@ function renderHomeSections(vm: AdminViewModel): string {
             <option value="right"${s.position === 'right' ? ' selected' : ''}>Bottom right</option>
             <option value="left"${s.position === 'left' ? ' selected' : ''}>Bottom left</option>
           </select>
+        </div>
+
+        <div class="field">
+          <label for="voiceLanguage">Voice language</label>
+          <select id="voiceLanguage" name="voiceLanguage">
+            ${VOICE_LANGUAGES.map(
+              ([code, label]) =>
+                `<option value="${esc(code)}"${s.voiceLanguage === code ? ' selected' : ''}>${esc(label)}</option>`,
+            ).join('\n            ')}
+          </select>
+          <span class="sub">The language your customers speak out loud. This cannot be read from your
+            storefront — a store selling in English is often serving customers who speak something
+            else. Picking the right one is what stops the microphone guessing wrong.</span>
         </div>
 
         <div class="field">

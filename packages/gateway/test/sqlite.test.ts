@@ -159,7 +159,7 @@ describe('settings', () => {
       position: 'left',
       greeting: 'Hi there',
       enabled: false,
-      holdoutFraction: 0.35,
+      holdoutFraction: 0.35, voiceLanguage: 'en',
       updatedAt: 0,
     });
 

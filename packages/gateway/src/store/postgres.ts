@@ -86,8 +86,11 @@ CREATE TABLE IF NOT EXISTS settings (
   greeting      TEXT NOT NULL,
   enabled       BOOLEAN NOT NULL,
   holdout       DOUBLE PRECISION NOT NULL,
+  voice_language TEXT NOT NULL DEFAULT 'en',
   updated_at    BIGINT NOT NULL
 );
+
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS voice_language TEXT NOT NULL DEFAULT 'en';
 
 CREATE TABLE IF NOT EXISTS sessions (
   id         TEXT PRIMARY KEY,
@@ -257,20 +260,22 @@ export class PgSettingsStore implements SettingsStore {
       greeting: String(row['greeting']),
       enabled: row['enabled'] === true,
       holdoutFraction: num(row['holdout']),
+      voiceLanguage: String(row['voice_language'] ?? DEFAULT_SETTINGS.voiceLanguage),
       updatedAt: num(row['updated_at']),
     };
   }
 
   async put(s: ShopSettings): Promise<void> {
     await this.sql.query(
-      `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (shop) DO UPDATE SET
          accent_color = EXCLUDED.accent_color, corner_radius = EXCLUDED.corner_radius,
          position = EXCLUDED.position, greeting = EXCLUDED.greeting,
          enabled = EXCLUDED.enabled, holdout = EXCLUDED.holdout,
+         voice_language = EXCLUDED.voice_language,
          updated_at = EXCLUDED.updated_at`,
-      [s.shop, s.accentColor, s.cornerRadius, s.position, s.greeting, s.enabled, s.holdoutFraction, Date.now()],
+      [s.shop, s.accentColor, s.cornerRadius, s.position, s.greeting, s.enabled, s.holdoutFraction, s.voiceLanguage, Date.now()],
     );
   }
 }

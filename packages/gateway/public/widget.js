@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.4';
+  var BUILD = '2026-09-12.5';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1460,7 +1460,9 @@ textarea::placeholder{color:var(--muted)}
   async function transcribeAndSend(blob) {
     setVoiceState('thinking');
     try {
-      var r = await fetch(API + '/api/voice/transcribe', {
+      // ?shop= so the gateway can read THIS merchant's voice language. The
+      // same pattern the widget bundle and rate limiter already use.
+      var r = await fetch(API + '/api/voice/transcribe?shop=' + encodeURIComponent(SHOP || ''), {
         method: 'POST',
         // The storefront's own locale, so transcription is told the language
         // instead of guessing it from a second of audio. Shopify renders

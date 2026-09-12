@@ -317,7 +317,7 @@ export function createGateway(deps: GatewayDeps): Server {
 
     // Voice I/O, proxied so the API key never reaches the browser.
     if (url.pathname === '/api/voice/transcribe' && req.method === 'POST') {
-      await handleTranscribe(req, res);
+      await handleTranscribe(url, req, res);
       return;
     }
     if (url.pathname === '/api/voice/speak' && req.method === 'POST') {
@@ -835,30 +835,39 @@ export function createGateway(deps: GatewayDeps): Server {
       : { language: process.env['VOICE_LANGUAGE'] }),
   };
 
-  async function handleTranscribe(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleTranscribe(
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     try {
       const contentType = header(req, 'content-type') ?? 'audio/webm';
       const audio = await readRawBody(req, MAX_AUDIO_BYTES);
-      /**
-       * The storefront tells us its language; we no longer infer it.
-       *
-       * Detection from a second of noisy audio was wrong often enough to put
-       * an English question into Urdu script, and the vocabulary hint that
-       * was propping it up turned out to fabricate whole shopper messages
-       * (see looksFabricated). A Shopify storefront renders `<html lang>`
-       * per locale, so the shopper's own language selection is already on
-       * the page — a fact worth more than a guess.
-       *
-       * VOICE_LANGUAGE still wins: a merchant pinning one language is
-       * overriding both the page and the model on purpose.
-       */
       const pageLang = (header(req, 'x-storefront-lang') ?? '').trim().toLowerCase();
+
+      /**
+       * The merchant's choice wins, then the page, then detection.
+       *
+       * The storefront header was promoted to authority too early. An
+       * Indian store renders `lang="en"` and its customers speak Hindi, so
+       * following the page would transcribe them as English and return
+       * nonsense — and the merchant would have no way to correct it. Only
+       * they know who is actually talking, so `voiceLanguage` is a setting
+       * they own, defaulting to English.
+       *
+       * 'auto' is an explicit opt-in to detection, not the fallback: it is
+       * what produced Urdu and then Turkish for the same English sentence.
+       */
+      const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
+      const chosen = (await settings.get(shop)).voiceLanguage;
+      const resolved =
+        chosen === 'auto' ? '' : chosen !== '' ? chosen : /^[a-z]{2}$/.test(pageLang) ? pageLang : '';
       const cfg = {
         ...voiceConfig,
         log,
-        ...(voiceConfig.language === undefined && /^[a-z]{2}$/.test(pageLang)
-          ? { language: pageLang }
-          : {}),
+        // VOICE_LANGUAGE, if set, still overrides everything — it is the
+        // operator's lever for a single-shop deployment.
+        ...(voiceConfig.language === undefined && resolved !== '' ? { language: resolved } : {}),
       };
       /**
        * What language this turn was decoded as, and where that came from.

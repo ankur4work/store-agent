@@ -186,3 +186,56 @@ describe('answers in a language we did not ask for', () => {
     expect(mismatchesLanguage('anything at all', 'xx')).toBe(false);
   });
 });
+
+/**
+ * The storefront cannot tell us who is talking. An Indian store renders
+ * lang="en" and its customers speak Hindi; following the page would
+ * transcribe them as English and return nonsense, with no way for the
+ * merchant to correct it.
+ */
+describe('the merchant chooses the voice language', () => {
+  it('defaults to English rather than detection', async () => {
+    const { DEFAULT_SETTINGS } = await import('../src/admin/settings.js');
+    // Detection is what produced Urdu and then Turkish for one English
+    // sentence, so it must be a choice, never the default.
+    expect(DEFAULT_SETTINGS.voiceLanguage).toBe('en');
+  });
+
+  it('accepts a supported language and rejects anything else', async () => {
+    const { validateSettings } = await import('../src/admin/settings.js');
+    const base = { accentColor: '#1b3a34', cornerRadius: 16, position: 'right', greeting: '' };
+
+    expect(validateSettings('s.myshopify.com', { ...base, voiceLanguage: 'hi' }).ok).toBe(true);
+    expect(validateSettings('s.myshopify.com', { ...base, voiceLanguage: 'auto' }).ok).toBe(true);
+    expect(validateSettings('s.myshopify.com', { ...base, voiceLanguage: 'klingon' }).ok).toBe(false);
+  });
+
+  it('offers Hindi, and offers detection last', async () => {
+    const { VOICE_LANGUAGES } = await import('../src/admin/settings.js');
+    expect(VOICE_LANGUAGES.some(([c]) => c === 'hi')).toBe(true);
+    expect(VOICE_LANGUAGES[VOICE_LANGUAGES.length - 1]![0]).toBe('auto');
+  });
+
+  it('survives a round trip through SQLite, including the added column', async () => {
+    // CREATE TABLE IF NOT EXISTS does nothing to an existing table, so a new
+    // column only reaches a deployed database through the migration.
+    const { openDatabase, SqliteSettingsStore } = await import('../src/store/sqlite.js');
+    const db = openDatabase({ path: ':memory:' });
+    const store = new SqliteSettingsStore(db);
+    const saved = {
+      shop: 'india.myshopify.com',
+      accentColor: '#1b3a34',
+      cornerRadius: 16,
+      position: 'right' as const,
+      greeting: '',
+      enabled: true,
+      holdoutFraction: 0.2,
+      voiceLanguage: 'hi',
+      updatedAt: Date.now(),
+    };
+    await store.put(saved);
+    expect((await store.get('india.myshopify.com')).voiceLanguage).toBe('hi');
+    // A shop that has never been saved still gets the default.
+    expect((await store.get('new.myshopify.com')).voiceLanguage).toBe('en');
+  });
+});

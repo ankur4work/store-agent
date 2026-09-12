@@ -142,6 +142,9 @@ function migrate(db: DatabaseSync): void {
     ['shops', 'refresh_token', 'TEXT'],
     ['shops', 'expires_at', 'INTEGER'],
     ['shops', 'refresh_token_expires_at', 'INTEGER'],
+    // The microphone's language, chosen by the merchant. Existing rows
+    // default to English, which is what they were effectively getting.
+    ['settings', 'voice_language', "TEXT NOT NULL DEFAULT 'en'"],
   ];
   for (const [table, column, type] of columns) {
     try {
@@ -262,6 +265,8 @@ export class SqliteSettingsStore implements SettingsStore {
       greeting: String(row['greeting']),
       enabled: Number(row['enabled']) === 1,
       holdoutFraction: Number(row['holdout']),
+      // A row written before the column existed reads NULL, not 'en'.
+      voiceLanguage: String(row['voice_language'] ?? DEFAULT_SETTINGS.voiceLanguage),
       updatedAt: Number(row['updated_at']),
     };
   }
@@ -269,12 +274,13 @@ export class SqliteSettingsStore implements SettingsStore {
   async put(s: ShopSettings): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(shop) DO UPDATE SET
            accent_color = excluded.accent_color, corner_radius = excluded.corner_radius,
            position = excluded.position, greeting = excluded.greeting,
            enabled = excluded.enabled, holdout = excluded.holdout,
+           voice_language = excluded.voice_language,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -285,6 +291,7 @@ export class SqliteSettingsStore implements SettingsStore {
         s.greeting,
         s.enabled ? 1 : 0,
         s.holdoutFraction,
+        s.voiceLanguage,
         Date.now(),
       );
   }
