@@ -246,3 +246,47 @@ describe('the merchant chooses the voice language', () => {
     expect((await store.get('new.myshopify.com')).voiceLanguage).toBe('en');
   });
 });
+
+/**
+ * App review failed with "Expected HTTP 401, received HTTP 404" against an
+ * endpoint that had always answered 401 correctly — at its other path.
+ *
+ * A webhook uri in the manifest resolves against the App URL in the Partner
+ * Dashboard, which is /admin because that is what opens the embedded app.
+ * So every subscription was registered to /admin/shopify/webhooks.
+ */
+describe('webhooks registered under the admin path', () => {
+  it('verifies HMAC there too, rather than 404ing', async () => {
+    const { createGateway } = await import('../src/index.js');
+    const { loadConfig } = await import('../src/config.js');
+
+    const config = loadConfig({
+      OPENAI_API_KEY: 'sk-test',
+      SHOPIFY_API_KEY: 'key',
+      SHOPIFY_API_SECRET: 'secret',
+      SHOPIFY_APP_URL: 'https://storeagent.tech',
+      SHOPIFY_SCOPES: 'read_products',
+    });
+    const server = createGateway({ config });
+    await new Promise<void>((r) => server.listen(0, r));
+    const port = (server.address() as { port: number }).port;
+
+    const post = (path: string): Promise<number> =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-shopify-topic': 'shop/redact',
+          'x-shopify-shop-domain': 'test.myshopify.com',
+          'x-shopify-hmac-sha256': 'not-a-valid-digest',
+        },
+        body: '{}',
+      }).then((r) => r.status);
+
+    // Both paths, same verification, same rejection. 404 here is the bug.
+    expect(await post('/shopify/webhooks')).toBe(401);
+    expect(await post('/admin/shopify/webhooks')).toBe(401);
+
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+});

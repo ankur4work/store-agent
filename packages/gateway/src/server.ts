@@ -331,6 +331,33 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
+    /**
+     * `/admin/shopify/...` is the same endpoint, reached the other way.
+     *
+     * A webhook `uri` in the app manifest is resolved against the App URL
+     * held in the Partner Dashboard, and ours is https://storeagent.tech
+     * /admin because that is what opens the embedded app. So Shopify
+     * subscribes every webhook to /admin/shopify/webhooks, hits the admin
+     * router, and gets a 404 — which failed app review's HMAC check with
+     * "Expected HTTP 401, received HTTP 404" against an endpoint that has
+     * always answered 401 correctly at its real path.
+     *
+     * Making the manifest absolute fixes it for a future `shopify app
+     * deploy`, but a subscription already registered keeps the old url,
+     * and Shopify will go on delivering real GDPR webhooks to it. A
+     * compliance webhook that 404s is not a review problem, it is a
+     * deletion request we never received — so the path has to work
+     * whatever it was registered as.
+     *
+     * Rewritten rather than special-cased so it goes through exactly the
+     * same HMAC verification, not a lookalike beside it.
+     */
+    if (url.pathname.startsWith('/admin/shopify/')) {
+      url.pathname = url.pathname.slice('/admin'.length);
+      await handleShopify(url, req, res);
+      return;
+    }
+
     if (url.pathname.startsWith('/shopify/')) {
       await handleShopify(url, req, res);
       return;
