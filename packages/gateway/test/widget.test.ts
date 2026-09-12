@@ -948,3 +948,13 @@ describe('widget speech playback', () => {
     expect(stop.slice(0, 400)).toContain('voice.busy = false;');
   });
 });
+
+describe('widget microphone on page load', () => {
+  it('restores an open panel without switching the microphone on', () => {
+    // open() defaults to voice-first, which is right for a launcher press
+    // and wrong for a reload: the mic turned itself on for anyone who
+    // refreshed or clicked through to another product, with no gesture.
+    expect(SRC).toContain('if (state.open) open({ voice: false })');
+    expect(SRC).not.toMatch(/if \(state\.open\) open\(\);/);
+  });
+});

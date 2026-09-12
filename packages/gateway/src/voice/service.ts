@@ -26,6 +26,8 @@ export interface VoiceConfig {
   readonly sttModel: string;
   readonly ttsModel: string;
   readonly voice: string;
+  /** Playback rate for synthesis, 0.25–4.0. See DEFAULT_VOICE.speed. */
+  readonly speed?: number;
   /**
    * ISO-639-1 code for the storefront's language.
    *
@@ -71,7 +73,21 @@ export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
   // Verified present in GET /v1/models on 2026-09-12.
   fallbackSttModel: 'whisper-1',
   ttsModel: 'gpt-4o-mini-tts',
-  voice: 'alloy',
+  /**
+   * Soft, female, unhurried in tone but not in pace.
+   *
+   * `alloy` is the neutral default and reads flat over a storefront. A
+   * shop assistant's voice should sound like someone who works there and
+   * is glad to help; `shimmer` is the gentlest of the female voices, and
+   * the speed below stops gentle turning into slow.
+   */
+  voice: 'shimmer',
+  /**
+   * Slightly quicker than natural. A shopper is waiting on an answer they
+   * could have read in two seconds, so the default 1.0 feels padded read
+   * aloud — and anything past ~1.2 starts to sound harried.
+   */
+  speed: 1.15,
   /**
    * Unset = detect, which is what a store serving shoppers in several
    * languages needs.
@@ -464,7 +480,10 @@ export async function synthesize(
       // Opus in a webm container: lowest time-to-first-audio of the streaming
       // formats, which is the metric that matters in a conversation.
       response_format: 'opus',
-      instructions: 'Warm, clear, unhurried retail assistant. Natural pace, no salesy lilt.',
+      ...(cfg.speed === undefined ? {} : { speed: cfg.speed }),
+      instructions:
+        'Warm, gentle shop assistant. Friendly and brisk, never breathless. ' +
+        'No salesy lilt, no upward inflection at the end of statements.',
     }),
   });
   if (!res.ok) throw new VoiceError(`speech synthesis failed (${res.status})`, 502);

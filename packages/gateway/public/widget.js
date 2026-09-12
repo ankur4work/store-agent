@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.10';
+  var BUILD = '2026-09-12.11';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -2228,7 +2228,17 @@ textarea::placeholder{color:var(--muted)}
     // indistinguishable.
     say('ready (' + BUILD + ') — launcher mounted bottom-' + (host.getAttribute('data-position') === 'left' ? 'left' : 'right'));
     selfCheck();
-    if (state.open) open();
+    /**
+     * Restoring a panel is not a request to talk.
+     *
+     * open() defaults to voice-first, which is right when a shopper presses
+     * the launcher — and wrong here. This runs on every page load where the
+     * panel was left open, so the microphone switched itself on for anyone
+     * who reloaded or clicked through to another product, with no gesture
+     * behind it. Grabbing a microphone unasked is alarming even when it
+     * works, and browsers increasingly refuse it outright without a gesture.
+     */
+    if (state.open) open({ voice: false });
     else if (!state.messages.length) {
       // A single, quiet invitation after real dwell. Never on load, never twice.
       setTimeout(function () {

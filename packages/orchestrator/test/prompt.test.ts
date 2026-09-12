@@ -153,3 +153,31 @@ describe('recommendations are not escalations', () => {
     expect(prefix).toContain("that product's own attributes");
   });
 });
+
+/**
+ * Answers were arriving as five products with a sentence of copy each, a
+ * colourway, a size range and a closing paragraph. That is a product page
+ * in a chat bubble — and it is also read aloud, where a shopper cannot skim.
+ */
+describe('brevity', () => {
+  const prefix = buildCachedPrefix(MERCHANT)
+    .map((b) => b.text)
+    .join('\n');
+
+  it('caps a direct answer at a sentence or two', () => {
+    expect(prefix).toContain('A direct question gets one or two sentences');
+  });
+
+  it('caps a list at one line per product', () => {
+    expect(prefix).toContain('A list gets one line per product');
+  });
+
+  it('forbids narrating what the cards already show', () => {
+    expect(prefix).toContain('Never describe what the cards already show');
+  });
+
+  it('gives the spoken-length reason, not just the rule', () => {
+    // A rule with no reason gets argued away by the next instruction.
+    expect(prefix).toContain('cannot skim speech');
+  });
+});
