@@ -36,28 +36,40 @@ redirect_urls = [
 [webhooks]
 api_version = "2026-07"
 
+# ABSOLUTE urls, not "/shopify/webhooks".
+#
+# A relative uri is resolved against the App URL held in the Partner
+# Dashboard, not against application_url in this file. With an App URL of
+# https://storeagent.tech/admin — which is what opens the embedded admin —
+# every webhook resolved to /admin/shopify/webhooks, and app review failed
+# its HMAC check with a 404: "Expected HTTP 401, received HTTP 404". The
+# endpoint was correct the whole time and was never reached.
+#
+# An absolute url cannot be re-based, so the two settings can never drift
+# apart again.
+
   # The GDPR three are MANDATORY for app review. An app that does not respond
   # correctly to them is rejected.
   [[webhooks.subscriptions]]
   topics = [ "app/uninstalled" ]
-  uri = "/shopify/webhooks"
+  uri = "https://storeagent.tech/shopify/webhooks"
 
   [[webhooks.subscriptions]]
   compliance_topics = [ "shop/redact", "customers/redact", "customers/data_request" ]
-  uri = "/shopify/webhooks"
+  uri = "https://storeagent.tech/shopify/webhooks"
 
   # Attribution reconciliation (Phase 2) — the server-side source of truth for
   # whether the agent earned a sale.
   [[webhooks.subscriptions]]
   topics = [ "orders/create" ]
-  uri = "/shopify/webhooks"
+  uri = "https://storeagent.tech/shopify/webhooks"
 
   # Billing state. Shopify is the authority on whether a subscription is
   # active, cancelled or frozen; without this our record drifts silently and we
   # keep serving a shop that stopped paying — or keep a paid one blocked.
   [[webhooks.subscriptions]]
   topics = [ "app_subscriptions/update" ]
-  uri = "/shopify/webhooks"
+  uri = "https://storeagent.tech/shopify/webhooks"
 
 [build]
 automatically_update_urls_on_dev = true
