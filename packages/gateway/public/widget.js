@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.7';
+  var BUILD = '2026-09-12.8';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1565,7 +1565,21 @@ textarea::placeholder{color:var(--muted)}
       var d = await r.json();
       var text = (d && d.text ? d.text : '').trim();
       // Nothing heard. Ending the turn says so; restarting silently did not.
-      if (!text) { voiceDiag('transcript_empty'); endVoiceTurn(); return; }
+      if (!text) {
+        /**
+         * Say so. An empty transcript was the one failure with no visible
+         * consequence — the turn simply ended, the panel went back to
+         * Ready, and from the outside that is indistinguishable from the
+         * assistant ignoring you. It is also the most common failure now
+         * that fabricated foreign-language transcripts are rejected
+         * server-side, so it is the message shoppers will see most.
+         */
+        voiceDiag('transcript_empty');
+        if (els.live) els.live.textContent = "I didn't catch that — tap the mic and try again.";
+        if (els.status) els.status.textContent = "Didn't catch that";
+        endVoiceTurn();
+        return;
+      }
       els.live.textContent = text;
       addMsg('user', text);
       state.messages.push({ role: 'user', text: text });

@@ -876,3 +876,14 @@ describe('widget language picker', () => {
     expect(SRC).toContain('CONFIG.voiceLanguages');
   });
 });
+
+describe('widget voice feedback on a failed turn', () => {
+  it('tells the shopper when nothing was understood', () => {
+    // The turn used to just end. From the outside that is identical to the
+    // assistant ignoring you, and it is now the most common failure —
+    // fabricated foreign-language transcripts are rejected server-side and
+    // arrive here as an empty string.
+    expect(SRC).toContain("I didn't catch that — tap the mic and try again.");
+    expect(SRC).toContain("Didn't catch that");
+  });
+});
