@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.3';
+  var BUILD = '2026-09-12.4';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -915,8 +915,14 @@ textarea::placeholder{color:var(--muted)}
     playing: null,
     ctx: null,
     analyser: null,
+    // The analyser's input, and the stream it is wired to. Kept so a new
+    // microphone can be reconnected — a graph left pointing at an ended
+    // track reads silence forever.
+    source: null,
+    wiredTo: null,
     silenceSince: 0,
     spokeMs: 0,
+    peak: 0,
     raf: 0,
   };
 
@@ -1123,11 +1129,31 @@ textarea::placeholder{color:var(--muted)}
        * nothing and removes the entire class at the source, before the
        * request.
        */
-      if (spoke < MIN_SPEECH_MS) {
+      /**
+       * A meter reading nothing at all is a broken meter, not a quiet room.
+       *
+       * Requiring speech before uploading is right, but gating on a signal
+       * without checking the signal exists is how this went from "sometimes
+       * invents a shopper" to "does not work at all": the analyser was wired
+       * to a dead stream, every reading was zero, and so every real sentence
+       * was discarded as silence. A real microphone in a real room produces
+       * a non-zero peak within a frame or two; an exact zero across a whole
+       * capture means the level is not measuring anything.
+       *
+       * So when the meter never moved, trust the recorder instead and send
+       * the audio. The worst case is the fabrication filter earning its keep
+       * server-side. Silently disabling the feature is not on the list.
+       */
+      if (spoke < MIN_SPEECH_MS && (voice.peak || 0) > 0) {
         voiceDiag('discarded_silence', { bytes: blob.size, spokeMs: spoke });
         if (els.live) els.live.textContent = "I didn't catch that — tap to try again.";
         endVoiceTurn();
         return;
+      }
+      if (spoke < MIN_SPEECH_MS) {
+        // Uploading anyway, but say so: this is the level meter failing, and
+        // it is the only place that failure is visible.
+        voiceDiag('level_meter_dead', { bytes: blob.size, peak: voice.peak || 0 });
       }
       if (blob.size > 1200) transcribeAndSend(blob);
       else if (voice.on) startCapture(); // too short to be speech
@@ -1279,7 +1305,34 @@ textarea::placeholder{color:var(--muted)}
       voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
       voice.analyser = voice.ctx.createAnalyser();
       voice.analyser.fftSize = 512;
-      voice.ctx.createMediaStreamSource(voice.stream).connect(voice.analyser);
+    }
+    /**
+     * Rewire the analyser whenever the microphone itself changes.
+     *
+     * This used to be part of the block above, so the graph was built once
+     * and bound to whatever stream existed on the FIRST voice turn. Ending a
+     * turn releases the microphone, so the next turn calls getUserMedia
+     * again and gets a new stream — while the analyser stayed connected to
+     * the old, ended one. A dead track produces all-zero frequency data, so
+     * every reading after the first turn was level 0, floor 0, peak 0.
+     *
+     * It was invisible for as long as nothing depended on the level: the
+     * endpointer's unconditional backstop stopped the recorder anyway and
+     * the audio was uploaded regardless. The moment the upload started
+     * asking "did anyone actually speak", the answer was permanently no and
+     * voice stopped working entirely from the second turn on.
+     */
+    if (voice.wiredTo !== voice.stream) {
+      if (voice.source) {
+        try {
+          voice.source.disconnect();
+        } catch (e) {
+          /* already gone with its stream */
+        }
+      }
+      voice.source = voice.ctx.createMediaStreamSource(voice.stream);
+      voice.source.connect(voice.analyser);
+      voice.wiredTo = voice.stream;
     }
     // Resume matters on iOS/Safari, where the context starts suspended and
     // every level reads 0 — which looks exactly like silence forever.
@@ -1314,6 +1367,9 @@ textarea::placeholder{color:var(--muted)}
       else floorRaw += (level - floorRaw) * 0.002;
       if (level > peak) peak = level;
       else peak *= 0.9997;
+      // Published so the upload gate can tell "the room was quiet" from "the
+      // meter is not working" — see the peak check in rec.onstop.
+      voice.peak = peak;
 
       // The floor is CAPPED against the peak, and that cap is the whole fix.
       //

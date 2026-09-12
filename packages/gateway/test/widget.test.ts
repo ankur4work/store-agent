@@ -819,3 +819,27 @@ describe('widget surface craft', () => {
     expect(surfaces).not.toMatch(/#[0-9a-f]{6}/i);
   });
 });
+
+/**
+ * The level meter fed the endpointer for weeks while reading nothing, because
+ * nothing depended on it being right. Then the upload gate started asking it
+ * whether anyone had spoken, and voice died from the second turn onwards.
+ */
+describe('widget microphone level meter', () => {
+  it('rewires the analyser when the microphone changes', () => {
+    // Built once and bound to the first turn's stream, the graph points at an
+    // ended track for every turn after — which reads as permanent silence.
+    expect(SRC).toContain('voice.wiredTo !== voice.stream');
+    expect(SRC).toContain('voice.source = voice.ctx.createMediaStreamSource(voice.stream)');
+  });
+
+  it('publishes peak so the upload gate can tell a quiet room from a dead meter', () => {
+    expect(SRC).toContain('voice.peak = peak');
+  });
+
+  it('uploads anyway when the meter never registered anything', () => {
+    // A gate on a signal that does not exist disables the feature it guards.
+    expect(SRC).toContain("spoke < MIN_SPEECH_MS && (voice.peak || 0) > 0");
+    expect(SRC).toContain("voiceDiag('level_meter_dead'");
+  });
+});
