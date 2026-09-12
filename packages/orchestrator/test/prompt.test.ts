@@ -123,3 +123,33 @@ describe('tool definitions', () => {
     }
   });
 });
+
+/**
+ * A shopper shown four pairs of shoes said "I want the best one" and was
+ * told: "I can't verify which shoe is best right now. Our team can help
+ * choose one — share your email for a follow-up."
+ *
+ * The escalation rule had swallowed the single most common thing anyone
+ * asks a shop assistant. Recommending is not a claim to verify.
+ */
+describe('recommendations are not escalations', () => {
+  const prefix = buildCachedPrefix(MERCHANT)
+    .map((b) => b.text)
+    .join('\n');
+
+  it('tells the model an opinion is its to give', () => {
+    expect(prefix).toContain('Being asked to recommend is not a verification problem');
+    expect(prefix).toContain('Never\nescalate a matter of taste');
+  });
+
+  it('keeps escalation for facts, which is what it is for', () => {
+    // The rule still has to bite on price, stock, policy and existence —
+    // the whole product rests on not inventing those.
+    expect(prefix).toContain('Escalate when you cannot\nestablish a FACT');
+  });
+
+  it('still requires a reason drawn from the product itself', () => {
+    // "I'd go with this one" with no why is a guess wearing a recommendation.
+    expect(prefix).toContain("that product's own attributes");
+  });
+});

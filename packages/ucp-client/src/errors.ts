@@ -2,7 +2,13 @@ export class UcpError extends Error {
   override readonly name: string = 'UcpError';
   constructor(
     message: string,
-    readonly detail?: { readonly tool?: string; readonly code?: number | string; readonly data?: unknown },
+    readonly detail?: {
+      readonly tool?: string;
+      readonly code?: number | string;
+      readonly data?: unknown;
+      /** Seconds the storefront asked us to wait, in ms. See transport retry. */
+      readonly retryAfterMs?: number;
+    },
   ) {
     super(message);
   }

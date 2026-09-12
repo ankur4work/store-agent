@@ -1,6 +1,20 @@
 import { UcpRpcError, UcpTimeoutError, UcpTransportError, isRetryable } from './errors.js';
 import type { UcpMeta, UcpTool } from './types.js';
 
+/**
+ * Longest we will sit on a Retry-After before giving up.
+ *
+ * A shopper waiting three seconds for an answer is fine. A shopper waiting
+ * thirty is gone, and an honest "I can't reach the catalog" beats a spinner.
+ */
+const MAX_RETRY_AFTER_MS = 3000;
+
+/** Retry-After the storefront asked for, in ms, if it asked for one. */
+function retryAfterMsOf(err: unknown): number | undefined {
+  const ms = (err as { detail?: { retryAfterMs?: unknown } } | undefined)?.detail?.retryAfterMs;
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
 export interface JsonRpcRequest {
   readonly jsonrpc: '2.0';
   readonly method: 'tools/call';
@@ -116,6 +130,18 @@ export class UcpTransport {
         this.onTiming?.({ tool, ms: performance.now() - started, attempt, ok: false });
         lastErr = err;
         if (!isRetryable(err) || attempt === this.maxRetries) break;
+        /**
+         * Honour Retry-After, capped. A rate limit is not a failure, it is
+         * an instruction to wait — and a shopper will wait two seconds far
+         * more happily than they will accept "I can't load the catalog".
+         * Capped so a long Retry-After does not strand the turn; past the
+         * cap we fail and the answer degrades honestly.
+         */
+        const wait = retryAfterMsOf(err);
+        if (wait !== undefined) {
+          await sleep(Math.min(wait, MAX_RETRY_AFTER_MS));
+          continue;
+        }
         // Exponential backoff with full jitter. A shopper is waiting, so the
         // ceiling is deliberately low.
         const backoff = Math.min(2 ** attempt * 50, 400);
@@ -140,7 +166,24 @@ export class UcpTransport {
       });
 
       if (!res.ok) {
-        throw new UcpTransportError(`UCP ${tool} → HTTP ${res.status}`, res.status, { tool });
+        /**
+         * Carry Retry-After forward when the storefront rate-limits us.
+         *
+         * A 429 was retryable already, but with the same 50-400ms jittered
+         * backoff as everything else — which is nothing against a limit
+         * measured in seconds. Every search then failed all three attempts
+         * in under a second, and the shopper was told the catalog could not
+         * be loaded and offered a human, for a condition that clears on its
+         * own.
+         *
+         * Shopify says how long to wait. Waiting is the whole fix.
+         */
+        const retryAfter = res.headers.get('retry-after');
+        const parsed = retryAfter === null ? NaN : Math.round(Number(retryAfter) * 1000);
+        throw new UcpTransportError(`UCP ${tool} → HTTP ${res.status}`, res.status, {
+          tool,
+          ...(Number.isFinite(parsed) && parsed > 0 ? { retryAfterMs: parsed } : {}),
+        });
       }
 
       const json = (await res.json()) as JsonRpcResponse<T>;
