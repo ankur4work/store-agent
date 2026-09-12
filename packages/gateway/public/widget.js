@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.5';
+  var BUILD = '2026-09-12.6';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -259,6 +259,16 @@ header{
     0 1px 2px color-mix(in srgb,var(--accent) 45%,transparent);
   display:grid;place-items:center;flex:0 0 auto}
 .who{display:flex;flex-direction:column;line-height:1.3;min-width:0}
+/* Pushed to the right of the name, left of the close button. Quiet on
+   purpose — it is a control most shoppers will never touch, and the one
+   who needs it is looking for it. margin-left:auto is what keeps the
+   header layout intact without a wrapper. */
+.lang{margin-left:auto;font:inherit;font-size:11px;color:var(--muted);
+  background:var(--sunk2);border:1px solid var(--line);border-radius:7px;
+  padding:3px 5px;max-width:96px;cursor:pointer;appearance:none;
+  text-align:right;transition:color .15s var(--ease),border-color .15s var(--ease)}
+.lang:hover{color:var(--ink)}
+.lang:focus-visible{outline:2px solid var(--sa-accent,#1b3a34);outline-offset:1px}
 .who b{font-size:13.5px;font-weight:600;letter-spacing:-.012em}
 /* A presence dot rather than the bare word. "Ready" on its own is a label;
    a small live dot beside it is a state, and states are what people read. */
@@ -557,6 +567,20 @@ textarea::placeholder{color:var(--muted)}
       '<header>' +
       '<div class="avatar"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2"/></svg></div>' +
       '<div class="who"><b>Assistant</b><span class="status">Ready</span></div>' +
+      /**
+       * The shopper picks the language they want to speak, not the merchant.
+       *
+       * A store has one language; its customers do not. On an Indian
+       * storefront one customer speaks Hindi and the next speaks English,
+       * and neither the page nor the merchant can answer for both. The
+       * decoder cannot either — Hindi and Urdu are one spoken language in
+       * two scripts, which is how an English sentence came back as Urdu and
+       * then as Turkish. The person talking is the only one who knows.
+       *
+       * Starts on whatever the merchant set as their default, and the
+       * choice is remembered for next time.
+       */
+      '<select class="lang" aria-label="Language you want to speak"></select>' +
       '<button class="x" aria-label="Close"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>' +
       '</header>' +
       '<div class="scroll">' +
@@ -583,6 +607,8 @@ textarea::placeholder{color:var(--muted)}
     els.log = p.querySelector('.log');
     els.chips = p.querySelector('.chips');
     els.status = p.querySelector('.status');
+    els.lang = p.querySelector('.lang');
+    fillLanguages();
     els.form = p.querySelector('form');
     els.input = p.querySelector('textarea');
     els.send = p.querySelector('.send');
@@ -1446,6 +1472,51 @@ textarea::placeholder{color:var(--muted)}
     voice.raf = requestAnimationFrame(tick);
   }
 
+  /**
+   * The language the SHOPPER chose, remembered across visits.
+   *
+   * localStorage rather than the session: someone who speaks Hindi on
+   * Monday still speaks Hindi on Tuesday, and being asked again every
+   * visit is the kind of small insult that stops people using a feature.
+   */
+  var LANG_KEY = 'storeagent.lang';
+  var CONFIG = {};
+
+  function chosenLang() {
+    try {
+      var v = localStorage.getItem(LANG_KEY);
+      if (v) return v;
+    } catch (e) {
+      /* private mode; fall through to the merchant default */
+    }
+    return CONFIG.voiceLanguage || 'en';
+  }
+
+  function fillLanguages() {
+    if (!els.lang) return;
+    // Server-supplied so the list cannot drift from what the decoder and
+    // the admin dropdown accept.
+    var list = CONFIG.voiceLanguages || [['en', 'English']];
+    var now = chosenLang();
+    els.lang.innerHTML = list
+      .map(function (pair) {
+        var code = pair[0];
+        var label = pair[1];
+        return (
+          '<option value="' + code + '"' + (code === now ? ' selected' : '') + '>' + label + '</option>'
+        );
+      })
+      .join('');
+    els.lang.addEventListener('change', function () {
+      try {
+        localStorage.setItem(LANG_KEY, els.lang.value);
+      } catch (e) {
+        /* the choice still applies to this page */
+      }
+      voiceDiag('language_chosen', { lang: els.lang.value });
+    });
+  }
+
   /** The storefront's language as a bare ISO-639-1 code, or '' if unset. */
   function pageLang() {
     try {
@@ -1468,7 +1539,12 @@ textarea::placeholder{color:var(--muted)}
         // instead of guessing it from a second of audio. Shopify renders
         // <html lang> per locale, so on a translated store this is the
         // language the shopper chose.
-        headers: { 'content-type': blob.type || 'audio/webm', 'x-storefront-lang': pageLang() },
+        // The shopper's own choice, falling back to the page only if the
+        // picker never rendered.
+        headers: {
+          'content-type': blob.type || 'audio/webm',
+          'x-storefront-lang': (els.lang && els.lang.value) || chosenLang() || pageLang(),
+        },
         body: blob,
       });
       var d = await r.json();
@@ -1964,6 +2040,9 @@ textarea::placeholder{color:var(--muted)}
   }
 
   function render(cfg) {
+    // Kept at module scope too: the language picker is built when the panel
+    // mounts, which is long after render() has returned.
+    if (cfg) CONFIG = cfg;
     if (cfg && cfg.enabled === false) {
       say('not shown: disabled in the StoreAgent app settings');
       return;

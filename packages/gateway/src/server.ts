@@ -51,6 +51,7 @@ import { withVariantImages } from './search/variant-image.js';
 import { BillingApiError } from './billing/shopify-billing.js';
 import {
   MemorySettingsStore,
+  VOICE_LANGUAGES,
   accentIsAccessible,
   contrastWithWhite,
   validateSettings,
@@ -275,6 +276,11 @@ export function createGateway(deps: GatewayDeps): Server {
         position: s.position,
         greeting: s.greeting,
         holdoutFraction: s.holdoutFraction,
+        // The shopper picks their own language in the widget; this is only
+        // what the picker starts on. A merchant selling mostly in Hindi
+        // sets Hindi here, and an English-speaking customer still switches.
+        voiceLanguage: s.voiceLanguage,
+        voiceLanguages: VOICE_LANGUAGES,
       });
       return;
     }
@@ -859,9 +865,12 @@ export function createGateway(deps: GatewayDeps): Server {
        * what produced Urdu and then Turkish for the same English sentence.
        */
       const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
-      const chosen = (await settings.get(shop)).voiceLanguage;
-      const resolved =
-        chosen === 'auto' ? '' : chosen !== '' ? chosen : /^[a-z]{2}$/.test(pageLang) ? pageLang : '';
+      const merchantDefault = (await settings.get(shop)).voiceLanguage;
+      // The header carries the shopper's pick from the widget; it starts on
+      // the merchant's default, so it is the more specific answer when
+      // present. 'auto' is a real choice and means send no language at all.
+      const chosen = pageLang === '' ? merchantDefault : pageLang;
+      const resolved = chosen === 'auto' || !/^[a-z]{2}$/.test(chosen) ? '' : chosen;
       const cfg = {
         ...voiceConfig,
         log,

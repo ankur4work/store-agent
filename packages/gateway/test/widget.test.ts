@@ -843,3 +843,36 @@ describe('widget microphone level meter', () => {
     expect(SRC).toContain("voiceDiag('level_meter_dead'");
   });
 });
+
+/**
+ * A store has one language; its customers do not. On an Indian storefront
+ * one customer speaks Hindi and the next speaks English, and neither the
+ * page nor the merchant can answer for both.
+ */
+describe('widget language picker', () => {
+  it('puts the picker in the header, where the shopper can reach it', () => {
+    expect(SRC).toContain('<select class="lang"');
+    expect(SRC).toContain('els.lang = p.querySelector(\'.lang\')');
+  });
+
+  it('sends the shopper choice, not the page language', () => {
+    expect(SRC).toContain("'x-storefront-lang': (els.lang && els.lang.value) || chosenLang() || pageLang()");
+  });
+
+  it('remembers the choice across visits', () => {
+    // Being asked again every visit is the kind of small insult that stops
+    // people using a feature.
+    expect(SRC).toContain("var LANG_KEY = 'storeagent.lang'");
+    expect(SRC).toContain('localStorage.setItem(LANG_KEY');
+  });
+
+  it('starts on the merchant default and falls back to English', () => {
+    expect(SRC).toContain("return CONFIG.voiceLanguage || 'en'");
+  });
+
+  it('builds the list from the server, so it cannot drift', () => {
+    // A hard-coded list in the widget would outlive the codes the decoder
+    // and the admin dropdown actually accept.
+    expect(SRC).toContain('CONFIG.voiceLanguages');
+  });
+});
