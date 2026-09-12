@@ -917,3 +917,34 @@ describe('widget audio upload format', () => {
     expect(SRC).toContain("voiceDiag('wav_failed'");
   });
 });
+
+/**
+ * Reported as "it feels like two people speaking", and contradicting
+ * itself. Both came from the same function.
+ */
+describe('widget speech playback', () => {
+  it('claims playback synchronously, not after the audio arrives', () => {
+    // Gating on voice.playing leaves the whole speech request open as a
+    // window in which a second sentence starts its own playback. Answers
+    // arrive in sentence-sized chunks, so there always is a second one.
+    expect(SRC).toContain('if (!voice.busy) playNext()');
+    expect(SRC).toContain('voice.busy = true;');
+    expect(SRC).not.toContain('if (!voice.playing) playNext()');
+  });
+
+  it('drops speech audio for an answer that was retracted mid-flight', () => {
+    // The tripwire clears the queue, but cannot reach a request already in
+    // flight — that audio arrived late and contradicted its own correction.
+    expect(SRC).toContain('var gen = voice.gen;');
+    expect(SRC).toContain('if (gen !== voice.gen)');
+    expect(SRC).toContain('voice.gen++;');
+  });
+
+  it('releases the claim when the queue drains or playback is stopped', () => {
+    // A stuck flag is silence forever, which is worse than the overlap.
+    const drain = SRC.slice(SRC.indexOf('function playNext'), SRC.indexOf('function stopPlayback'));
+    expect(drain).toContain('voice.busy = false;');
+    const stop = SRC.slice(SRC.indexOf('function stopPlayback'));
+    expect(stop.slice(0, 400)).toContain('voice.busy = false;');
+  });
+});

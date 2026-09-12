@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.9';
+  var BUILD = '2026-09-12.10';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -947,6 +947,10 @@ textarea::placeholder{color:var(--muted)}
     source: null,
     wiredTo: null,
     silenceSince: 0,
+    // Set the moment playback is claimed, not when audio finally exists —
+    // see enqueueSpeech. `gen` invalidates in-flight speech after a retraction.
+    busy: false,
+    gen: 0,
     spokeMs: 0,
     peak: 0,
     raf: 0,
@@ -1689,13 +1693,29 @@ textarea::placeholder{color:var(--muted)}
 
   function enqueueSpeech(text) {
     voice.queue.push(text);
-    if (!voice.playing) playNext();
+    /**
+     * `voice.playing` is the WRONG thing to gate on, and it sounded like two
+     * people talking over each other.
+     *
+     * playNext awaits the speech request before it ever assigns
+     * voice.playing, so for the whole round trip the queue looks idle. A
+     * second sentence arriving in that window — and answers arrive in
+     * sentence-sized chunks, so there always is one — started its own
+     * playNext, and both assigned voice.playing and called play(). Two
+     * voices, reading different sentences, at the same time.
+     *
+     * voice.busy is set synchronously below, so there is no window.
+     */
+    if (!voice.busy) playNext();
   }
 
   async function playNext() {
+    // Synchronously, before any await. This is the whole fix.
+    voice.busy = true;
     var text = voice.queue.shift();
     if (!text) {
       voice.playing = null;
+      voice.busy = false;
       // ONE SHOT: press, speak, get answered, done — the way every mic a
       // shopper has used behaves.
       //
@@ -1708,6 +1728,7 @@ textarea::placeholder{color:var(--muted)}
       endVoiceTurn();
       return;
     }
+    var gen = voice.gen;
     try {
       var r = await fetch(API + '/api/voice/speak', {
         method: 'POST',
@@ -1716,6 +1737,20 @@ textarea::placeholder{color:var(--muted)}
       });
       if (!r.ok) throw new Error('tts');
       var url = URL.createObjectURL(await r.blob());
+      /**
+       * Was this answer retracted while we were fetching its audio?
+       *
+       * The grounding tripwire discards a partial answer and starts again,
+       * and stopPlayback clears the queue — but it cannot reach a request
+       * already in flight. That audio used to arrive afterwards and play,
+       * so the assistant said the retracted sentence and then contradicted
+       * itself with the corrected one.
+       */
+      if (gen !== voice.gen) {
+        URL.revokeObjectURL(url);
+        voice.busy = false;
+        return;
+      }
       var audio = new Audio(url);
       voice.playing = audio;
       setVoiceState('speaking');
@@ -1734,6 +1769,10 @@ textarea::placeholder{color:var(--muted)}
       voice.playing = null;
     }
     voice.queue.length = 0;
+    voice.busy = false;
+    // Invalidates any speech request still in flight, so a retracted
+    // sentence cannot arrive late and be spoken after its correction.
+    voice.gen++;
   }
 
   // ---------- send --------------------------------------------------------
