@@ -114,3 +114,31 @@ describe('a follow-up that refers to the previous answer', () => {
     expect(carryForward('best one', history)).toBe('shoes');
   });
 });
+
+/**
+ * The widget lives on the merchant's storefront and posts here, so it is
+ * cross-origin on every request. A custom header it sends that this server
+ * does not advertise fails the preflight — and the request then never
+ * arrives, so the failure is invisible from the server side.
+ */
+describe('cross-origin headers the widget actually sends', () => {
+  it('advertises every custom header the widget sets', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const src = readFileSync(
+      fileURLToPath(new URL('../src/server.ts', import.meta.url)),
+      'utf8',
+    );
+    const widget = readFileSync(
+      fileURLToPath(new URL('../public/widget.js', import.meta.url)),
+      'utf8',
+    );
+
+    const advertised = /access-control-allow-headers',\s*'([^']+)'/.exec(src)?.[1] ?? '';
+    // Every x-* header literal in the widget's fetch calls.
+    const sent = [...widget.matchAll(/'(x-[a-z-]+)':/g)].map((m) => m[1]);
+
+    expect(sent.length).toBeGreaterThan(0);
+    for (const h of sent) expect(advertised).toContain(h);
+  });
+});

@@ -1491,7 +1491,19 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 function cors(res: ServerResponse, origin: string | undefined, allowed: readonly string[]): void {
   const ok = allowed.includes('*') ? (origin ?? '*') : allowed.includes(origin ?? '') ? origin! : '';
   if (ok !== '') res.setHeader('access-control-allow-origin', ok);
-  res.setHeader('access-control-allow-headers', 'content-type');
+  /**
+   * Every custom header the widget sends must be listed here.
+   *
+   * The widget is cross-origin by definition — it runs on the merchant's
+   * storefront and posts here — so any header beyond the CORS-safelisted
+   * ones triggers a preflight, and a preflight that does not name the
+   * header fails the request before it is ever sent. Adding
+   * `x-storefront-lang` to the voice upload without adding it here took
+   * voice from working to "NetworkError when attempting to fetch
+   * resource", with nothing whatsoever in the server log, because the
+   * request never arrived.
+   */
+  res.setHeader('access-control-allow-headers', 'content-type,x-storefront-lang');
   res.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS');
   res.setHeader('vary', 'origin');
 }
