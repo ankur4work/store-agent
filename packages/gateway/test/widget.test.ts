@@ -887,3 +887,33 @@ describe('widget voice feedback on a failed turn', () => {
     expect(SRC).toContain("Didn't catch that");
   });
 });
+
+/**
+ * Containers are where voice keeps breaking. A codec parameter in the MIME
+ * type once had every upload rejected; a fragmented WebM with no duration
+ * is a file a decoder may stop reading partway through — and a decoder
+ * that runs out of audio invents the rest.
+ */
+describe('widget audio upload format', () => {
+  it('records one complete file rather than 100ms fragments', () => {
+    expect(SRC).toContain('rec.start()');
+    expect(SRC).not.toContain('rec.start(100)');
+  });
+
+  it('re-encodes to PCM WAV, which has nothing left to misparse', () => {
+    expect(SRC).toContain('async function toWav(');
+    expect(SRC).toContain("new Blob([view.buffer], { type: 'audio/wav' })");
+    expect(SRC).toContain('var blob = await toWav(raw)');
+  });
+
+  it('reports how much audio actually decoded', () => {
+    // The number that separates "the container was truncated" from "the
+    // decoder had everything and still invented".
+    expect(SRC).toContain("voiceDiag('decoded'");
+  });
+
+  it('falls back to the original recording if re-encoding fails', () => {
+    // A worse upload beats no upload.
+    expect(SRC).toContain("voiceDiag('wav_failed'");
+  });
+});

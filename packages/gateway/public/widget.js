@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.8';
+  var BUILD = '2026-09-12.9';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1184,7 +1184,20 @@ textarea::placeholder{color:var(--muted)}
       if (blob.size > 1200) transcribeAndSend(blob);
       else if (voice.on) startCapture(); // too short to be speech
     };
-    rec.start(100);
+    /**
+     * No timeslice.
+     *
+     * `start(100)` asks for a chunk every 100ms, and nothing here wants
+     * them — the blob is only ever read once, on stop. What it does do is
+     * force the encoder to emit a fragmented stream, where the first chunk
+     * carries the header and the rest are bare clusters with no duration.
+     * Concatenated back into a file, that is a container a decoder is
+     * entitled to give up on partway through, and a decoder that has run
+     * out of audio does not stop — it invents.
+     *
+     * Without a timeslice the recorder writes one complete file on stop.
+     */
+    rec.start();
     setVoiceState('listening');
     if (els.wave) els.wave.className = 'wave live';
     voice.interim = '';
@@ -1543,19 +1556,87 @@ textarea::placeholder{color:var(--muted)}
     }
   }
 
-  async function transcribeAndSend(blob) {
+  /**
+   * Re-encode the recording as plain 16-bit PCM WAV before uploading.
+   *
+   * What MediaRecorder hands back is a container, and containers are where
+   * this keeps going wrong: a codec parameter in the MIME type once had
+   * every upload rejected outright, and a fragmented WebM with no duration
+   * is a file a decoder may stop reading partway through. It does not
+   * report that. It transcribes what it got and invents the rest, which is
+   * how one English sentence came back as Urdu, then Turkish, then Latvian,
+   * then Russian — different every time, which is the signature of a
+   * decoder working from almost nothing.
+   *
+   * decodeAudioData uses the browser's own decoder on its own output, so
+   * it reads the file correctly whatever the container. WAV then has no
+   * opinions: a header, then samples, with the length written down. There
+   * is nothing left to misparse.
+   *
+   * Falls back to the original blob if anything fails — a worse upload
+   * beats no upload.
+   */
+  async function toWav(blob) {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx || !blob.arrayBuffer) return blob;
+      var ctx = voice.ctx && voice.ctx.state !== 'closed' ? voice.ctx : new Ctx();
+      var audio = await ctx.decodeAudioData(await blob.arrayBuffer());
+      // The number we have never been able to see. If this is a fraction of
+      // what the endpointer measured, the container was the problem.
+      voiceDiag('decoded', {
+        seconds: Math.round(audio.duration * 100) / 100,
+        rate: audio.sampleRate,
+        spokeMs: Math.round(voice.spokeMs),
+      });
+      if (!audio.duration) return blob;
+
+      var len = audio.length;
+      var chans = audio.numberOfChannels;
+      var mono = new Float32Array(len);
+      for (var c = 0; c < chans; c++) {
+        var src = audio.getChannelData(c);
+        for (var i = 0; i < len; i++) mono[i] += src[i] / chans;
+      }
+
+      var view = new DataView(new ArrayBuffer(44 + len * 2));
+      var ascii = function (off, s) {
+        for (var k = 0; k < s.length; k++) view.setUint8(off + k, s.charCodeAt(k));
+      };
+      ascii(0, 'RIFF');
+      view.setUint32(4, 36 + len * 2, true);
+      ascii(8, 'WAVE');
+      ascii(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true); // PCM
+      view.setUint16(22, 1, true); // mono
+      view.setUint32(24, audio.sampleRate, true);
+      view.setUint32(28, audio.sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      ascii(36, 'data');
+      view.setUint32(40, len * 2, true);
+      for (var j = 0; j < len; j++) {
+        var v = Math.max(-1, Math.min(1, mono[j]));
+        view.setInt16(44 + j * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+      }
+      return new Blob([view.buffer], { type: 'audio/wav' });
+    } catch (e) {
+      voiceDiag('wav_failed', { error: String((e && e.message) || e) });
+      return blob;
+    }
+  }
+
+  async function transcribeAndSend(raw) {
+    var blob = await toWav(raw);
     setVoiceState('thinking');
     try {
       // ?shop= so the gateway can read THIS merchant's voice language. The
       // same pattern the widget bundle and rate limiter already use.
       var r = await fetch(API + '/api/voice/transcribe?shop=' + encodeURIComponent(SHOP || ''), {
         method: 'POST',
-        // The storefront's own locale, so transcription is told the language
-        // instead of guessing it from a second of audio. Shopify renders
-        // <html lang> per locale, so on a translated store this is the
-        // language the shopper chose.
-        // The shopper's own choice, falling back to the page only if the
-        // picker never rendered.
+        // The shopper's own choice, falling back to the storefront locale
+        // only if the picker never rendered.
         headers: {
           'content-type': blob.type || 'audio/webm',
           'x-storefront-lang': (els.lang && els.lang.value) || chosenLang() || pageLang(),
