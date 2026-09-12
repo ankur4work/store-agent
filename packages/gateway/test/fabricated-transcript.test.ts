@@ -1,0 +1,116 @@
+import { describe, expect, it } from 'vitest';
+import { looksFabricated } from '../src/voice/service.js';
+import { carryForward } from '../src/tool-executor.js';
+
+/**
+ * Every string in the first block was recovered from one live session, where
+ * it arrived as a shopper's message and was answered. Nobody had spoken.
+ *
+ * The decoder was being sent a vocabulary hint, and a decoder with a prompt
+ * and no intelligible audio returns the prompt — whole, in fragments, or
+ * translated into a language nobody in the conversation was speaking. The
+ * assistant then answered the phantom, in the phantom's language, which is
+ * what the shopper saw.
+ */
+const HINT = 'products, sizes, colours, prices, availability, shipping, returns';
+
+describe('transcripts the decoder invented', () => {
+  it('drops a fragment of our own hint', () => {
+    // Under the old five-word floor these all passed straight through, and
+    // these short ones are the common case — not the full sentence.
+    expect(looksFabricated('colours', HINT)).toBe(true);
+    expect(looksFabricated('availability,', HINT)).toBe(true);
+    expect(looksFabricated('products, sizes,', HINT)).toBe(true);
+  });
+
+  it('drops the hint translated into another language', () => {
+    // Shares not one word with the English hint, so word overlap read zero
+    // and it was answered at length in Polish.
+    expect(
+      looksFabricated('produkty, rozmiary, kolory, ceny, dostępność, wysyłka', HINT),
+    ).toBe(true);
+  });
+
+  it('drops a transcript with no letters in it', () => {
+    expect(looksFabricated('###', HINT)).toBe(true);
+    expect(looksFabricated('...', HINT)).toBe(true);
+  });
+
+  it('still drops the whole prompt read back', () => {
+    expect(looksFabricated(`${HINT}. Product names may be brand names.`, HINT)).toBe(true);
+  });
+
+  it('keeps what a shopper actually says', () => {
+    // The filter exists to protect these; a false positive costs a turn.
+    expect(looksFabricated('do you have these in black', HINT)).toBe(false);
+    expect(looksFabricated('how much is this', HINT)).toBe(false);
+    expect(looksFabricated('can you show me some shoes', HINT)).toBe(false);
+    expect(looksFabricated('¿tienen zapatos blancos?', HINT)).toBe(false);
+    // A genuine question that happens to use hint vocabulary, at length.
+    expect(looksFabricated('what sizes and colours do the sneakers come in', HINT)).toBe(false);
+  });
+
+  it('keeps a short question that is not made only of hint words', () => {
+    expect(looksFabricated('white sneakers', HINT)).toBe(false);
+    expect(looksFabricated('got any boots', HINT)).toBe(false);
+  });
+
+  it('leaves everything alone when no hint is sent', () => {
+    // The default now sends no prompt at all, so the hint-word rules cannot
+    // fire and only the structural ones remain.
+    expect(looksFabricated('colours', '')).toBe(false);
+    expect(looksFabricated('###', '')).toBe(true);
+  });
+
+  it('treats an empty transcript as silence, not a fabrication', () => {
+    // Empty already means "heard nothing" to every caller; calling it a
+    // fabrication would log the wrong diagnosis.
+    expect(looksFabricated('', HINT)).toBe(false);
+  });
+});
+
+/**
+ * A shopper shown four pairs of shoes said "best one" and was shown a
+ * snowboard, under the words "I couldn't find shoes in the live catalog".
+ */
+describe('a follow-up that refers to the previous answer', () => {
+  const afterShoes = [
+    { role: 'user', content: 'can u show me some shoes' },
+    { role: 'assistant', content: 'Here are some shoes: Canvas Low-Top Sneakers…' },
+  ];
+
+  it('carries the subject into a bare superlative', () => {
+    expect(carryForward('best one', afterShoes)).toBe('shoes');
+    expect(carryForward('cheapest one', afterShoes)).toBe('shoes');
+    expect(carryForward('the other ones', afterShoes)).toBe('shoes');
+  });
+
+  it('leaves a self-contained query untouched', () => {
+    // Carrying forward here would search for the wrong thing entirely.
+    expect(carryForward('white sneakers', afterShoes)).toBe('white sneakers');
+    expect(carryForward('snowboards', afterShoes)).toBe('snowboards');
+  });
+
+  it('reaches past its own earlier referential turns', () => {
+    const history = [
+      { role: 'user', content: 'show me shoes' },
+      { role: 'assistant', content: '…' },
+      { role: 'user', content: 'best one' },
+      { role: 'assistant', content: '…' },
+    ];
+    expect(carryForward('and the cheapest?', history)).toBe('shoes');
+  });
+
+  it('browses when nothing has been named yet', () => {
+    // An opening "what have you got" is a real browse, not a lost subject.
+    expect(carryForward('anything', [])).toBe('anything');
+  });
+
+  it('ignores tool results and blocks, which are not what the shopper said', () => {
+    const history = [
+      { role: 'user', content: [{ type: 'tool_result', content: 'snowboard' }] },
+      { role: 'user', content: 'show me shoes' },
+    ];
+    expect(carryForward('best one', history)).toBe('shoes');
+  });
+});

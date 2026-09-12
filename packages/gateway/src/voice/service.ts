@@ -120,8 +120,26 @@ export async function transcribe(
    * grammar to pull the language with them, and are short enough that an
    * echo is both rarer and easier to recognise.
    */
-  const hint =
-    cfg.transcriptionHint ?? 'products, sizes, colours, prices, availability, shipping, returns';
+  /**
+   * NO PROMPT BY DEFAULT. The hint was the bug, not the fix.
+   *
+   * Every version of this hint came back as a shopper message. The long
+   * sentence echoed whole; the bare noun list echoed in fragments —
+   * "colours", "availability,", "products, sizes," — and, worse, echoed
+   * TRANSLATED: "produkty, rozmiary, kolory, ceny, dostępność, wysyłka"
+   * arrived as a Polish shopper's question and was answered at length in
+   * Polish, in a store with no Polish shoppers. Each fabrication then set
+   * the reply language, so a shopper asking in English watched the
+   * assistant answer someone who did not exist, in a language they do not
+   * read.
+   *
+   * A decoder given a prompt will return that prompt when it has nothing
+   * to decode. The only version that cannot echo is the one we do not
+   * send. Vocabulary anchoring is not worth inventing shoppers, and the
+   * language it was protecting is now passed in explicitly by the
+   * storefront (see VoiceConfig.language) rather than inferred.
+   */
+  const hint = cfg.transcriptionHint ?? '';
 
   const upload = async (type: string): Promise<Response> => {
     const form = new FormData();
@@ -140,7 +158,7 @@ export async function transcribe(
      * — anchors the decode without pinning the language, so a shopper who
      * really is speaking another language still gets transcribed in it.
      */
-    form.append('prompt', hint);
+    if (hint !== '') form.append('prompt', hint);
     return doFetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
       headers: { authorization: `Bearer ${cfg.apiKey}` },
@@ -207,7 +225,7 @@ export async function transcribe(
    * Silence must read as silence. Compared on words rather than exactly,
    * because the echo comes back with different casing and punctuation.
    */
-  if (echoesPrompt(text, hint)) {
+  if (looksFabricated(text, hint)) {
     // Logged, because "the model heard nothing" and "we discarded what it
     // heard" are the same empty string to every caller — and a filter that
     // silently eats real speech is indistinguishable from a broken
@@ -270,6 +288,95 @@ export async function synthesize(
  * question shares a few words with the hint at most — "prices", "shipping"
  * — and never most of it.
  */
+/**
+ * Is this transcript something the decoder invented rather than heard?
+ *
+ * `echoesPrompt` below catches a whole prompt read back, and caught none of
+ * what actually reached shoppers. Recovered from one live session, every one
+ * of these arrived as a "shopper message" and was answered:
+ *
+ *     "colours"        "availability,"        "products, sizes,"
+ *     "###"            "context:"             "produkte,"
+ *     "produkty, rozmiary, kolory, ceny, dostępność, wysyłka"
+ *
+ * Three holes, all in the same `if`. Fragments fell under the five-word
+ * floor. Translations shared no words with an English hint, so overlap read
+ * zero. Punctuation-only junk is not an echo of anything and was never
+ * considered.
+ *
+ * The rules below are deliberately structural rather than lexical, because a
+ * fabrication in Polish is still a fabrication and we cannot enumerate every
+ * language. The cost of a false positive is one dropped turn on audio the
+ * shopper can simply repeat. The cost of a false negative is the assistant
+ * answering a question nobody asked — which is what they saw.
+ */
+export function looksFabricated(text: string, hint: string): boolean {
+  const t = text.trim();
+  if (t === '') return false;
+
+  // No letters at all: "###", "...", "—". Nothing was heard; something was
+  // emitted. There is no shopper question without a letter in it.
+  if (!/\p{L}/u.test(t)) return true;
+
+  const said = t
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  /**
+   * A bare comma list is the hint's shape, in any language.
+   *
+   * Three or more comma-separated items with no sentence to hold them is how
+   * the vocabulary hint comes back, translated or not. Shoppers speak in
+   * sentences — "do you have these in black" — and a spoken list of six
+   * nouns with no verb is not a question anyone asks out loud.
+   */
+  const items = t.split(',').map((s) => s.trim()).filter(Boolean);
+  if (items.length >= 3 && said.length <= 12 && items.every((s) => s.split(/\s+/).length <= 3)) {
+    return true;
+  }
+
+  const prompt = new Set(
+    hint
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+
+  const overlap =
+    prompt.size === 0 ? 0 : said.filter((w) => prompt.has(w)).length / said.length;
+
+  /**
+   * A comma list that trails off into a sentence is still the hint.
+   *
+   * The string actually seen live was the list plus one more clause —
+   * "…shipping and returns. Product names may be brand names." That last
+   * clause drops whole-prompt overlap to about half and makes the final
+   * comma item a six-word sentence, so the two rules either side of this
+   * one both miss it, and it reached a shopper as a question.
+   *
+   * Three or more comma items AND half the words being our own vocabulary
+   * is not a sentence a shopper speaks.
+   */
+  if (items.length >= 3 && overlap >= 0.5) return true;
+
+  /**
+   * A short transcript made ENTIRELY of hint words is the hint, not a
+   * question. "colours" and "availability," are the clearest cases: alone,
+   * they are our own vocabulary handed back. A shopper who really did say
+   * only "colours" loses one turn and repeats it; the alternative is
+   * answering a phantom.
+   *
+   * Only applies while a hint is being sent at all — with `hint` empty the
+   * set is empty and this cannot fire.
+   */
+  if (prompt.size > 0 && said.length <= 3 && said.every((w) => prompt.has(w))) return true;
+
+  return echoesPrompt(text, hint);
+}
+
 export function echoesPrompt(text: string, hint: string): boolean {
   const words = (s: string): string[] =>
     s

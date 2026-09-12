@@ -839,7 +839,28 @@ export function createGateway(deps: GatewayDeps): Server {
     try {
       const contentType = header(req, 'content-type') ?? 'audio/webm';
       const audio = await readRawBody(req, MAX_AUDIO_BYTES);
-      const text = await transcribe(audio, contentType, voiceConfig);
+      /**
+       * The storefront tells us its language; we no longer infer it.
+       *
+       * Detection from a second of noisy audio was wrong often enough to put
+       * an English question into Urdu script, and the vocabulary hint that
+       * was propping it up turned out to fabricate whole shopper messages
+       * (see looksFabricated). A Shopify storefront renders `<html lang>`
+       * per locale, so the shopper's own language selection is already on
+       * the page — a fact worth more than a guess.
+       *
+       * VOICE_LANGUAGE still wins: a merchant pinning one language is
+       * overriding both the page and the model on purpose.
+       */
+      const pageLang = (header(req, 'x-storefront-lang') ?? '').trim().toLowerCase();
+      const cfg = {
+        ...voiceConfig,
+        log,
+        ...(voiceConfig.language === undefined && /^[a-z]{2}$/.test(pageLang)
+          ? { language: pageLang }
+          : {}),
+      };
+      const text = await transcribe(audio, contentType, cfg);
       // An empty transcript is a SUCCESS on the wire and a dead end for the
       // shopper: the widget quietly starts listening again, so a mic that
       // recorded perfectly well looks like it does nothing. Worth a line —

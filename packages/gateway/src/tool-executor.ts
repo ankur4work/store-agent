@@ -131,6 +131,49 @@ export function catalogTerms(query: string): string {
     .join(' ');
 }
 
+/**
+ * Give a referential follow-up its subject back.
+ *
+ * A shopper was shown four pairs of shoes, said "best one", and was offered a
+ * snowboard — with "I couldn't find shoes in the live catalog" above it, in a
+ * store that had just listed four. Same failure for "cheapest one".
+ *
+ * The cause is one line up: `catalogTerms('best one')` is EMPTY, because
+ * "best" and "one" are both noise, correctly. Empty terms mean "the shopper
+ * named nothing", whose fallback is to browse the catalog — so a follow-up
+ * that referred to the previous answer was treated as an opening request to
+ * see anything at all, and the browse fallback in a snowboard shop returns
+ * snowboards.
+ *
+ * The subject is sitting in the conversation the model can already see; it
+ * simply was not reaching the search. Carrying it forward here is
+ * deterministic, which is what this needs to be — asking the model to always
+ * write self-contained queries makes the right behaviour likely rather than
+ * certain, and one wrong picture undoes the whole answer.
+ *
+ * Only the subject is carried, never the qualifier: searching "shoes" and
+ * letting the model pick the best of them is right, while searching "best
+ * shoes" asks the catalog a question it cannot answer.
+ */
+export function carryForward(
+  query: string,
+  history: readonly { readonly role: string; readonly content: unknown }[],
+): string {
+  // Something concrete was named — nothing to resolve.
+  if (catalogTerms(query) !== '') return query;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m === undefined || m.role !== 'user') continue;
+    // Tool results and content blocks are not things the shopper said.
+    if (typeof m.content !== 'string') continue;
+    const subject = catalogTerms(m.content);
+    if (subject !== '') return subject;
+  }
+  // A first turn with no subject anywhere really is a browse.
+  return query;
+}
+
 export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   const { session, ucp } = deps;
   const safeCart = ucp ? new SafeCart(ucp) : undefined;
@@ -296,7 +339,13 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
     async execute(name, input, signal) {
       switch (name) {
         case 'search_catalog': {
-          const query = String(input['query'] ?? '');
+          const asked = String(input['query'] ?? '');
+          const query = carryForward(asked, session.history);
+          if (query !== asked) {
+            // Worth a line: a follow-up answered against the wrong subject
+            // looks like a search failure, and this is where that is decided.
+            deps.log?.warn('search_subject_carried', { from: asked, to: query });
+          }
           const limit = typeof input['limit'] === 'number' ? input['limit'] : 6;
           if (ucp) {
             // Kick the index along on every search, never on the miss alone.

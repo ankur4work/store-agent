@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.2';
+  var BUILD = '2026-09-12.3';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -1107,7 +1107,28 @@ textarea::placeholder{color:var(--muted)}
       // transcription and the spoken answer.
       stopRecognition();
       var blob = new Blob(voice.chunks, { type: rec.mimeType });
-      voiceDiag('recorder_stopped', { bytes: blob.size, type: rec.mimeType });
+      var spoke = Math.round(voice.spokeMs);
+      voiceDiag('recorder_stopped', { bytes: blob.size, type: rec.mimeType, spokeMs: spoke });
+      /**
+       * Bytes are not speech, and this gate only counted bytes.
+       *
+       * A few seconds of a quiet room is comfortably more than 1200 bytes of
+       * opus, so silence was uploaded like any other turn — and a decoder
+       * handed silence does not return nothing, it returns something. That
+       * is where "context:", "###" and a Polish shopping list came from:
+       * every one of them was a capture in which nobody had said a word.
+       *
+       * We already know whether anyone spoke — spokeMs is what the
+       * endpointer uses to decide the turn is over. Asking it here costs
+       * nothing and removes the entire class at the source, before the
+       * request.
+       */
+      if (spoke < MIN_SPEECH_MS) {
+        voiceDiag('discarded_silence', { bytes: blob.size, spokeMs: spoke });
+        if (els.live) els.live.textContent = "I didn't catch that — tap to try again.";
+        endVoiceTurn();
+        return;
+      }
       if (blob.size > 1200) transcribeAndSend(blob);
       else if (voice.on) startCapture(); // too short to be speech
     };
@@ -1369,12 +1390,27 @@ textarea::placeholder{color:var(--muted)}
     voice.raf = requestAnimationFrame(tick);
   }
 
+  /** The storefront's language as a bare ISO-639-1 code, or '' if unset. */
+  function pageLang() {
+    try {
+      var l = (document.documentElement.getAttribute('lang') || '').trim().toLowerCase();
+      // "en-GB" and "pt-BR" both carry a region the decoder does not want.
+      return /^[a-z]{2}/.test(l) ? l.slice(0, 2) : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
   async function transcribeAndSend(blob) {
     setVoiceState('thinking');
     try {
       var r = await fetch(API + '/api/voice/transcribe', {
         method: 'POST',
-        headers: { 'content-type': blob.type || 'audio/webm' },
+        // The storefront's own locale, so transcription is told the language
+        // instead of guessing it from a second of audio. Shopify renders
+        // <html lang> per locale, so on a translated store this is the
+        // language the shopper chose.
+        headers: { 'content-type': blob.type || 'audio/webm', 'x-storefront-lang': pageLang() },
         body: blob,
       });
       var d = await r.json();
