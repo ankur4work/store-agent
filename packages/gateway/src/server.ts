@@ -860,6 +860,20 @@ export function createGateway(deps: GatewayDeps): Server {
           ? { language: pageLang }
           : {}),
       };
+      /**
+       * What language this turn was decoded as, and where that came from.
+       *
+       * An English question came back in Urdu script on a store whose page
+       * says `lang="en"`, with a server that transcribes the same sentence
+       * correctly when told "en" — three facts that cannot all be true, and
+       * no way to tell which one was wrong because the header was read and
+       * then never mentioned again. Neither field is shopper content: one
+       * is a two-letter code, the other is where it was found.
+       */
+      log.info('voice_language', {
+        header: pageLang === '' ? null : pageLang,
+        using: (cfg as { language?: string }).language ?? 'auto-detect',
+      });
       const text = await transcribe(audio, contentType, cfg);
       // An empty transcript is a SUCCESS on the wire and a dead end for the
       // shopper: the widget quietly starts listening again, so a mic that
