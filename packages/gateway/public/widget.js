@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.1';
+  var BUILD = '2026-09-12.2';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -160,9 +160,19 @@
   --accent:var(--sa-accent,#1b3a34);
   --paper:var(--sa-bg,#fffefb);
   --ink:var(--sa-fg,#14161a);
-  --muted:color-mix(in srgb,var(--ink) 55%,transparent);
-  --line:color-mix(in srgb,var(--ink) 11%,transparent);
-  --sunk:color-mix(in srgb,var(--ink) 5%,transparent);
+  --muted:color-mix(in srgb,var(--ink) 52%,transparent);
+  /* Hairlines, not borders. A 1px line at 11% ink reads as a drawn box; at
+     7% it reads as two surfaces meeting, which is the difference between a
+     form and a finished object. */
+  --line:color-mix(in srgb,var(--ink) 7%,transparent);
+  --sunk:color-mix(in srgb,var(--ink) 4.5%,transparent);
+  /* One step further down for the composer, so the input sits IN the panel
+     rather than on it. A single flat surface everywhere is most of what
+     makes an interface look unfinished. */
+  --sunk2:color-mix(in srgb,var(--ink) 7.5%,transparent);
+  /* The light catch along a top edge. Present on both themes: on dark it
+     is the highlight, on light it is barely there and does no harm. */
+  --sheen:color-mix(in srgb,#fff 55%,transparent);
   --r:var(--sa-radius,16px);
   --ease:cubic-bezier(.22,1,.36,1);
 
@@ -214,9 +224,19 @@
      323, which scrolls by one card rather than wrapping).
      Voice opens smaller still — see .panel.compact. */
   position:fixed;right:22px;bottom:22px;width:352px;height:min(440px,calc(100dvh - 132px));
-  background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:var(--r);
+  background:var(--paper);color:var(--ink);border:1px solid var(--line);
+  border-radius:calc(var(--r) + 4px);
   display:flex;flex-direction:column;overflow:hidden;contain:layout paint;
-  box-shadow:0 1px 2px rgba(0,0,0,.06),0 24px 70px -18px rgba(0,0,0,.35);
+  /* Four layers, each doing one job: a hairline of contact shadow so the
+     edge is not floating, a close soft shadow for the lift, a wide faint
+     one for the room it sits in, and an inset sheen along the top edge so
+     the panel catches light like an object rather than being a filled
+     rectangle. One big blurry shadow is what a flat card looks like. */
+  box-shadow:
+    0 0 0 .5px color-mix(in srgb,var(--ink) 6%,transparent),
+    0 2px 6px -1px rgba(0,0,0,.10),
+    0 18px 48px -12px rgba(0,0,0,.28),
+    inset 0 1px 0 0 var(--sheen);
   transform-origin:100% 100%;
   opacity:0;transform:scale(.92) translateY(12px);pointer-events:none;
   transition:opacity .2s linear,transform .38s var(--ease);
@@ -224,21 +244,39 @@
 .panel.show{opacity:1;transform:none;pointer-events:auto}
 
 header{
-  display:flex;align-items:center;gap:11px;padding:15px 16px;flex:0 0 auto;
-  border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--paper) 86%,transparent);
-  backdrop-filter:saturate(1.4) blur(8px);position:relative;z-index:2}
-.avatar{width:30px;height:30px;border-radius:9px;background:var(--accent);color:#fff;
+  display:flex;align-items:center;gap:10px;padding:13px 14px;flex:0 0 auto;
+  border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--paper) 82%,transparent);
+  backdrop-filter:saturate(1.5) blur(12px);position:relative;z-index:2}
+/* A lit face, not a flat swatch: the accent with a highlight falling from
+   the top left, and a hairline ring so it reads as a physical chip. */
+.avatar{width:28px;height:28px;border-radius:9px;color:#fff;
+  background:linear-gradient(160deg,
+    color-mix(in srgb,var(--accent) 82%,#fff) 0%,
+    var(--accent) 55%,
+    color-mix(in srgb,var(--accent) 88%,#000) 100%);
+  box-shadow:
+    inset 0 1px 0 0 color-mix(in srgb,#fff 35%,transparent),
+    0 1px 2px color-mix(in srgb,var(--accent) 45%,transparent);
   display:grid;place-items:center;flex:0 0 auto}
-.who{display:flex;flex-direction:column;line-height:1.25;min-width:0}
-.who b{font-size:14px;font-weight:600;letter-spacing:-.01em}
-.who span{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.who{display:flex;flex-direction:column;line-height:1.3;min-width:0}
+.who b{font-size:13.5px;font-weight:600;letter-spacing:-.012em}
+/* A presence dot rather than the bare word. "Ready" on its own is a label;
+   a small live dot beside it is a state, and states are what people read. */
+.who span{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px;
+  letter-spacing:.005em}
+.who span::before{content:'';width:5px;height:5px;border-radius:50%;flex:0 0 auto;
+  background:color-mix(in srgb,var(--accent) 70%,transparent);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 14%,transparent)}
 header .x{margin-left:auto;background:none;border:0;cursor:pointer;color:var(--muted);
   width:30px;height:30px;border-radius:8px;display:grid;place-items:center;transition:background .16s,color .16s}
 header .x:hover{background:var(--sunk);color:var(--ink)}
 
 .scroll{flex:1 1 auto;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
-.scroll::-webkit-scrollbar{width:9px}
-.scroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:9px;border:3px solid var(--paper)}
+.scroll::-webkit-scrollbar{width:10px}
+.scroll::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--ink) 14%,transparent);
+  border-radius:9px;border:3.5px solid transparent;background-clip:content-box}
+.scroll::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--ink) 24%,transparent);
+  background-clip:content-box}
 
 /* ---------- opening state ------------------------------------------------ */
 .intro{padding:26px 20px 8px}
@@ -247,8 +285,12 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
 
 /* ---------- messages ----------------------------------------------------- */
 .log{display:flex;flex-direction:column;gap:10px;padding:16px 16px 4px}
-.msg{max-width:87%;padding:10px 13px;font-size:14.5px;line-height:1.55;white-space:pre-wrap;
-  word-wrap:break-word;border-radius:14px;animation:rise .34s var(--ease) both}
+/* 15px at 1.6, not 14.5 at 1.55. The difference sounds trivial and is most
+   of why a chat panel reads as a form field instead of something written to
+   you — text people actually read wants air. */
+.msg{max-width:88%;padding:11px 14px;font-size:15px;line-height:1.6;white-space:pre-wrap;
+  word-wrap:break-word;border-radius:16px;letter-spacing:-.003em;
+  animation:rise .34s var(--ease) both}
 @keyframes rise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
 /* A TINT of the accent, not the accent itself.
    Solid brand colour on every shopper bubble turns the transcript into a
@@ -257,11 +299,16 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
    The accent belongs on the one control you want pressed. A wash of it
    still reads as "this was you", and the text stays ink, so contrast holds
    whatever colour the merchant picks. */
-.msg.user{align-self:flex-end;border-bottom-right-radius:5px;
-  background:color-mix(in srgb,var(--accent) 14%,var(--paper));
+.msg.user{align-self:flex-end;border-bottom-right-radius:6px;
+  background:color-mix(in srgb,var(--accent) 13%,var(--paper));
   color:var(--ink);
-  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 22%,transparent)}
-.msg.bot{align-self:flex-start;background:var(--sunk);border-bottom-left-radius:5px}
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent),
+    inset 0 1px 0 0 color-mix(in srgb,#fff 22%,transparent)}
+.msg.bot{align-self:flex-start;background:var(--sunk);border-bottom-left-radius:6px;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb,var(--ink) 5%,transparent),
+    inset 0 1px 0 0 var(--sheen)}
 .dots{display:inline-flex;gap:4px;padding:3px 1px}
 .dots i{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.3;
   animation:blink 1.25s infinite var(--ease)}
@@ -270,13 +317,15 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
 
 /* ---------- products: the hero, not an afterthought ---------------------- */
 .rail{padding:12px 16px 4px}
-.rail h3{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+.rail h3{font-size:10.5px;font-weight:650;letter-spacing:.085em;text-transform:uppercase;
   color:var(--muted);margin-bottom:9px}
 .cards{display:flex;gap:11px;overflow-x:auto;scroll-snap-type:x mandatory;
   padding-bottom:6px;scrollbar-width:none}
 .cards::-webkit-scrollbar{display:none}
 .card{flex:0 0 156px;scroll-snap-align:start;border:1px solid var(--line);border-radius:13px;
   overflow:hidden;background:var(--paper);cursor:pointer;text-align:left;padding:0;
+  box-shadow:0 1px 2px color-mix(in srgb,var(--ink) 6%,transparent),
+    inset 0 1px 0 0 var(--sheen);
   display:block;text-decoration:none;color:inherit;font:inherit;
   animation:pop .42s var(--ease) both;transition:transform .22s var(--ease),box-shadow .22s var(--ease),border-color .22s}
 @keyframes pop{from{opacity:0;transform:scale(.95) translateY(8px)}to{opacity:1;transform:none}}
@@ -313,12 +362,21 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
 .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* ---------- composer ----------------------------------------------------- */
-form{display:flex;align-items:flex-end;gap:8px;padding:12px 14px;flex:0 0 auto;
-  border-top:1px solid var(--line);background:var(--paper);
+form{display:flex;align-items:flex-end;gap:8px;padding:11px 13px;flex:0 0 auto;
+  border-top:1px solid var(--line);
+  background:color-mix(in srgb,var(--paper) 92%,transparent);
+  backdrop-filter:saturate(1.4) blur(10px);
+  box-shadow:inset 0 1px 0 0 var(--sheen);
   padding-bottom:calc(12px + env(safe-area-inset-bottom,0px))}
-.field{flex:1;display:flex;align-items:center;background:var(--sunk);border:1px solid transparent;
-  border-radius:12px;transition:border-color .18s,background .18s}
-.field:focus-within{border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--paper)}
+.field{flex:1;display:flex;align-items:center;background:var(--sunk2);
+  border:1px solid color-mix(in srgb,var(--ink) 6%,transparent);
+  border-radius:13px;transition:border-color .18s,background .18s,box-shadow .18s;
+  box-shadow:inset 0 1px 2px color-mix(in srgb,var(--ink) 5%,transparent)}
+/* A ring, not a hard border swap. The 2px halo is what reads as focus on a
+   touch device where there is no cursor to follow. */
+.field:focus-within{border-color:color-mix(in srgb,var(--accent) 40%,transparent);
+  background:var(--paper);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 12%,transparent)}
 textarea{flex:1;border:0;background:none;color:inherit;resize:none;outline:none;
   font-size:14.5px;line-height:1.45;padding:11px 13px;max-height:104px;min-height:42px}
 textarea::placeholder{color:var(--muted)}

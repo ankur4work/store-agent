@@ -19,10 +19,19 @@ import { THRESHOLDS } from '@storeagent/voice';
  * called, and whether anything reaches the page.
  */
 
+/**
+ * Normalised to LF.
+ *
+ * Git stores the widget with LF, and a Windows checkout or an editor can
+ * hand it back with CRLF — so a test matching on a newline passes in CI and
+ * fails on a developer's machine. A test whose result depends on the
+ * checkout is worse than one that simply fails, because it teaches people
+ * to ignore it.
+ */
 const SRC = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../public/widget.js'),
   'utf8',
-);
+).replace(/\r\n/g, '\n');
 
 interface StubEl {
   children: StubEl[];
@@ -722,7 +731,7 @@ describe('widget colour', () => {
    */
   it('tints the shopper bubble rather than filling it with the accent', () => {
     const bubble = SRC.slice(SRC.indexOf('.msg.user{'), SRC.indexOf('.msg.bot{'));
-    expect(bubble).toContain('color-mix(in srgb,var(--accent) 14%,var(--paper))');
+    expect(bubble).toMatch(/background:color-mix\(in srgb,var\(--accent\) \d+%,var\(--paper\)\)/);
     // Ink text, so contrast survives whatever accent the merchant sets.
     expect(bubble).toContain('color:var(--ink)');
     expect(bubble).not.toMatch(/background:var\(--accent\)(;|\})/);
@@ -763,5 +772,50 @@ describe('the square voice box', () => {
     // A shopper who tapped a microphone did not ask to lose the page.
     const mobile = SRC.slice(SRC.indexOf('@media (max-width:480px)'));
     expect(mobile).toMatch(/\.panel\.compact\{width:min\(320px,calc\(100vw - 32px\)\)/);
+  });
+});
+
+/**
+ * What reads as cheap is not the colour, it is flat surfaces meeting at
+ * hard borders with no depth hierarchy — one shade everywhere, a 1px line
+ * drawn around each box, and body text set like a form field.
+ */
+describe('widget surface craft', () => {
+  it('layers the panel shadow instead of one blurry drop', () => {
+    const panel = SRC.slice(SRC.indexOf('.panel{'), SRC.indexOf('.panel.on'));
+    // Contact, lift, room, and a sheen along the top edge.
+    expect(panel).toContain('inset 0 1px 0 0 var(--sheen)');
+    expect((panel.match(/rgba\(0,0,0,/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('uses hairlines rather than drawn borders', () => {
+    // 11% ink reads as a box drawn around content; 7% reads as two
+    // surfaces meeting.
+    expect(SRC).toMatch(/--line:color-mix\(in srgb,var\(--ink\) 7%/);
+  });
+
+  it('sinks the composer below the conversation instead of matching it', () => {
+    // A single flat surface everywhere is most of what makes an interface
+    // look unfinished.
+    expect(SRC).toMatch(/--sunk2:color-mix/);
+    const field = SRC.slice(SRC.indexOf('.field{'), SRC.indexOf('.field:focus-within'));
+    expect(field).toContain('background:var(--sunk2)');
+  });
+
+  it('gives focus a ring, which is the only focus cue on a touch device', () => {
+    expect(SRC).toMatch(/\.field:focus-within\{[\s\S]{0,220}box-shadow:0 0 0 3px/);
+  });
+
+  it('sets body text to be read, not to fit', () => {
+    const msg = SRC.slice(SRC.indexOf('.msg{'), SRC.indexOf('@keyframes rise'));
+    expect(msg).toContain('font-size:15px');
+    expect(msg).toContain('line-height:1.6');
+  });
+
+  it('derives every surface from the merchant theme, never a fixed colour', () => {
+    // The widget has no palette of its own: a hard-coded grey is invisible
+    // on a dark theme and a hard-coded white blows out on a light one.
+    const surfaces = SRC.slice(SRC.indexOf('--muted:'), SRC.indexOf('--ease:'));
+    expect(surfaces).not.toMatch(/#[0-9a-f]{6}/i);
   });
 });
