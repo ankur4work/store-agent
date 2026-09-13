@@ -12,6 +12,11 @@ dist/
 *.db-wal
 *.db-shm
 
+# Build output of scripts/build-widget.mjs. Generated from widget.js on every
+# build, including inside the Docker image, so committing it would only create
+# a second copy to go stale.
+packages/gateway/public/widget.min.js
+
 # Local tool state
 .claude/
 .DS_Store

@@ -6,6 +6,8 @@ import { MemorySessionStore, newSession } from '../src/sessions.js';
 import { createToolExecutor } from '../src/tool-executor.js';
 import { searchDemoCatalog, DEMO_POLICIES } from '../src/catalog-fixture.js';
 import { loadConfig } from '../src/config.js';
+import { MemoryShopStore, newShop } from '../src/shopify/shops.js';
+import { Telemetry } from '../src/observability/telemetry.js';
 
 /**
  * The gateway is tested against a stub OpenAI endpoint rather than the live
@@ -31,6 +33,15 @@ describe('config', () => {
     expect(loadConfig({ OPENAI_API_KEY: 'sk-x', DEV_SHOP_DOMAIN: 'a.myshopify.com' }).shopDomain).toBe(
       'a.myshopify.com',
     );
+  });
+
+  it('treats a blanked shop domain as unset, not as a shop named ""', () => {
+    // Blanking the value is how a hosting UI turns a variable off. Kept as an
+    // empty string it would be built into `https:///api/ucp/mcp`.
+    expect(loadConfig({ OPENAI_API_KEY: 'sk-x', SHOP_DOMAIN: '' }).shopDomain).toBeUndefined();
+    expect(
+      loadConfig({ OPENAI_API_KEY: 'sk-x', SHOP_DOMAIN: '', DEV_SHOP_DOMAIN: 'a.myshopify.com' }).shopDomain,
+    ).toBe('a.myshopify.com');
   });
 });
 
@@ -150,6 +161,18 @@ describe('http surface', () => {
     expect(r.headers.get('content-type')).toContain('javascript');
   });
 
+  it('lets the widget revalidate without blocking the page', async () => {
+    // It loads on every navigation of every storefront. `must-revalidate`
+    // stalled each one on a round trip once the 5 minutes were up, on a file
+    // whose ETag already made that a 304.
+    const cc = (await fetch(`${base}/widget.js`)).headers.get('cache-control') ?? '';
+    expect(cc).toMatch(/stale-while-revalidate=\d+/);
+    // But bounded: an unversioned URL plus a week of staleness means a fixed
+    // bug keeps running on storefronts for days.
+    const swr = Number(/stale-while-revalidate=(\d+)/.exec(cc)![1]);
+    expect(swr).toBeLessThanOrEqual(3600);
+  });
+
   it('serves the demo storefront at /', async () => {
     expect((await fetch(`${base}/`)).status).toBe(200);
   });
@@ -190,6 +213,164 @@ describe('http surface', () => {
   it('never leaks a stack trace', async () => {
     const text = await fetch(`${base}/nope`).then((x) => x.text());
     expect(text).not.toMatch(/at .*\(/);
+  });
+});
+
+/**
+ * Who is allowed to reach the gateway from a browser.
+ *
+ * App review failed 5.1.2 here: the embed rendered on their test store, the
+ * shopper asked for snowboards, and the fetch never left the browser because
+ * ALLOWED_ORIGINS — a list written before any merchant existed — did not name
+ * their storefront. A refused preflight looks identical to an outage from the
+ * page and leaves nothing in the server log, so these pin the three ways in.
+ */
+describe('storefront origins', () => {
+  let server: Server;
+  let base: string;
+  let shops: MemoryShopStore;
+
+  async function preflight(origin: string, query = ''): Promise<string | null> {
+    const r = await fetch(`${base}/api/chat${query}`, {
+      method: 'OPTIONS',
+      headers: { origin, 'access-control-request-method': 'POST' },
+    });
+    expect(r.status).toBe(204);
+    return r.headers.get('access-control-allow-origin');
+  }
+
+  beforeEach(async () => {
+    shops = new MemoryShopStore();
+    await shops.put(newShop('installed.myshopify.com', 'tok', 'read_products'));
+    server = createGateway({
+      config: loadConfig({
+        OPENAI_API_KEY: 'sk-test',
+        ALLOWED_ORIGINS: 'https://storeagent.tech,http://localhost:3000',
+      }),
+      shops,
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('allows an origin the operator listed', async () => {
+    expect(await preflight('https://storeagent.tech')).toBe('https://storeagent.tech');
+    // Development still works: the list is matched verbatim, scheme and port
+    // included, so a localhost entry is not quietly upgraded away.
+    expect(await preflight('http://localhost:3000')).toBe('http://localhost:3000');
+  });
+
+  it('allows any Shopify storefront, listed or not', async () => {
+    // The review blocker in one line: this store was never in the env var and
+    // never could have been, because it did not exist when the var was written.
+    expect(await preflight('https://reviewer-test-store.myshopify.com')).toBe(
+      'https://reviewer-test-store.myshopify.com',
+    );
+  });
+
+  it('refuses an origin that is neither listed nor a storefront', async () => {
+    expect(await preflight('https://evil.example')).toBeNull();
+    // A lookalike must not pass on a suffix match.
+    expect(await preflight('https://myshopify.com.evil.example')).toBeNull();
+  });
+
+  it('refuses a Shopify-shaped origin served over http', async () => {
+    // Real storefronts are https. An http one is someone stripping transport
+    // security, not a merchant.
+    expect(await preflight('http://acme.myshopify.com')).toBeNull();
+  });
+
+  it('allows a custom storefront domain when the shop it names is installed', async () => {
+    // Most merchants do not shop on myshopify.com — they have their own
+    // domain, and the origin alone proves nothing about who owns it. The
+    // install record is what vouches for the claim.
+    expect(await preflight('https://shop.acme.com', '?shop=installed.myshopify.com')).toBe(
+      'https://shop.acme.com',
+    );
+  });
+
+  it('refuses a custom domain claiming a shop that never installed', async () => {
+    expect(await preflight('https://shop.acme.com', '?shop=stranger.myshopify.com')).toBeNull();
+    // And a claim that is not a shop domain at all buys nothing.
+    expect(await preflight('https://shop.acme.com', '?shop=shop.acme.com')).toBeNull();
+  });
+
+  it('still honours a wildcard where an operator sets one', async () => {
+    const open = createGateway({
+      config: loadConfig({ OPENAI_API_KEY: 'sk-test', ALLOWED_ORIGINS: '*' }),
+    });
+    await new Promise<void>((r) => open.listen(0, r));
+    const at = `http://127.0.0.1:${(open.address() as AddressInfo).port}`;
+    const r = await fetch(`${at}/api/chat`, { method: 'OPTIONS', headers: { origin: 'https://anywhere.example' } });
+    expect(r.headers.get('access-control-allow-origin')).toBe('https://anywhere.example');
+    await new Promise<void>((r) => open.close(() => r()));
+  });
+});
+
+/**
+ * Which store answers.
+ *
+ * The chat request used to carry no shop at all, so every turn in every
+ * storefront was served from SHOP_DOMAIN. Reviewing that as a public app, the
+ * snowboards a merchant sees would be someone else's snowboards — wrong
+ * prices, wrong stock, stated with complete confidence.
+ *
+ * Asserted on the service-level metric because it is labelled with the shop
+ * and recorded before any model call, so the binding can be checked without a
+ * live model or a live storefront.
+ */
+describe('chat is bound to the storefront it came from', () => {
+  let server: Server;
+  let base: string;
+  let metrics: Telemetry;
+
+  async function openTurn(body: unknown, query = ''): Promise<void> {
+    const ctl = new AbortController();
+    // Headers arrive before the model is asked anything; the turn is abandoned
+    // immediately after, which is exactly what a shopper closing a tab does.
+    await fetch(`${base}/api/chat${query}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+    });
+    ctl.abort();
+  }
+
+  beforeEach(async () => {
+    metrics = new Telemetry();
+    server = createGateway({
+      config: loadConfig({ OPENAI_API_KEY: 'sk-test', SHOP_DOMAIN: 'operator.myshopify.com' }),
+      telemetry: metrics,
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('serves the shop the widget names, not the one in the env var', async () => {
+    await openTurn({ message: 'show me some snowboards', shop: 'merchant.myshopify.com' });
+    expect(metrics.render()).toContain('merchant.myshopify.com');
+    expect(metrics.render()).not.toContain('operator.myshopify.com');
+  });
+
+  it('falls back to SHOP_DOMAIN when the widget names nothing', async () => {
+    // Single-tenant and demo deployments must behave exactly as before.
+    await openTurn({ message: 'hello' });
+    expect(metrics.render()).toContain('operator.myshopify.com');
+  });
+
+  it('ignores a shop that is not a Shopify domain', async () => {
+    // The field is client-supplied, and it becomes an outbound URL.
+    await openTurn({ message: 'hello', shop: 'evil.example/../x' });
+    expect(metrics.render()).toContain('operator.myshopify.com');
   });
 });
 

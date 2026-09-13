@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Orchestrator, OpenAIModelClient, reachedHuman, type MerchantPack } from '@storeagent/orchestrator';
@@ -16,7 +16,7 @@ import { createLogger, type Logger } from './observability/logger.js';
 import { PLANS, PLAN_ORDER, isPlanId } from '@storeagent/billing';
 import { DEMO_CATALOG } from './catalog-fixture.js';
 import { beginInstall, completeInstall } from './shopify/oauth.js';
-import { parseShopDomain } from './shopify/domain.js';
+import { isValidShopDomain, parseShopDomain } from './shopify/domain.js';
 import { exchangeSessionToken } from './shopify/token-exchange.js';
 import { handleWebhook, parseSubscriptionPayload } from './shopify/webhooks.js';
 import {
@@ -126,10 +126,40 @@ export function createGateway(deps: GatewayDeps): Server {
     maxRetries: 1,
   });
 
-  const ucp =
-    config.shopDomain === undefined
-      ? undefined
-      : new UcpClient({ shopDomain: config.shopDomain, agentProfile: config.agentProfile });
+  /**
+   * One UCP client per shop, built on demand.
+   *
+   * There used to be exactly one, built from SHOP_DOMAIN at boot, and every
+   * chat turn in every storefront used it. On a single-tenant deployment that
+   * is invisible. As a public app it means each merchant's assistant answers
+   * out of whichever store the env var happens to name — the wrong catalog,
+   * the wrong prices, the wrong stock, stated with total confidence, and one
+   * merchant's storefront quietly advertising another's.
+   *
+   * UCP is unauthenticated public storefront data: the endpoint is derived
+   * from the domain and carries no token, so a client is little more than a
+   * URL and memoizing them costs nothing. That also means this deliberately
+   * does NOT require an install record — a shop whose row was lost to a
+   * redeploy gets a thin catalog, not somebody else's.
+   */
+  const ucpClients = new Map<string, UcpClient>();
+  function ucpFor(shop: string | undefined): UcpClient | undefined {
+    // No shop at all, or a placeholder like `demo.local`: the fixture catalog
+    // stands in. See tool-executor.ts.
+    if (shop === undefined) return undefined;
+    // Anything that arrived in a request becomes an outbound URL, so it has to
+    // clear the domain grammar first — that check is the whole point of
+    // shopify/domain.ts. SHOP_DOMAIN is operator-set and may legitimately be a
+    // custom domain, so it is trusted as configured.
+    if (shop !== config.shopDomain && !isValidShopDomain(shop)) return undefined;
+    let client = ucpClients.get(shop);
+    if (client === undefined) {
+      client = new UcpClient({ shopDomain: shop, agentProfile: config.agentProfile });
+      ucpClients.set(shop, client);
+    }
+    return client;
+  }
+  const ucp = ucpFor(config.shopDomain);
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((err: unknown) => {
@@ -143,7 +173,7 @@ export function createGateway(deps: GatewayDeps): Server {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    cors(res, req.headers.origin, config.allowedOrigins);
+    await cors(res, req.headers.origin, url, config.allowedOrigins, shops);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204).end();
@@ -605,7 +635,7 @@ export function createGateway(deps: GatewayDeps): Server {
           settings: await settings.get(shop),
           stats: {
             activeSessions: await sessions.size(),
-            mode: (ucp ? 'live' : 'demo') as 'live' | 'demo',
+            mode: (ucpFor(shop) ? 'live' : 'demo') as 'live' | 'demo',
             model: config.models.workhorse,
           },
           lift,
@@ -702,7 +732,7 @@ export function createGateway(deps: GatewayDeps): Server {
         settings: await settings.get(shop),
         stats: {
           activeSessions: await sessions.size(),
-          mode: (ucp ? 'live' : 'demo') as 'live' | 'demo',
+          mode: (ucpFor(shop) ? 'live' : 'demo') as 'live' | 'demo',
           model: config.models.workhorse,
         },
         lift,
@@ -1032,9 +1062,31 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
+    /**
+     * Which store is this shopper standing in?
+     *
+     * The app embed injects `shop.permanent_domain`, so the widget always
+     * knows and now says so. Before this the answer was SHOP_DOMAIN for
+     * everyone, which is how a snowboard question on one store got answered
+     * from another.
+     *
+     * It is client-supplied and therefore spoofable — the same bounded
+     * exposure the rate limiter above already accepts, and all it reaches is
+     * public catalog data for the shop it names. Falling back to SHOP_DOMAIN
+     * leaves single-tenant and demo deployments exactly as they were.
+     */
+    const claimed = parseShopDomain(body.shop);
+    const shopDomain = claimed.ok ? claimed.shop! : (config.shopDomain ?? 'demo.local');
+
     const sessionId = typeof body.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : randomUUID();
+    const existing = await sessions.get(sessionId);
+    // A session id is a string a browser handed us. It must never carry a
+    // shop, a cart, or a transcript from one storefront into another, so a
+    // mismatch starts a fresh session rather than adopting the old shop.
     const session =
-      (await sessions.get(sessionId)) ?? newSession(sessionId, config.shopDomain ?? 'demo.local');
+      existing !== undefined && existing.shopDomain === shopDomain
+        ? existing
+        : newSession(sessionId, shopDomain);
 
     // Service level, decided before any model work so a degraded shop costs
     // less rather than costing a refusal.
@@ -1107,7 +1159,7 @@ export function createGateway(deps: GatewayDeps): Server {
     const allProducts: unknown[] = [];
     const executor = createToolExecutor({
       session,
-      ucp,
+      ucp: ucpFor(session.shopDomain),
       ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
       log,
       onCartChange: (cartId) => {
@@ -1413,6 +1465,8 @@ export function createGateway(deps: GatewayDeps): Server {
 interface ChatRequest {
   message?: unknown;
   sessionId?: unknown;
+  /** The storefront the widget is embedded in — `shop.permanent_domain`. */
+  shop?: unknown;
   page?: { type: 'product' | 'collection' | 'cart' | 'other'; title?: string; productId?: string };
   justNavigated?: unknown;
   /** Emit `speak` events with whole utterances alongside the text deltas. */
@@ -1492,7 +1546,7 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
   const root = publicRoot();
   if (root === undefined) return false;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-  const target = resolve(root, rel);
+  const target = builtWidget(root, pathname) ?? resolve(root, rel);
   if (!target.startsWith(resolve(root))) return false; // traversal attempt
 
   try {
@@ -1520,16 +1574,51 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
   }
 }
 
+/**
+ * The minified bundle, when there is one and it is current.
+ *
+ * `/widget.js` is the URL every storefront has embedded, so the built file is
+ * served UNDER THE SOURCE'S NAME rather than at its own — renaming the asset
+ * would strand every theme already pointing at the old one.
+ *
+ * The mtime comparison is the point. A stale build artifact is worse than no
+ * build artifact: the source would say one thing, the storefront would run
+ * another, and nothing anywhere would disagree out loud. Editing widget.js
+ * without rebuilding therefore falls back to the source — slower, but what the
+ * developer is actually looking at. `npm run build` regenerates it, so
+ * production always serves the small one.
+ */
+function builtWidget(root: string, pathname: string): string | undefined {
+  if (pathname !== '/widget.js') return undefined;
+  const built = resolve(root, 'widget.min.js');
+  try {
+    if (statSync(built).mtimeMs >= statSync(resolve(root, 'widget.js')).mtimeMs) return built;
+  } catch {
+    // Not built yet — a fresh checkout, or `npm run build` has not run.
+  }
+  return undefined;
+}
+
 function cacheControlFor(ext: string, pathname?: string): string {
   if (ext === '.html') return 'no-cache';
 
   // widget.js is the whole product and is unversioned: every storefront asks
-  // for the same URL forever. Under the shared policy below, a browser may
-  // serve a copy up to a WEEK old while it revalidates — so a merchant can keep
-  // running a bug for days after it is fixed, and "I deployed a fix" and "you
-  // are still on the old code" are indistinguishable. It has an ETag, so
-  // revalidation is a 304 and costs almost nothing.
-  if (pathname === '/widget.js') return 'public, max-age=300, must-revalidate';
+  // for the same URL forever. The shared policy below would let a browser
+  // serve a copy up to a WEEK old, so a merchant could keep running a bug for
+  // days after it was fixed, and "I deployed a fix" and "you are still on the
+  // old code" would be indistinguishable.
+  //
+  // `must-revalidate` was the first answer to that and overcorrected: past the
+  // freshness window it blocks the page on a round trip, on a file that loads
+  // on every navigation of every storefront — the exact cost the caching
+  // policy above exists to avoid. It buys nothing either, because the ETag
+  // already makes the revalidation a 304.
+  //
+  // A short `stale-while-revalidate` gets both: the page paints immediately
+  // from cache and the update is fetched in the background, so a fix lands on
+  // the shopper's NEXT navigation instead of stalling this one. An hour, not a
+  // week — the ceiling on running old code stays measured in minutes.
+  if (pathname === '/widget.js') return 'public, max-age=300, stale-while-revalidate=3600';
 
   return 'public, max-age=600, stale-while-revalidate=604800';
 }
@@ -1565,9 +1654,74 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.end(buf);
 }
 
-function cors(res: ServerResponse, origin: string | undefined, allowed: readonly string[]): void {
-  const ok = allowed.includes('*') ? (origin ?? '*') : allowed.includes(origin ?? '') ? origin! : '';
-  if (ok !== '') res.setHeader('access-control-allow-origin', ok);
+/**
+ * Which storefront origins may call the gateway.
+ *
+ * ALLOWED_ORIGINS alone is a single-tenant answer to a multi-tenant question.
+ * A public app cannot enumerate its merchants' storefronts in an env var
+ * before they install, so every origin not on the list was refused — and a
+ * refused preflight fails in the browser, before the request exists, with
+ * nothing in our logs. App review enabled the embed on their own test store,
+ * asked for snowboards, and got "I couldn't reach the store just then": the
+ * widget rendered, the gateway was healthy, and the two were never introduced.
+ *
+ * Three ways in, cheapest first:
+ *
+ *   1. ALLOWED_ORIGINS — the operator's own list. Self-hosting, the demo page,
+ *      localhost in development.
+ *   2. Any `{name}.myshopify.com` over https. Every Shopify storefront has
+ *      one, it is the origin a fresh install serves from, and the domain
+ *      grammar is strict (see shopify/domain.ts).
+ *   3. A custom storefront domain, but only when the request names an
+ *      installed shop. The origin itself proves nothing here — anyone can host
+ *      anything — so the install record is what vouches for it.
+ *
+ * None of this is the spend control, and it never was: the config notes
+ * already say a script can POST /api/chat directly and skip CORS entirely.
+ * The rate limiter and the per-shop daily ceiling are what bound the bill.
+ * This decides whose *browser* can talk to us, so widening it costs a
+ * freeloading dev store at worst, while narrowing it costs every real merchant
+ * their assistant.
+ */
+async function allowedOrigin(
+  origin: string | undefined,
+  url: URL,
+  allowed: readonly string[],
+  shops: ShopStore,
+): Promise<string | undefined> {
+  if (allowed.includes('*')) return origin ?? '*';
+  if (origin === undefined) return undefined;
+  if (allowed.includes(origin)) return origin;
+
+  let host: string;
+  try {
+    const parsed = new URL(origin);
+    // A storefront is https. Anything else is either a local page or someone
+    // stripping transport security, and neither is a merchant.
+    if (parsed.protocol !== 'https:') return undefined;
+    host = parsed.hostname;
+  } catch {
+    // Opaque origins ("null") and malformed values land here.
+    return undefined;
+  }
+
+  if (isValidShopDomain(host)) return origin;
+
+  const claimed = parseShopDomain(url.searchParams.get('shop'));
+  if (claimed.ok && (await shops.get(claimed.shop!)) !== undefined) return origin;
+
+  return undefined;
+}
+
+async function cors(
+  res: ServerResponse,
+  origin: string | undefined,
+  url: URL,
+  allowed: readonly string[],
+  shops: ShopStore,
+): Promise<void> {
+  const ok = await allowedOrigin(origin, url, allowed, shops);
+  if (ok !== undefined) res.setHeader('access-control-allow-origin', ok);
   /**
    * Every custom header the widget sends must be listed here.
    *

@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "bench": "npm run bench --workspace @storeagent/ucp-client",
-    "build": "tsc --build",
+    "build": "tsc --build && node scripts/build-widget.mjs",
+    "build:widget": "node scripts/build-widget.mjs",
     "check-all": "npm run build && node scripts/check-secrets.mjs --all && node scripts/check-deploy.mjs && node scripts/check-limits.mjs && node scripts/check-billing.mjs && node scripts/check-observability.mjs && node scripts/check-launch.mjs",
     "check-billing": "npm run build && node scripts/check-billing.mjs",
     "check-deploy": "npm run build && node scripts/check-deploy.mjs",
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
     "@shopify/web-pixels-extension": "^2.18.0",
+    "esbuild": "^0.21.5",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -33,7 +33,7 @@ but the transcript is outside its reach.
 | `SHOPIFY_API_KEY` | ✅ in prod | Public client id |
 | `SHOPIFY_API_SECRET` | ✅ in prod | Rotate first |
 | `SHOPIFY_APP_URL` | ✅ in prod | Must be `https://` — enforced |
-| `ALLOWED_ORIGINS` | ✅ in prod | Real storefront origins. `*` is rejected |
+| `ALLOWED_ORIGINS` | ✅ in prod | Extra origins beyond installed storefronts. `*` is rejected |
 | `NODE_ENV=production` | ✅ | Turns on the checks below |
 | `SHOPIFY_BILLING_TEST` | ✅ in prod | `true` simulates charges, `false` bills for real. No default |
 | `RATE_LIMIT_ENABLED` | ✅ in prod | Must not be `false`; refuses to start |
@@ -52,6 +52,14 @@ development and damaging in production:
 
 - **`ALLOWED_ORIGINS=*`** — any website could drive a merchant's assistant and
   bill them for the tokens.
+
+**You do not list your merchants here.** Any `{name}.myshopify.com` storefront
+is accepted automatically, as is a merchant's custom domain once their shop has
+installed — a public app cannot know those origins before the install happens,
+and listing them by hand is how app review got "I couldn't reach the store just
+then" on a store that had only just been created. This variable is for the
+origins that are *not* storefronts: your own demo page, a self-hosted front end,
+localhost during development.
 - **Missing Shopify credentials** — the OAuth routes silently disable, so the
   app looks healthy and no merchant can install. A confusing failure at the
   worst possible moment.

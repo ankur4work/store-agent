@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import vm from 'node:vm';
+import { transformSync } from 'esbuild';
 import { THRESHOLDS } from '@storeagent/voice';
 
 /**
@@ -32,6 +34,25 @@ const SRC = readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../public/widget.js'),
   'utf8',
 ).replace(/\r\n/g, '\n');
+
+/**
+ * The same two steps `scripts/build-widget.mjs` ships, run in process.
+ *
+ * That script is the shipping path and owns the budget; this is here so the
+ * built bundle can be executed by the harness below on a fresh checkout,
+ * without the tests depending on whether anyone has run a build. The CSS is
+ * minified first because it lives in a template literal, which the JS
+ * minifier treats as an opaque string.
+ */
+function buildSync(): string {
+  const open = SRC.indexOf('var CSS = `');
+  const start = open + 'var CSS = `'.length;
+  const end = SRC.indexOf('`', start);
+  expect(open, 'the CSS literal moved — scripts/build-widget.mjs needs updating too').toBeGreaterThan(-1);
+  const css = transformSync(SRC.slice(start, end), { loader: 'css', minify: true }).code;
+  const spliced = SRC.slice(0, start) + css + SRC.slice(end);
+  return transformSync(spliced, { loader: 'js', minify: true, target: 'es2019' }).code;
+}
 
 interface StubEl {
   children: StubEl[];
@@ -108,6 +129,8 @@ async function run(opts: {
   arm?: string;
   config?: Record<string, unknown>;
   themeTokens?: Record<string, string>;
+  /** Defaults to the source. The built bundle is exercised the same way. */
+  source?: string;
 }): Promise<RunResult> {
   const calls: string[] = [];
   const said: string[] = [];
@@ -165,7 +188,7 @@ async function run(opts: {
   if (opts.designMode === true) sandbox['Shopify'] = { designMode: true };
 
   vm.createContext(sandbox);
-  vm.runInContext(SRC, sandbox, { filename: 'widget.js' });
+  vm.runInContext(opts.source ?? SRC, sandbox, { filename: 'widget.js' });
 
   // Let the mount promise chain settle.
   await new Promise((r) => setTimeout(r, 20));
@@ -956,5 +979,56 @@ describe('widget microphone on page load', () => {
     // refreshed or clicked through to another product, with no gesture.
     expect(SRC).toContain('if (state.open) open({ voice: false })');
     expect(SRC).not.toMatch(/if \(state\.open\) open\(\);/);
+  });
+});
+
+/**
+ * The bytes storefronts actually download.
+ *
+ * Everything above reads the source. Shoppers get the minified bundle, and a
+ * minifier that broke the widget would leave every test above green — the
+ * failure would surface as a blank launcher on someone's storefront, which is
+ * exactly the class of problem app review reports back.
+ *
+ * Built here rather than read from disk so this passes on a fresh checkout,
+ * and so it tests the current source rather than whatever was last built.
+ */
+describe('built widget bundle', () => {
+  const built = buildSync();
+
+  it('is under the 15 KB storefront budget', () => {
+    expect(gzipSync(Buffer.from(built), { level: 9 }).length).toBeLessThan(15 * 1024);
+  });
+
+  it('keeps the build stamp, which is how a stale copy is identified', () => {
+    const stamp = /var BUILD = '([^']+)'/.exec(SRC)![1]!;
+    expect(built).toContain(stamp);
+  });
+
+  it('still mounts for the exposed arm', async () => {
+    const r = await run({ arm: 'exposed', source: built });
+    expect(r.mounted).toBe(true);
+    expect(r.calls.some((c) => c.includes('/api/exposure'))).toBe(true);
+  });
+
+  it('still renders nothing for the holdout arm', async () => {
+    // Minification collapsing this branch would silently destroy the
+    // experiment rather than break anything visible.
+    const r = await run({ arm: 'holdout', source: built });
+    expect(r.mounted).toBe(false);
+  });
+
+  it('still names the shop on the chat request', async () => {
+    const r = await run({ arm: 'exposed', source: built });
+    expect(r.calls.some((c) => c.includes('shop=acme.myshopify.com'))).toBe(true);
+  });
+
+  it('keeps the stylesheet, minified rather than dropped', () => {
+    // The CSS is minified separately before the JS minifier sees it. If that
+    // step ever silently emitted nothing, the widget would mount unstyled.
+    expect(built).toContain('.launcher{');
+    expect(built).toContain('position:fixed');
+    // And the prose that makes the source readable is gone from the wire.
+    expect(built).not.toContain('hairline');
   });
 });

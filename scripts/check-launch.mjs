@@ -16,9 +16,9 @@
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { BUDGET_BYTES, buildWidget } from './build-widget.mjs';
 
 const PORT = 8807;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -48,8 +48,16 @@ console.log('\n=== launch readiness ===\n');
 // --- storefront performance ------------------------------------------------
 // "Cannot reduce Lighthouse score by more than 10 points."
 console.log('storefront performance (CWV)');
-const gz = gzipSync(Buffer.from(widget), { level: 9 }).length;
-check('widget under the 15 KB gzip budget', gz < 15 * 1024, `${(gz / 1024).toFixed(2)} KB`);
+// Measured on the BUILT bundle, because that is what a storefront downloads.
+// Checking the source instead measured the comments — which is how this read
+// 32 KB against a 15 KB budget while the shipped asset was never the problem.
+// `buildWidget` is the same code path `npm run build` runs.
+const built = await buildWidget({ write: false });
+check(
+  'widget under the 15 KB gzip budget',
+  built.gzip < BUDGET_BYTES,
+  `${(built.gzip / 1024).toFixed(2)} KB built, from ${(built.sourceGzip / 1024).toFixed(2)} KB of source`,
+);
 check('script is deferred, never parser-blocking', /<script[^>]*\bdefer\b/.test(liquid));
 check('no render-blocking stylesheet link', !/rel=["']stylesheet["']/.test(liquid));
 check('no webfont loaded', !/fonts\.googleapis|@font-face/.test(liquid + widget));

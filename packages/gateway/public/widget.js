@@ -47,7 +47,7 @@
   // there is no way to tell a stale copy in a merchant's browser from current
   // code — which makes "I deployed a fix" and "you are still running the bug"
   // look the same.
-  var BUILD = '2026-09-12.11';
+  var BUILD = '2026-09-14.1';
 
   var state = { open: false, sessionId: null, messages: [], draft: '', products: [] };
   try {
@@ -971,7 +971,7 @@ textarea::placeholder{color:var(--muted)}
       var payload = { voice: event, build: BUILD };
       for (var k in fields) if (Object.prototype.hasOwnProperty.call(fields, k)) payload[k] = fields[k];
       say('voice ' + event + ' ' + JSON.stringify(fields || {}));
-      fetch(API + '/api/diag', {
+      fetch(API + '/api/diag?shop=' + encodeURIComponent(SHOP || ''), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ shop: SHOP, diag: payload }),
@@ -1730,7 +1730,7 @@ textarea::placeholder{color:var(--muted)}
     }
     var gen = voice.gen;
     try {
-      var r = await fetch(API + '/api/voice/speak', {
+      var r = await fetch(API + '/api/voice/speak?shop=' + encodeURIComponent(SHOP || ''), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ text: text }),
@@ -1837,13 +1837,20 @@ textarea::placeholder{color:var(--muted)}
       }
     }
 
-    fetch(API + '/api/chat', {
+    // `shop` rides in the QUERY STRING as well as the body, because two things
+    // upstream of the body need it. The CORS preflight has no body at all and
+    // still has to decide whether this origin may call us, and the rate
+    // limiter runs before the body is parsed — without this every merchant
+    // shared one bucket and throttled each other. The body copy is what the
+    // turn itself uses.
+    fetch(API + '/api/chat?shop=' + encodeURIComponent(SHOP || ''), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       signal: ctl.signal,
       body: JSON.stringify({
         message: text,
         sessionId: state.sessionId,
+        shop: SHOP,
         page: detectPage(),
         voice: isVoice === true,
       }),
@@ -2084,7 +2091,7 @@ textarea::placeholder{color:var(--muted)}
       return;
     }
 
-    fetch(API + '/api/exposure', {
+    fetch(API + '/api/exposure?shop=' + encodeURIComponent(shop || ''), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sessionId: sid, shop: shop }),
@@ -2164,7 +2171,7 @@ textarea::placeholder{color:var(--muted)}
           inViewport: r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth,
         };
         say('self-check ' + JSON.stringify(diag));
-        fetch(API + '/api/diag', {
+        fetch(API + '/api/diag?shop=' + encodeURIComponent(SHOP || ''), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ shop: SHOP, diag: diag }),

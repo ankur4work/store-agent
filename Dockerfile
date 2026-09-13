@@ -41,12 +41,23 @@ RUN npm ci --include=dev
 # fails the build with a confusing "file not found" from tsc.
 COPY tsconfig.json tsconfig.base.json ./
 COPY packages packages
+# `npm run build` is tsc PLUS scripts/build-widget.mjs, which minifies the
+# storefront widget and fails the build if it exceeds its 15 KB budget. Without
+# this copy the build dies on a missing module.
+COPY scripts scripts
 RUN npm run build
 
 # Fail loudly here rather than at container start, where the only symptom is a
 # 503 from the proxy and an empty log.
+#
+# widget.min.js is included deliberately. It is what storefronts actually
+# download, and `npm run build` fails when it goes over the 15 KB budget — so
+# its absence here means the budget check was skipped, not that a file is
+# missing. Serving the un-minified source to every shopper is a silent 2.5x
+# regression on the one asset §12 gates.
 RUN test -f packages/gateway/dist/src/main.js \
- && test -f packages/gateway/public/widget.js
+ && test -f packages/gateway/public/widget.js \
+ && test -f packages/gateway/public/widget.min.js
 
 # --- runtime ---------------------------------------------------------------
 FROM node:24-slim AS runtime

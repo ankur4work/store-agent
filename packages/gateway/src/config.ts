@@ -164,8 +164,16 @@ export function loadConfig(env: Record<string, string | undefined>): GatewayConf
     production,
     databasePath: env['STOREAGENT_DB'] ?? './storeagent.db',
     openaiApiKey: apiKey,
-    // Absent → demo mode with the fixture catalog. See tool-executor.ts.
-    shopDomain: env['SHOP_DOMAIN'] ?? env['DEV_SHOP_DOMAIN'],
+    /**
+     * Absent → demo mode with the fixture catalog. See tool-executor.ts.
+     *
+     * `emptyToUndefined` because `??` only catches an unset variable, and the
+     * usual way to turn this off in a hosting UI is to blank the value rather
+     * than delete the row. An empty string would survive as a shop domain and
+     * be built into `https:///api/ucp/mcp` — a live-looking config pointed at
+     * nowhere, which is a worse failure than demo mode.
+     */
+    shopDomain: emptyToUndefined(env['SHOP_DOMAIN']) ?? emptyToUndefined(env['DEV_SHOP_DOMAIN']),
     // Must be a URL Shopify can actually FETCH: it resolves the profile to
     // negotiate capabilities, and an unreachable one fails discovery outright.
     agentProfile: env['AGENT_PROFILE'] ?? 'https://storeagent.tech/ucp-profile.json',
