@@ -9,7 +9,7 @@ export {
   restoreCents,
   type Minor,
 } from './money.js';
-export { detectStock, detectShippingEstimate, collectAvailability, type StockPolarity } from './extract.js';
+export { detectStock, detectShippingEstimate, collectAvailability, collectTitles, type StockPolarity } from './extract.js';
 export type {
   Claim,
   ClaimKind,

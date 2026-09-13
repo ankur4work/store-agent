@@ -25,6 +25,9 @@ const OUT_OF_STOCK = [
   /\bno longer (?:available|carried)\b/i,
 ];
 
+/** Everything that reads as an inventory statement, for the name check below. */
+const STOCK_PHRASES = [...IN_STOCK, ...OUT_OF_STOCK];
+
 /**
  * Words that make "unavailable"/"not available" a statement about our SYSTEMS
  * rather than the merchant's inventory.
@@ -37,6 +40,43 @@ const OUT_OF_STOCK = [
  */
 const SYSTEM_SUBJECT =
   /\b(?:catalog|service|system|handoff|tool|api|server|site|feature|tracking|lookup|connection|network|database|integration)\b/i;
+
+/**
+ * Product names that contain stock language, and where they sit in the text.
+ *
+ * Shopify's own sample catalog — the data on every dev store, and therefore on
+ * an app reviewer's store — ships a product called "The Out of Stock
+ * Snowboard". Asked for snowboards, the assistant listed it by name, the
+ * detector read "out of stock" as an inventory claim, and the tripwire aborted
+ * a perfectly grounded answer. It retried, hit the same title, and escalated to
+ * a human: "I don't want to guess on that one." Six correct product cards were
+ * thrown away because one of them was named after the thing being checked.
+ *
+ * Only names that are THEMSELVES ambiguous create a span. A product called
+ * "Ice" can never mask anything, so nothing generic is suppressed, and the
+ * shortest possible thing is hidden from the detector: the name, exactly where
+ * it appears, and nothing else in the sentence around it. "The Out of Stock
+ * Snowboard is out of stock" still reports out-of-stock, from the second
+ * clause.
+ */
+function nameSpans(text: string, names: readonly string[]): readonly (readonly [number, number])[] {
+  const spans: (readonly [number, number])[] = [];
+  const hay = text.toLowerCase();
+  for (const raw of names) {
+    const needle = raw.trim().toLowerCase();
+    if (needle.length < 4) continue;
+    if (!STOCK_PHRASES.some((p) => p.test(needle))) continue;
+    for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + needle.length)) {
+      spans.push([i, i + needle.length]);
+    }
+  }
+  return spans;
+}
+
+/** A match wholly inside a product name is part of that name. */
+function withinName(spans: readonly (readonly [number, number])[], index: number, length: number): boolean {
+  return spans.some(([start, end]) => index >= start && index + length <= end);
+}
 
 /** The sentence containing `index`, used to scope the system-subject check. */
 function sentenceAround(text: string, index: number): string {
@@ -64,21 +104,63 @@ function firstMatch(text: string, patterns: readonly RegExp[]): string | undefin
  * Detect a stock assertion. Out-of-stock is checked FIRST because "not in
  * stock" and "no longer available" both contain in-stock substrings.
  */
-export function detectStock(text: string): { polarity: StockPolarity; evidence: string } | undefined {
+export function detectStock(
+  text: string,
+  /** Product names from this turn's tool results. See `nameSpans`. */
+  names: readonly string[] = [],
+): { polarity: StockPolarity; evidence: string } | undefined {
+  const spans = nameSpans(text, names);
+  const isName = (m: RegExpExecArray): boolean => withinName(spans, m.index, m[0].length);
+
   const negated = /\b(?:not|isn't|is not|aren't|are not|no longer)\s+(?:currently\s+)?(?:in stock|available)\b/i.exec(text);
-  if (negated && !aboutSystems(text, negated.index)) {
+  if (negated && !aboutSystems(text, negated.index) && !isName(negated)) {
     return { polarity: 'out_of_stock', evidence: negated[0] };
   }
 
   for (const p of OUT_OF_STOCK) {
-    const m = p.exec(text);
-    if (m && !aboutSystems(text, m.index)) return { polarity: 'out_of_stock', evidence: m[0] };
+    // Every occurrence, not just the first: with one product named after a
+    // stock phrase, stopping at the first match would let a real out-of-stock
+    // claim later in the same reply go unchecked.
+    for (const m of text.matchAll(new RegExp(p.source, p.flags.includes('g') ? p.flags : p.flags + 'g'))) {
+      if (!aboutSystems(text, m.index) && !isName(m as RegExpExecArray)) {
+        return { polarity: 'out_of_stock', evidence: m[0] };
+      }
+    }
   }
 
-  const inStock = firstMatch(text, IN_STOCK);
-  if (inStock !== undefined) return { polarity: 'in_stock', evidence: inStock };
+  for (const p of IN_STOCK) {
+    for (const m of text.matchAll(new RegExp(p.source, p.flags.includes('g') ? p.flags : p.flags + 'g'))) {
+      if (!isName(m as RegExpExecArray)) return { polarity: 'in_stock', evidence: m[0] };
+    }
+  }
 
   return undefined;
+}
+
+/**
+ * Product and variant titles in a tool result, deep-walked.
+ * Feeds the name check in `detectStock`.
+ */
+export function collectTitles(result: unknown): string[] {
+  const out: string[] = [];
+  const seen = new Set<unknown>();
+
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    if (typeof obj['title'] === 'string') out.push(obj['title']);
+    for (const child of Object.values(obj)) walk(child);
+  };
+
+  walk(result);
+  return out;
 }
 
 function aboutSystems(text: string, index: number): boolean {

@@ -70,3 +70,35 @@ export const POLICY_RESULT: ToolResultRecord = {
     source_url: 'https://acme.test/policies/shipping',
   },
 };
+
+/**
+ * Shopify's own sample catalog, as it arrives from a fresh dev store.
+ *
+ * The titles are verbatim: every dev store, and therefore every app reviewer's
+ * store, has a product literally called "The Out of Stock Snowboard" — and it
+ * reports `available: true`, because the name is a label for demo data, not a
+ * statement about its inventory. Listing it by name was read as a stock claim
+ * that contradicted the source, which aborted the answer and escalated.
+ */
+export const SHOPIFY_SAMPLE_SNOWBOARDS: ToolResultRecord = {
+  tool_call_id: 'toolu_search_snow',
+  tool: 'search_catalog',
+  result: {
+    products: [
+      {
+        id: 'gid://shopify/Product/8944748527668',
+        title: 'The Out of Stock Snowboard',
+        price_range: { min: { amount: 88595, currency: 'USD' }, max: { amount: 88595, currency: 'USD' } },
+        variants: [
+          { id: 'v-oos', title: 'Default Title', price: { amount: 88595, currency: 'USD' }, available: true },
+        ],
+      },
+      {
+        id: 'gid://shopify/Product/8944748757044',
+        title: 'The Complete Snowboard',
+        price_range: { min: { amount: 69995, currency: 'USD' }, max: { amount: 69995, currency: 'USD' } },
+        variants: [{ id: 'v-ice', title: 'Ice', price: { amount: 69995, currency: 'USD' }, available: true }],
+      },
+    ],
+  },
+};

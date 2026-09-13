@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GroundingTripwire, completedSentences, settledPrefix } from '../src/incremental.js';
-import { SEARCH_RESULT, SOLD_OUT_RESULT } from './fixtures.js';
+import { SEARCH_RESULT, SHOPIFY_SAMPLE_SNOWBOARDS, SOLD_OUT_RESULT } from './fixtures.js';
 
 /**
  * The tripwire lets us stream safely: it kills a generation the moment an
@@ -95,5 +95,31 @@ describe('GroundingTripwire', () => {
   it('ignores non-money numbers', () => {
     const t = new GroundingTripwire([SEARCH_RESULT]);
     expect(t.check('Rated 4.6 by 212 shoppers. ')).toBeUndefined();
+  });
+});
+
+/**
+ * The exact turn app review ran: "show me some snowboards" on a store with
+ * Shopify's sample catalog. Search returned six products with prices, the
+ * model listed them, and the tripwire killed the stream on the first one's
+ * NAME — twice, so the turn escalated and the shopper was asked for an email
+ * instead of being shown the snowboards that had already been found.
+ */
+describe('a product named after a stock phrase', () => {
+  it('does not abort a correct listing', () => {
+    const t = new GroundingTripwire([SHOPIFY_SAMPLE_SNOWBOARDS]);
+    expect(t.check('Here are six snowboards: The Out of Stock Snowboard — $885.95. ')).toBeUndefined();
+  });
+
+  it('still aborts a genuine contradiction in the same reply', () => {
+    // Everything this turn is available, so asserting otherwise is still wrong.
+    const t = new GroundingTripwire([SHOPIFY_SAMPLE_SNOWBOARDS]);
+    const v = t.check('The Out of Stock Snowboard — $885.95. Both are sold out. ');
+    expect(v?.code).toBe('stock_contradicts_source');
+  });
+
+  it('still aborts an unsupported price for the same product', () => {
+    const t = new GroundingTripwire([SHOPIFY_SAMPLE_SNOWBOARDS]);
+    expect(t.check('The Out of Stock Snowboard is $412.00 today')?.code).toBe('uncited_price');
   });
 });

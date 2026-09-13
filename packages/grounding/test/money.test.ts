@@ -131,6 +131,37 @@ describe('detectStock', () => {
     const text = 'The catalog is unavailable. Size L is sold out.';
     expect(detectStock(text)?.polarity).toBe('out_of_stock');
   });
+
+  /**
+   * Shopify's sample catalog — the data on every dev store, and so on an app
+   * reviewer's store — contains "The Out of Stock Snowboard". Listing it by
+   * name was read as an inventory claim, which aborted a correct answer twice
+   * and escalated the shopper to a human instead of showing six snowboards.
+   */
+  const SAMPLE = ['The Out of Stock Snowboard', 'The Complete Snowboard'];
+
+  it('reads a stock phrase inside a product name as a name', () => {
+    expect(detectStock('Here are six snowboards: The Out of Stock Snowboard — $885.95.', SAMPLE)).toBeUndefined();
+  });
+
+  it('still detects a real claim about a product whose name contains one', () => {
+    // The name is masked; the clause after it is not.
+    expect(
+      detectStock('The Out of Stock Snowboard is sold out.', SAMPLE)?.polarity,
+    ).toBe('out_of_stock');
+    expect(
+      detectStock('The Out of Stock Snowboard is in stock.', SAMPLE)?.polarity,
+    ).toBe('in_stock');
+  });
+
+  it('masks nothing when the name carries no stock language', () => {
+    // A product called "Ice" must never suppress a real claim.
+    expect(detectStock('The Ice board is sold out.', ['Ice'])?.polarity).toBe('out_of_stock');
+  });
+
+  it('is unchanged when no names are supplied', () => {
+    expect(detectStock('The Out of Stock Snowboard — $885.95.')?.polarity).toBe('out_of_stock');
+  });
 });
 
 describe('detectShippingEstimate', () => {

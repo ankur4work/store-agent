@@ -1,5 +1,6 @@
 import {
   collectAvailability,
+  collectTitles,
   collectStockMessages,
   detectShippingEstimate,
   detectStock,
@@ -47,6 +48,9 @@ export function validateGrounding(
   // Every money value observable anywhere in this turn's tool results.
   const allSourceMoney = toolResults.flatMap((r) => collectMoneyFromResult(r.result));
   const allAvailability = toolResults.flatMap((r) => collectAvailability(r.result));
+  // Product names, so a title like "The Out of Stock Snowboard" is read as a
+  // name rather than as an inventory claim. See nameSpans in extract.ts.
+  const allTitles = toolResults.flatMap((r) => collectTitles(r.result));
   /**
    * A cart saying "sold out" outranks a catalog row saying `available: true`.
    * The catalog is a search-time snapshot; the cart is the attempt to
@@ -108,7 +112,7 @@ export function validateGrounding(
     }
 
     if (claim.kind === 'stock') {
-      const stock = detectStock(claim.assertion);
+      const stock = detectStock(claim.assertion, collectTitles(source.result));
       const availability = collectAvailability(source.result);
       if (stock !== undefined && availability.length > 0) {
         const anyAvailable = availability.includes(true);
@@ -133,7 +137,7 @@ export function validateGrounding(
   // --- 2. Coverage checks on the prose ------------------------------------
 
   const replyMoney = extractMoneyFromText(response.reply);
-  const replyStock = detectStock(response.reply);
+  const replyStock = detectStock(response.reply, allTitles);
   const replyShipping = detectShippingEstimate(response.reply);
   const assertsFact = replyMoney.length > 0 || replyStock !== undefined;
 

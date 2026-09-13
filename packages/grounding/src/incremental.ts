@@ -1,4 +1,4 @@
-import { collectAvailability, detectStock } from './extract.js';
+import { collectAvailability, collectTitles, detectStock } from './extract.js';
 import { collectMoneyFromResult, extractMoneyFromText, formatMinor, isDerivable, type Minor } from './money.js';
 import type { ToolResultRecord, Violation } from './types.js';
 
@@ -37,12 +37,15 @@ import type { ToolResultRecord, Violation } from './types.js';
 export class GroundingTripwire {
   private readonly sourceMoney: Minor[];
   private readonly availability: boolean[];
+  /** Product names this turn, so a title is never read as a stock claim. */
+  private readonly names: string[];
   private readonly seenMoney = new Set<Minor>();
   private tripped = false;
 
   constructor(toolResults: readonly ToolResultRecord[]) {
     this.sourceMoney = toolResults.flatMap((r) => collectMoneyFromResult(r.result));
     this.availability = toolResults.flatMap((r) => collectAvailability(r.result));
+    this.names = toolResults.flatMap((r) => collectTitles(r.result));
   }
 
   /**
@@ -76,7 +79,7 @@ export class GroundingTripwire {
     // as a claim, and negation ("not in stock") needs the full clause.
     const sentences = completedSentences(settled);
     if (sentences !== '' && this.availability.length > 0) {
-      const stock = detectStock(sentences);
+      const stock = detectStock(sentences, this.names);
       if (stock !== undefined) {
         const anyAvailable = this.availability.includes(true);
         const contradicts =
