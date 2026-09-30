@@ -18,3 +18,10 @@ export { LISTENING_CORPUS, VARIANTS } from './listening-corpus.js';
 export type { ClipGroup, ClipSpec } from './listening-corpus.js';
 export { mixAtSnr, mulberry32, rms, synthNoise } from './noise.js';
 export type { NoiseKind } from './noise.js';
+export {
+  looksHallucinated,
+  speechPresence,
+  MIN_DYNAMIC_RANGE,
+  SILENCE_RMS,
+} from './speech-presence.js';
+export type { SpeechPresence } from './speech-presence.js';

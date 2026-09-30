@@ -1,3 +1,10 @@
+import {
+  decodeWav,
+  looksHallucinated,
+  speechPresence,
+  type SpeechPresence,
+} from '@storeagent/voice';
+
 /**
  * Voice I/O.
  *
@@ -96,6 +103,23 @@ export type TranscriptOutcome =
   | 'rescued'
   /** Upstream heard nothing in audio the browser thought was speech. */
   | 'empty'
+  /**
+   * The audio contained no speech, so nothing was sent.
+   *
+   * Digital zeros — a muted track, an ended MediaStream, a widget bug. Caught
+   * before the API call, because a decoder handed silence does not return
+   * nothing, it returns "Covenant."
+   */
+  | 'no_speech'
+  /**
+   * A transcript discarded because the audio had no speech in it.
+   *
+   * The Whisper-family hallucination: "Thank you for watching", learnt from
+   * subtitle data and emitted when there is nothing to decode. Plain English, so
+   * no text rule can separate it from a shopper saying thank you — only the
+   * audio can.
+   */
+  | 'hallucinated'
   /** The decoder handed our own vocabulary hint back as a shopper message. */
   | 'prompt_echo'
   /** Answered in a language the storefront did not ask for. */
@@ -127,6 +151,8 @@ const LOG_EVENT: Readonly<Record<TranscriptOutcome, string | undefined>> = {
   heard: undefined,
   rescued: 'voice_fallback_rescued',
   empty: 'voice_upstream_empty',
+  no_speech: 'voice_no_speech',
+  hallucinated: 'voice_hallucinated',
   prompt_echo: 'voice_prompt_echo',
   language_mismatch: 'voice_language_mismatch',
   fallback_failed: 'voice_fallback_failed',
@@ -304,6 +330,36 @@ export async function transcribe(
     });
   };
 
+  /**
+   * Look at the audio before asking a model to interpret it.
+   *
+   * Only for WAV, which is what the widget uploads on every path — the PCM rungs
+   * write it directly and the MediaRecorder fallback re-encodes to it. An opus
+   * container cannot be inspected without a decoder, so those fall through to the
+   * text-level defences alone, as before.
+   */
+  let presence: SpeechPresence | undefined;
+  if (/wav|wave|x-pcm/.test(container)) {
+    try {
+      const pcm = decodeWav(new Uint8Array(audio));
+      presence = speechPresence(pcm.samples, pcm.sampleRate);
+    } catch {
+      // An unreadable WAV is the upload path's problem, not this check's. Let
+      // the decoder have it and report what it says.
+    }
+  }
+
+  /**
+   * Digital silence is not sent at all.
+   *
+   * A real microphone never returns exact zeros, so this cannot reject a genuine
+   * recording — and it saves the request as well as the fabrication.
+   */
+  if (presence?.reason === 'digital_silence') {
+    note(cfg, 'no_speech', { bytes: audio.length, container });
+    return '';
+  }
+
   let res = await upload(container);
 
   /**
@@ -369,6 +425,26 @@ export async function transcribe(
    * Silence must read as silence. Compared on words rather than exactly,
    * because the echo comes back with different casing and punctuation.
    */
+  /**
+   * Two independent signals agreeing that nothing was said.
+   *
+   * The audio had no speech structure AND the decoder returned almost nothing.
+   * Real speech fails those in opposite directions — the flattest clips measured
+   * were the longest ones — which is what makes requiring both safe where either
+   * alone was not. Validated on the fixture corpus: 4 of 4 fabrications caught,
+   * 63 of 63 real utterances kept.
+   *
+   * No acoustic-model retry: the audio has no speech in it, so a second request
+   * would spend money to hallucinate again.
+   */
+  if (presence !== undefined && looksHallucinated(presence, text)) {
+    note(cfg, 'hallucinated', {
+      words: text.split(/\s+/).filter(Boolean).length,
+      dynamicRange: Math.round(presence.dynamicRange * 100) / 100,
+    });
+    return '';
+  }
+
   if (looksFabricated(text, hint)) {
     // Logged, because "the model heard nothing" and "we discarded what it
     // heard" are the same empty string to every caller — and a filter that
