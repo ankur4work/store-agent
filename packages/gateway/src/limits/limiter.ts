@@ -72,9 +72,9 @@ const DEFAULT_COST: RouteCost = { tokens: 1, units: 0 };
 /**
  * Routes that must never be throttled.
  *
- * `/healthz` — the container healthcheck polls it. A 429 here reads as
- * "unhealthy" and the orchestrator kills a container that is working fine,
- * turning a rate limit into an outage.
+ * `/livez`, `/healthz` — the container healthcheck polls one of these. A 429
+ * here reads as "unhealthy" and the orchestrator kills a container that is
+ * working fine, turning a rate limit into an outage.
  *
  * `/shopify/webhooks` — `orders/create` is the server-side truth for revenue
  * attribution. Shopify does retry, but dropping order webhooks corrupts the
@@ -89,7 +89,8 @@ const DEFAULT_COST: RouteCost = { tokens: 1, units: 0 };
  * scrape that was measuring it. Both routes require a bearer token, so
  * exempting them opens nothing.
  */
-const EXEMPT = /^\/healthz$|^\/shopify\/webhooks$|^\/metrics$|^\/api\/slo$/;
+const EXEMPT =
+  /^\/livez$|^\/healthz$|^\/shopify\/webhooks$|^\/metrics$|^\/api\/slo$/;
 
 export interface RateLimitOptions {
   readonly enabled: boolean;

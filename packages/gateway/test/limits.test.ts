@@ -165,6 +165,8 @@ describe('route costs', () => {
     // A 429 here reads as "unhealthy" and the orchestrator kills a working
     // container — a rate limit becoming an outage.
     expect(isExempt('/healthz')).toBe(true);
+    // The container probe polls /livez, so it needs the same exemption.
+    expect(isExempt('/livez')).toBe(true);
   });
 
   it('exempts Shopify webhooks', () => {

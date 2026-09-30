@@ -83,7 +83,16 @@ EXPOSE 8787
 
 # Uses the app's own health endpoint rather than a bare TCP check, so a
 # process that is listening but broken is reported unhealthy.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+#
+# Probes /livez, not /healthz: /healthz reads SQLite, and a DB stall is not a
+# reason to kill a container that is serving traffic.
+#
+# The timeout covers a whole `node` spawn, not just the request. This host is
+# heavily oversubscribed, and starting a second Node runtime under CPU steal
+# and swap pressure is the slow part — the request itself answers in ~0.3s.
+# 5s was not enough headroom for the spawn and the probe failed on a healthy
+# container.
+HEALTHCHECK --interval=30s --timeout=20s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "packages/gateway/dist/src/main.js"]

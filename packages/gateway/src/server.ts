@@ -202,6 +202,20 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
+    /**
+     * Liveness: is this process up and serving HTTP? Nothing else.
+     *
+     * Deliberately touches no database. `/healthz` below awaits two SQLite
+     * reads, and on a single-node SQLite deployment a write holding the lock
+     * is enough to stall them — which would answer "should Docker kill this
+     * container?" with "yes" over a hiccup that resolves itself. Liveness and
+     * readiness are different questions, so they get different routes.
+     */
+    if (url.pathname === '/livez') {
+      json(res, 200, { ok: true });
+      return;
+    }
+
     if (url.pathname === '/healthz') {
       json(res, 200, {
         ok: true,

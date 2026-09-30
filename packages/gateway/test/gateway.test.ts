@@ -150,6 +150,14 @@ describe('http surface', () => {
     expect(r).toMatchObject({ ok: true, mode: 'demo' });
   });
 
+  it('answers liveness without touching the database', async () => {
+    // What the container probe polls. It must stay answerable while SQLite is
+    // busy, so it carries no DB-derived fields at all.
+    const res = await fetch(`${base}/livez`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
   it('serves the demo catalog', async () => {
     const r = (await fetch(`${base}/api/catalog`).then((x) => x.json())) as { products: unknown[] };
     expect(r.products.length).toBeGreaterThan(0);
