@@ -3,7 +3,10 @@ import { PLANS, PLAN_ORDER } from '@storeagent/billing';
 import {
   accentIsAccessible,
   contrastWithWhite,
+  BRAND_VOICE_MAX,
   ON_DEVICE_SPEECH_OPTIONS,
+  POLICY_NOTES_MAX,
+  PRODUCT_LIST_MAX,
   VOICE_LANGUAGES,
   type ShopSettings,
 } from './settings.js';
@@ -360,9 +363,12 @@ export function renderAdmin(vm: AdminViewModel): string {
   .field{display:flex;flex-direction:column;gap:6px}
   label{font-size:13.5px;font-weight:550}
   .sub{font-size:12.5px;color:var(--sub);font-weight:400}
-  input[type=text],select,input[type=number]{
+  input[type=text],select,input[type=number],textarea{
     border:1px solid #8a8a8a;border-radius:8px;padding:8px 11px;font:inherit;background:#fff;color:inherit}
-  input:focus,select:focus{outline:2px solid #005bd3;outline-offset:-1px;border-color:#005bd3}
+  /* Vertical only: a horizontally resizable field can be dragged out of the
+     card, and these hold sentences rather than code. */
+  textarea{resize:vertical;line-height:1.45;min-height:64px}
+  input:focus,select:focus,textarea:focus{outline:2px solid #005bd3;outline-offset:-1px;border-color:#005bd3}
   .colorRow{display:flex;align-items:center;gap:10px}
   input[type=color]{width:44px;height:36px;padding:2px;border:1px solid #8a8a8a;border-radius:8px;background:#fff}
   .swatch{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--sub)}
@@ -567,6 +573,39 @@ function renderHomeSections(vm: AdminViewModel): string {
             question, so it stops cutting people off. The answer itself is unaffected. Installing the
             language pack costs the customer a one-time download their browser manages; leaving this
             on the default uses it only where it is already there.</span>
+        </div>
+
+        <div class="field">
+          <label for="brandVoice">How it should sound <span class="sub">optional</span></label>
+          <textarea id="brandVoice" name="brandVoice" rows="3" maxlength="${BRAND_VOICE_MAX}"
+            placeholder="Warm and direct. Short sentences. Never pushy.">${esc(s.brandVoice)}</textarea>
+          <span class="sub">Your assistant's manner, in your words. Leave this blank and it sounds
+            like a neutral, knowledgeable shop assistant. Avoid dates and order numbers here —
+            they make every conversation cost several times more, and the form will tell you.</span>
+        </div>
+
+        <div class="field">
+          <label for="policyNotes">Shipping and returns <span class="sub">optional</span></label>
+          <textarea id="policyNotes" name="policyNotes" rows="3" maxlength="${POLICY_NOTES_MAX}"
+            placeholder="Free delivery over £75. Returns within 30 days, unworn.">${esc(s.policyNotes)}</textarea>
+          <span class="sub">A short summary it can answer from directly. It still checks your policy
+            pages for anything detailed, and it will never invent a delivery time.</span>
+        </div>
+
+        <div class="field">
+          <label for="promoteProducts">Lead with these <span class="sub">optional</span></label>
+          <textarea id="promoteProducts" name="promoteProducts" rows="2" maxlength="${PRODUCT_LIST_MAX}"
+            placeholder="One product per line">${esc(s.promoteProducts)}</textarea>
+          <span class="sub">Offered first when they genuinely fit what the customer asked for — never
+            pushed at someone they do not suit, because a bad recommendation costs you a return.</span>
+        </div>
+
+        <div class="field">
+          <label for="neverRecommend">Never suggest these <span class="sub">optional</span></label>
+          <textarea id="neverRecommend" name="neverRecommend" rows="2" maxlength="${PRODUCT_LIST_MAX}"
+            placeholder="One product per line">${esc(s.neverRecommend)}</textarea>
+          <span class="sub">Discontinued lines, or anything you would rather not recommend. Asked
+            about one directly, it still answers honestly.</span>
         </div>
 
         <div class="field">

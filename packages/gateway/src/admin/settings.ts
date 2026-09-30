@@ -1,3 +1,5 @@
+import { assertStable, UnstablePrefixError } from '@storeagent/orchestrator';
+
 /**
  * Per-shop widget settings.
  *
@@ -68,8 +70,28 @@ export interface ShopSettings {
    * endpointing, so no setting here can leave a shopper unable to speak.
    */
   onDeviceSpeech: 'off' | 'auto' | 'on';
+  /**
+   * How this shop's assistant should sound. Empty falls back to a neutral voice.
+   *
+   * The four fields below are the difference between every merchant getting the
+   * same assistant and each getting their own. They go into the CACHED prompt
+   * prefix, which is why they are per-shop and not per-shopper, and why they are
+   * validated for volatile content on the way in — see `checkPrefixSafe`.
+   */
+  brandVoice: string;
+  /** Shipping, returns and warranty in the merchant's own words. */
+  policyNotes: string;
+  /** Products to lead with, one per line. */
+  promoteProducts: string;
+  /** Products never to suggest — discontinued lines, bad-fit items. */
+  neverRecommend: string;
   updatedAt: number;
 }
+
+/** Caps, so one merchant cannot push the cached prefix somewhere expensive. */
+export const BRAND_VOICE_MAX = 400;
+export const POLICY_NOTES_MAX = 800;
+export const PRODUCT_LIST_MAX = 400;
 
 /**
  * The accepted values, and the labels the merchant reads.
@@ -109,7 +131,43 @@ export const DEFAULT_SETTINGS: Omit<ShopSettings, 'shop' | 'updatedAt'> = {
   // downloads nothing. A merchant has to opt in before a shopper pays for a
   // language pack.
   onDeviceSpeech: 'auto',
+  // Empty rather than opinionated. A default brand voice would be a voice the
+  // merchant did not choose, applied to their customers in their name.
+  brandVoice: '',
+  policyNotes: '',
+  promoteProducts: '',
+  neverRecommend: '',
 };
+
+/**
+ * Would this text break the prompt cache if it went into the prefix?
+ *
+ * `assertStable` rejects dates, timestamps, UUIDs and cart ids because any of
+ * them makes the cached prefix unique per turn — which silently multiplies model
+ * spend by about ten and produces no error anywhere. Merchant free text is
+ * exactly where one shows up: "Sale ends 2026-12-24" is a completely reasonable
+ * thing for a merchant to type.
+ *
+ * So it is checked when they save, where the answer is a message they can act
+ * on, rather than at turn time where it would throw inside a shopper's request.
+ * Returns the reason, or undefined if the text is safe.
+ */
+export function checkPrefixSafe(field: string, text: string): string | undefined {
+  if (text.trim() === '') return undefined;
+  try {
+    assertStable(text);
+    return undefined;
+  } catch (err) {
+    if (err instanceof UnstablePrefixError) {
+      return (
+        `${field} cannot contain a ${err.reason} ("${err.evidence}") — it would ` +
+        `make every conversation cost about ten times more. Describe it in words ` +
+        `instead, like "until the end of December".`
+      );
+    }
+    throw err;
+  }
+}
 
 /**
  * Languages offered in the admin, and the only values accepted.
@@ -219,6 +277,20 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
     errors.push('onDeviceSpeech must be off, auto, or on');
   }
 
+  // The merchant's own selling rules. Length-capped, then checked for the
+  // content that would quietly destroy the prompt cache.
+  const text = (key: string, max: number, label: string): string => {
+    const value = String(input[key] ?? '').trim();
+    if (value.length > max) errors.push(`${label} must be ${max} characters or fewer`);
+    const unstable = checkPrefixSafe(label, value);
+    if (unstable !== undefined) errors.push(unstable);
+    return value;
+  };
+  const brandVoice = text('brandVoice', BRAND_VOICE_MAX, 'Brand voice');
+  const policyNotes = text('policyNotes', POLICY_NOTES_MAX, 'Policy notes');
+  const promoteProducts = text('promoteProducts', PRODUCT_LIST_MAX, 'Products to promote');
+  const neverRecommend = text('neverRecommend', PRODUCT_LIST_MAX, 'Products never to recommend');
+
   if (errors.length > 0) return { ok: false, errors };
 
   return {
@@ -234,8 +306,67 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
       holdoutFraction,
       voiceLanguage,
       onDeviceSpeech: onDeviceSpeech as 'off' | 'auto' | 'on',
+      brandVoice,
+      policyNotes,
+      promoteProducts,
+      neverRecommend,
       updatedAt: Date.now(),
     },
+  };
+}
+
+/**
+ * Turn a shop's settings into the assistant's cached prompt prefix input.
+ *
+ * Deterministic: the same settings always produce byte-identical output, which
+ * is the property the prompt cache is built on. Anything that varied here —
+ * a timestamp, a shopper name, an ordering that depends on a Set — would give
+ * every turn its own prefix and turn a 90% cost saving into no saving at all.
+ *
+ * Falls back to neutral text rather than to nothing, so a merchant who has
+ * filled none of this in still gets a working assistant.
+ */
+export function merchantPackFrom(s: ShopSettings): {
+  merchantId: string;
+  brandVoice: string;
+  policySummary: string;
+  merchantRules?: string;
+  locale: string;
+  currency: string;
+} {
+  const list = (raw: string): string[] =>
+    raw
+      .split(/[\n,;]+/)
+      .map((v) => v.trim())
+      .filter((v) => v !== '');
+
+  const promote = list(s.promoteProducts);
+  const never = list(s.neverRecommend);
+  const rules: string[] = [];
+  if (promote.length > 0) {
+    rules.push(
+      `Lead with these when they genuinely fit what the shopper asked for: ` +
+        `${promote.join(', ')}. Never push one that does not fit — a bad ` +
+        `recommendation costs this shop a return and a customer.`,
+    );
+  }
+  if (never.length > 0) {
+    rules.push(`Never recommend: ${never.join(', ')}. If asked about one directly, answer honestly.`);
+  }
+
+  return {
+    merchantId: s.shop,
+    brandVoice:
+      s.brandVoice.trim() === ''
+        ? 'Warm, direct, never pushy. Short sentences. No emoji. Sound like a knowledgeable shop assistant, not a brochure.'
+        : s.brandVoice.trim(),
+    policySummary:
+      s.policyNotes.trim() === ''
+        ? 'No policy summary has been provided — use the get_policy tool and never guess.'
+        : s.policyNotes.trim(),
+    ...(rules.length === 0 ? {} : { merchantRules: rules.join('\n\n') }),
+    locale: 'en-US',
+    currency: 'USD',
   };
 }
 

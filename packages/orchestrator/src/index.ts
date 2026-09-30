@@ -12,6 +12,16 @@ export {
 export type { MerchantPack, SystemBlock, TurnContext } from './prompt.js';
 export { route, detectFrustration } from './router.js';
 export type { Route, RouteSignals, Tier } from './router.js';
+export {
+  applyFilter,
+  classifyIntent,
+  mentionsColour,
+  parseAmountMinor,
+  priceMinorOf,
+} from './intents.js';
+export type { FastIntent, IntentContext, ProductFilter } from './intents.js';
+export { extractPreferences, mergePreferences, renderPreferences } from './preferences.js';
+export type { Preferences } from './preferences.js';
 export { planSpeculation, speculationMatches } from './speculate.js';
 export type { Speculation } from './speculate.js';
 export { DEFAULT_TOOLS, SEARCH_CATALOG, GET_PRODUCT, GET_POLICY, ADD_TO_CART, ESCALATE } from './tools.js';

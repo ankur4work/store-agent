@@ -100,6 +100,23 @@ export class Telemetry {
     'Turns escalated to a human or lead capture',
   );
 
+  /**
+   * Turns answered with no model call, and turns the lane declined.
+   *
+   * Both halves matter. The successes are the saving — a narrowing turn or a
+   * cart read costs no tokens and answers in milliseconds instead of seconds.
+   * The declines are the honesty: the lane hands a turn back whenever it cannot
+   * answer exactly, and a lane that keeps declining has patterns that are wrong.
+   * Counting only what it caught would make a broken router look idle.
+   *
+   * `storeagent_model_tokens_total` staying flat while this rises is the proof
+   * that the saving is real.
+   */
+  readonly fastLane = this.registry.counter(
+    'storeagent_fast_lane_total',
+    'Turns answered without a model, labelled by shop and intent',
+  );
+
   // --- latency ------------------------------------------------------------
 
   readonly ttft: Histogram = this.registry.histogram(
@@ -197,6 +214,22 @@ export class Telemetry {
   readonly tokens = this.registry.counter(
     'storeagent_model_tokens_total',
     'Model tokens, labelled by shop and kind (input/output/cached)',
+  );
+
+  /**
+   * How often a shop's cached prompt prefix changed between turns.
+   *
+   * The prefix is 10–14k tokens and a cache read costs about a tenth of a fresh
+   * one, so a prefix that changes every turn multiplies model spend by roughly
+   * ten — silently, with no error and no failing test. §7.3 lists the ways to
+   * cause it by accident; this is the metric that notices.
+   *
+   * A merchant editing their brand voice moves this by one. It moving with
+   * traffic is the canary for the entire cost model.
+   */
+  readonly prefixChanges = this.registry.counter(
+    'storeagent_prompt_prefix_changes_total',
+    'Times a cached prompt prefix changed between turns, by shop',
   );
 
   readonly billableConversations = this.registry.counter(

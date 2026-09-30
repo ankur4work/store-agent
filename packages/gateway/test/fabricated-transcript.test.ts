@@ -246,7 +246,7 @@ describe('the merchant chooses the voice language', () => {
       enabled: true,
       holdoutFraction: 0.2,
       voiceLanguage: 'hi',
-      onDeviceSpeech: 'auto' as const,
+      onDeviceSpeech: 'auto' as const, brandVoice: '', policyNotes: '', promoteProducts: '', neverRecommend: '',
       updatedAt: Date.now(),
     };
     await store.put(saved);

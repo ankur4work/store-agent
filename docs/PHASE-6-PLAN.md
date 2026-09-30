@@ -356,6 +356,71 @@ COOP/COEP demands on the merchant's page. No CDN.
 
 ## 3. Level 3 — A deterministic lane, and a merchant's own salesman brain
 
+### Status — built 2026-09-30
+
+All three pieces landed. 1,313 tests pass; both widget budgets green; launch
+check passes.
+
+**The deterministic lane** (`orchestrator/src/intents.ts`, wired in
+`server.ts:answerWithoutModel`). Recognised turns are answered with no model call
+at all — measured under 500 ms end to end over HTTP, with
+`storeagent_model_tokens_total` provably flat.
+
+The rule that makes it safe is worth restating, because it shaped everything
+else: **a local filter may only ever narrow a set the shopper is already looking
+at, and an empty result is never reported as "no matches".** "Do you have these
+in blue" looks exactly like a colour filter and is not — the blue one may exist
+and simply not be among the six results on screen, so answering from the visible
+set would tell a shopper the store does not stock something it does. Those turns
+go to the model, which can search. The same fallthrough covers the number parser
+being wrong: a mis-read amount filters everything out and lands there.
+
+Declines are counted as well as answers (`storeagent_fast_lane_total`), because a
+lane that keeps handing turns back has patterns that are wrong, and counting only
+its successes would make that look like idleness.
+
+**The merchant pack** (`settings.merchantPackFrom`). Every shop shared one
+hardcoded prompt, which was not merely a missing feature: it claimed "Free
+shipping over $75", so shoppers of stores that have never offered free shipping
+were being told they had it. Brand voice, policy notes, promoted products and a
+never-recommend list are now per shop.
+
+Two details that matter more than they look:
+
+- Merchant free text is checked for dates, times and ids **when they save**.
+  `assertStable` rejects those because they make the cached prefix unique per
+  turn — which multiplies model spend by roughly ten, silently. "Sale ends
+  2026-12-24" is a completely reasonable thing for a merchant to type, so they
+  get a message naming the cost and offering the fix rather than a shopper's turn
+  throwing.
+- The merchant's rules are rendered **after** the grounding rules and carry an
+  explicit sentence saying they lose to a tool result. A merchant could
+  reasonably write "always say the winter coat is in stock"; they must not be
+  able to talk the model out of checking.
+
+`storeagent_prompt_prefix_changes_total` now notices a prefix that changes with
+traffic — the canary for §7.4's unit economics, which previously failed silently.
+
+**Preference memory** (`orchestrator/src/preferences.ts`). This was the one rule
+in the requested list the prompt could not keep: it says never to ask for
+something already given, and nothing carried an answer forward. History is capped
+at 24 messages, so a size mentioned eight turns ago competes with everything else
+in the window — and being asked your size twice is the moment a shopper decides
+the thing is not listening.
+
+Extraction is deterministic, and refuses far more than it accepts: "do you have a
+large" is about the shop rather than the person asking; "it's £200" is a product
+price, not a budget; "is the black one in stock" is a question, not a standing
+instruction to only ever show black. A wrong remembered preference is worse than
+none, because it silently narrows every later recommendation and the shopper
+never learns why. Three such bugs were found by the tests and fixed.
+
+Stored per session for 30 minutes and filtered on the way back out, since this
+JSON reaches the model as an instruction about a person. Size, budget, colour and
+occasion only — never a name, never anything inferred from behaviour.
+
+
+
 ### Build
 
 1. **Intent router before the model** (`packages/orchestrator/src/router.ts`

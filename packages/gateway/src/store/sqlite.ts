@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Arm, ArmTotals, AttributionStore, CartLink, Conversion, Exposure } from '@storeagent/attribution';
 import type { Message } from '@storeagent/orchestrator';
-import type { Session, SessionStore } from '../sessions.js';
+import { readPreferences, readVisibleProducts, type Session, type SessionStore } from '../sessions.js';
 import type { NonceStore, Shop, ShopStore } from '../shopify/shops.js';
 import {
   DEFAULT_SETTINGS,
@@ -154,6 +154,19 @@ function migrate(db: DatabaseSync): void {
     // Existing rows default to 'auto', which downloads nothing and so cannot
     // surprise a merchant who has not read about it.
     ['settings', 'on_device_speech', "TEXT NOT NULL DEFAULT 'auto'"],
+    // What the shopper is looking at, so a narrowing turn can be answered
+    // without a model. NULL on rows written before the column existed, which
+    // just means the first narrowing turn after a deploy goes to the model.
+    ['sessions', 'products', 'TEXT'],
+    // Size, budget, colour, occasion — what the shopper said they wanted, so the
+    // assistant stops asking twice. Session-scoped; see preferences.ts.
+    ['sessions', 'preferences', 'TEXT'],
+    // The merchant's own selling rules, which become the cached prompt prefix.
+    // Empty on existing rows, which yields the neutral assistant they have now.
+    ['settings', 'brand_voice', "TEXT NOT NULL DEFAULT ''"],
+    ['settings', 'policy_notes', "TEXT NOT NULL DEFAULT ''"],
+    ['settings', 'promote_products', "TEXT NOT NULL DEFAULT ''"],
+    ['settings', 'never_recommend', "TEXT NOT NULL DEFAULT ''"],
   ];
   for (const [table, column, type] of columns) {
     try {
@@ -277,6 +290,10 @@ export class SqliteSettingsStore implements SettingsStore {
       // A row written before the column existed reads NULL, not 'en'.
       voiceLanguage: String(row['voice_language'] ?? DEFAULT_SETTINGS.voiceLanguage),
       onDeviceSpeech: normaliseOnDeviceSpeech(row['on_device_speech']),
+      brandVoice: String(row['brand_voice'] ?? ''),
+      policyNotes: String(row['policy_notes'] ?? ''),
+      promoteProducts: String(row['promote_products'] ?? ''),
+      neverRecommend: String(row['never_recommend'] ?? ''),
       updatedAt: Number(row['updated_at']),
     };
   }
@@ -284,14 +301,17 @@ export class SqliteSettingsStore implements SettingsStore {
   async put(s: ShopSettings): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, on_device_speech, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, on_device_speech, brand_voice, policy_notes, promote_products, never_recommend, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(shop) DO UPDATE SET
            accent_color = excluded.accent_color, corner_radius = excluded.corner_radius,
            position = excluded.position, greeting = excluded.greeting,
            enabled = excluded.enabled, holdout = excluded.holdout,
            voice_language = excluded.voice_language,
            on_device_speech = excluded.on_device_speech,
+           brand_voice = excluded.brand_voice, policy_notes = excluded.policy_notes,
+           promote_products = excluded.promote_products,
+           never_recommend = excluded.never_recommend,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -304,6 +324,10 @@ export class SqliteSettingsStore implements SettingsStore {
         s.holdoutFraction,
         s.voiceLanguage,
         s.onDeviceSpeech,
+        s.brandVoice,
+        s.policyNotes,
+        s.promoteProducts,
+        s.neverRecommend,
         Date.now(),
       );
   }
@@ -331,6 +355,8 @@ export class SqliteSessionStore implements SessionStore {
       shopDomain: String(row['shop']),
       history: JSON.parse(String(row['history'])) as Message[],
       ...(cartId === null || cartId === undefined ? {} : { cartId: String(cartId) }),
+      ...readVisibleProducts(row['products']),
+      ...readPreferences(row['preferences']),
       updatedAt: Number(row['updated_at']),
     };
   }
@@ -342,15 +368,20 @@ export class SqliteSessionStore implements SessionStore {
     }
     this.db
       .prepare(
-        `INSERT INTO sessions (id, shop, history, cart_id, updated_at) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO sessions (id, shop, history, cart_id, products, preferences, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET history = excluded.history,
-           cart_id = excluded.cart_id, updated_at = excluded.updated_at`,
+           cart_id = excluded.cart_id, products = excluded.products,
+           preferences = excluded.preferences,
+           updated_at = excluded.updated_at`,
       )
       .run(
         session.id,
         session.shopDomain,
         JSON.stringify(session.history),
         session.cartId ?? null,
+        session.products === undefined ? null : JSON.stringify(session.products),
+        session.preferences === undefined ? null : JSON.stringify(session.preferences),
         session.updatedAt,
       );
   }

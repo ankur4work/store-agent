@@ -3,10 +3,29 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Orchestrator, OpenAIModelClient, reachedHuman, type MerchantPack } from '@storeagent/orchestrator';
+import {
+  Orchestrator,
+  OpenAIModelClient,
+  applyFilter,
+  buildCachedPrefix,
+  classifyIntent,
+  extractPreferences,
+  mergePreferences,
+  reachedHuman,
+  renderPreferences,
+  type FastIntent,
+  type MerchantPack,
+  type ProductFilter,
+} from '@storeagent/orchestrator';
 import { UcpClient } from '@storeagent/ucp-client';
 import type { GatewayConfig } from './config.js';
-import { MemorySessionStore, newSession, type SessionStore } from './sessions.js';
+import {
+  MAX_VISIBLE_PRODUCTS,
+  MemorySessionStore,
+  newSession,
+  type Session,
+  type SessionStore,
+} from './sessions.js';
 import { createToolExecutor } from './tool-executor.js';
 import { RateLimiter } from './limits/limiter.js';
 import { BillingService } from './billing/service.js';
@@ -54,6 +73,7 @@ import {
   MemorySettingsStore,
   VOICE_LANGUAGES,
   accentIsAccessible,
+  merchantPackFrom,
   contrastWithWhite,
   validateSettings,
   type SettingsStore,
@@ -991,6 +1011,176 @@ export function createGateway(deps: GatewayDeps): Server {
     });
   }
 
+  /**
+   * The cached prompt prefix for a shop, from what the merchant wrote.
+   *
+   * Replaces a single hardcoded pack that every merchant shared, which meant
+   * every shop's assistant had the same voice and the same made-up shipping
+   * policy — "Free shipping over $75" was being told to shoppers of stores that
+   * have never offered it.
+   *
+   * Falls back to the neutral pack if the stored text somehow still trips
+   * `assertStable`. Validation at save time is the real defence, but a value
+   * written before that validation existed must degrade to a working assistant
+   * rather than throw inside a shopper's turn — the merchant's typo is not the
+   * shopper's problem.
+   */
+  async function merchantPackFor(shop: string): Promise<MerchantPack> {
+    const pack = merchantPackFrom(await settings.get(shop));
+    try {
+      buildCachedPrefix(pack);
+      return pack;
+    } catch (err) {
+      metrics.errors.inc({ kind: 'merchant_pack_unstable' });
+      log.warn('merchant_pack_unstable', {
+        shop,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return { ...DEMO_MERCHANT, merchantId: shop };
+    }
+  }
+
+  /**
+   * Notice when a shop's cached prefix changes.
+   *
+   * The prefix is 10–14k tokens and cache reads cost about a tenth of fresh
+   * ones, so a prefix that changes between turns is the difference between the
+   * unit economics in §7.4 working and not working — and it fails silently, with
+   * no error and no failing test. A merchant editing their brand voice moves
+   * this by one, which is expected and fine. It moving on every turn is the
+   * canary for the entire cost model.
+   */
+  const lastPrefix = new Map<string, string>();
+  function watchPrefix(shop: string, fingerprint: string): void {
+    const previous = lastPrefix.get(shop);
+    if (previous !== undefined && previous !== fingerprint) {
+      metrics.prefixChanges.inc({ shop });
+      log.info('prompt_prefix_changed', { shop, from: previous, to: fingerprint });
+    }
+    lastPrefix.set(shop, fingerprint);
+  }
+
+  /**
+   * Answer a turn with no model call, or decline it.
+   *
+   * Returns true only if the shopper has been completely answered. Declining is
+   * a first-class outcome: a lane that guesses is worse than no lane, because a
+   * wrong deterministic answer arrives fast, sounds certain, and leaves no trace
+   * that a model was skipped.
+   */
+  async function answerWithoutModel(
+    intent: FastIntent,
+    ctx: {
+      session: Session;
+      send: (event: string, data: unknown) => void;
+      speakIfVoice: (text: string) => void;
+      startedAt: number;
+    },
+  ): Promise<boolean> {
+    const { session, send, speakIfVoice, startedAt } = ctx;
+
+    const finish = (reply: string, products?: readonly unknown[]): true => {
+      // Cards first: they are the answer, and the sentence is commentary on
+      // something the shopper is already reading. Same order the model path uses.
+      if (products !== undefined) send('products', { products, final: true });
+      send('delta', { text: reply });
+      speakIfVoice(reply);
+      send('done', {
+        reply,
+        escalated: false,
+        handedOff: false,
+        // Grounded by construction: every number in these replies is copied
+        // from a tool result or from the cart, and no model saw them.
+        grounded: true,
+        attempts: 0,
+        ms: Date.now() - startedAt,
+        fast: intent.kind,
+      });
+      return true;
+    };
+
+    if (intent.kind === 'filter') {
+      const visible = session.products ?? [];
+      const kept = applyFilter(visible, intent.filter);
+
+      /**
+       * An empty result means "I cannot answer this from what is on screen",
+       * NOT "the store has none".
+       *
+       * The blue one may exist and simply not be among the six results we
+       * showed. Reporting no matches here would tell a shopper the shop does
+       * not stock something it does — so the model gets the turn and can
+       * search. This also covers the number parser being wrong: a
+       * mis-read amount filters everything out and lands here.
+       */
+      if (kept.length === 0) return false;
+      // Nothing was actually narrowed, so there is nothing to say that the
+      // shopper cannot already see. The model can respond to the sentiment.
+      if (kept.length === visible.length && intent.filter.colour !== undefined) return false;
+
+      session.products = kept;
+      /**
+       * Short, and read aloud as often as it is read.
+       *
+       * No price in the sentence: these products carry amounts in minor units
+       * with no currency attached at this layer, and naming a figure we cannot
+       * label correctly is the one thing this path must not do. The cards beside
+       * it show every price, formatted by the widget from the same data.
+       */
+      const reply =
+        intent.filter.cheaper === true
+          ? 'Cheapest first.'
+          : intent.filter.dearer === true
+            ? 'Dearest first.'
+            : intent.filter.colour !== undefined
+              ? `${kept.length} in ${intent.filter.colour}.`
+              : `${kept.length} of those.`;
+      return finish(reply, withVariantImages(kept, describeFilter(intent.filter)));
+    }
+
+    // --- cart read ---------------------------------------------------------
+
+    if (session.cartId === undefined) {
+      // Exact, and needs neither a model nor a round trip.
+      return finish('Your cart is empty.');
+    }
+
+    const ucp = ucpFor(session.shopDomain);
+    if (ucp === undefined) return false; // demo mode: let the model answer
+
+    try {
+      const { cart, messages } = await ucp.getCart(session.cartId);
+      const lines = (cart.line_items ?? []).filter((li) => li.quantity > 0);
+      if (lines.length === 0) return finish('Your cart is empty.');
+
+      const named = lines.map((li) => `${li.title ?? 'item'}${li.quantity > 1 ? ` ×${li.quantity}` : ''}`);
+      const parts = [`${named.join(', ')}.`];
+      if (cart.subtotal !== undefined) {
+        parts.push(`Subtotal ${money(cart.subtotal.amount, cart.subtotal.currency)}.`);
+      }
+      /**
+       * Authoritative, and passed through verbatim.
+       *
+       * `CartMessage` carries business outcomes — out of stock, quantity
+       * adjusted — and ARCHITECTURE §4 is explicit that these must not be
+       * paraphrased, because paraphrasing is where hallucination enters. There
+       * is no model on this path to paraphrase them, which is one more reason
+       * the cart read belongs here.
+       */
+      for (const m of messages ?? []) if (m.text !== '') parts.push(m.text);
+
+      return finish(parts.join(' '));
+    } catch (err) {
+      // A cart that cannot be read is not an answer we can fake. The model gets
+      // the turn, with tools that can try again.
+      log.warn('fast_lane_cart_failed', {
+        shop: session.shopDomain,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   async function handleTranscribe(
     url: URL,
     req: IncomingMessage,
@@ -1243,14 +1433,82 @@ export function createGateway(deps: GatewayDeps): Server {
 
     send('session', { sessionId });
 
+    /**
+     * Speak on a voice turn, as well as showing text.
+     *
+     * The rung below and the fast lane both answer without the orchestrator,
+     * which is also what sends `speak` events — so without this a voice turn
+     * that took either path put text on screen and said nothing, on a panel the
+     * shopper is not necessarily looking at. Safe to speak in one piece: both
+     * produce a short, already-settled sentence, so there is nothing for the
+     * tripwire to retract.
+     */
+    const speakIfVoice = (text: string): void => {
+      if (body.voice === true && text !== '') send('speak', { text });
+    };
+
     // The bottom two rungs need no model at all. Answering here costs nothing
     // and is still not an error page — the shopper gets a route to a person.
     const bottomRung = shopperMessage(level.level);
     if (bottomRung !== undefined) {
       send('delta', { text: bottomRung });
+      speakIfVoice(bottomRung);
       send('done', { reply: bottomRung, escalated: true, grounded: true, attempts: 0, ms: 0, degraded: level.level });
       res.end();
       return;
+    }
+
+    /**
+     * The deterministic lane.
+     *
+     * Some turns are not questions. "Just the blue ones" narrows what is already
+     * on screen; "what's in my cart" is a read. Both have exactly one correct
+     * answer that we hold, and routing them through a model costs the shopper
+     * seconds, the merchant a turn of allowance, and reliability — the model
+     * would be re-deriving something we already know exactly.
+     *
+     * Every path here either answers completely or returns false and lets the
+     * model have the turn. There is no half-answer: see the empty-filter case.
+     */
+    /**
+     * Learn what the shopper just told us about what they want.
+     *
+     * Before the fast lane, so a narrowing turn still teaches us something — and
+     * before the model, so the turn that mentions a size is already the turn
+     * where the assistant knows it.
+     */
+    const heard = extractPreferences(body.message);
+    if (Object.keys(heard).length > 0) {
+      session.preferences = mergePreferences(session.preferences ?? {}, heard);
+      log.info('preferences_learned', {
+        shop: session.shopDomain,
+        // The keys, never the values: a size is about a person.
+        fields: Object.keys(heard),
+      });
+    }
+
+    const fast = classifyIntent(body.message, {
+      visibleProducts: session.products?.length ?? 0,
+      hasCart: session.cartId !== undefined,
+    });
+    if (fast.kind !== 'none') {
+      const answered = await answerWithoutModel(fast, {
+        session,
+        send,
+        speakIfVoice,
+        startedAt: Date.now(),
+      });
+      if (answered) {
+        metrics.fastLane.inc({ shop: session.shopDomain, intent: fast.kind });
+        log.info('fast_lane', { shop: session.shopDomain, intent: fast.kind, why: fast.reason });
+        await sessions.put(session);
+        res.end();
+        return;
+      }
+      // Fell through on purpose. Counted separately, because a lane that keeps
+      // declining is a lane whose patterns are wrong, and that is invisible if
+      // only its successes are counted.
+      metrics.fastLane.inc({ shop: session.shopDomain, intent: `${fast.kind}_declined` });
     }
 
     // Abort the model turn if the shopper closes the tab or navigates away.
@@ -1351,8 +1609,15 @@ export function createGateway(deps: GatewayDeps): Server {
             sessionId,
             ...(body.page ? { page: body.page } : {}),
             ...(body.justNavigated === true ? { justNavigated: true } : {}),
+            // Volatile, per-shopper, and therefore in the turn context rather
+            // than the cached prefix. Omitted entirely when nothing is known, so
+            // an early turn spends no tokens saying so.
+            ...(() => {
+              const line = renderPreferences(session.preferences ?? {});
+              return line === '' ? {} : { preferences: line };
+            })(),
           },
-          merchant: DEMO_MERCHANT,
+          merchant: await merchantPackFor(session.shopDomain),
           history: session.history,
         },
         {
@@ -1422,10 +1687,26 @@ export function createGateway(deps: GatewayDeps): Server {
        */
       // The card shows the variant the conversation named — the white pair,
       // not whichever colourway the merchant featured. See variant-image.ts.
-      send('products', {
-        products: withVariantImages(named, `${body.message} ${result.reply}`),
-        final: true,
-      });
+      const shown = withVariantImages(named, `${body.message} ${result.reply}`);
+      send('products', { products: shown, final: true });
+
+      /**
+       * Remember exactly what is on screen.
+       *
+       * This is what makes the next turn's "just the blue ones" answerable
+       * without a model — and it has to be THIS list, the reconciled one, not
+       * the early speculative cards. Narrowing a set the shopper cannot see
+       * would produce an answer about products that are not in front of them.
+       *
+       * Cleared when a turn shows nothing, so a narrowing phrase after an empty
+       * answer goes to the model as a fresh search instead of silently reusing
+       * a set from two turns ago.
+       */
+      // `delete` rather than assigning undefined: exactOptionalPropertyTypes
+      // draws the distinction, and "the key is absent" is what the stores write
+      // as SQL NULL.
+      if (shown.length === 0) delete session.products;
+      else session.products = shown.slice(0, MAX_VISIBLE_PRODUCTS);
 
       // A turn reaches a human two ways: the loop gave up (`escalated`) or the
       // agent chose to hand off (`handedOff`). A client asking "did this reach
@@ -1479,6 +1760,10 @@ export function createGateway(deps: GatewayDeps): Server {
           }
         }
       }
+
+      // Beside the token counts, because that is the question it answers: a
+      // prefix that keeps changing is why `cached` would be zero.
+      watchPrefix(session.shopDomain, result.prefixFingerprint);
 
       // Never the message or the reply — see observability/logger.ts.
       //
@@ -1717,6 +2002,42 @@ function builtWidget(root: string, pathname: string): string | undefined {
     // Not built yet — a fresh checkout, or `npm run build` has not run.
   }
   return undefined;
+}
+
+/**
+ * Render a minor-unit amount for a reply the shopper reads or hears.
+ *
+ * ALWAYS two decimal places, never rounded. This is the exact mistake that
+ * retracted live answers twice: the model wrote `$785` for a price of `78595`
+ * minor, the tripwire found 78500 underivable and killed the stream. There is no
+ * model on this path, which means nothing downstream would catch a rounding bug
+ * here — so it does not round.
+ *
+ * Unknown currencies get their code rather than a guessed symbol. "974.95 SEK"
+ * is plain; "$974.95" for kronor is wrong.
+ */
+const CURRENCY_SYMBOL: Readonly<Record<string, string>> = {
+  USD: '$',
+  CAD: '$',
+  AUD: '$',
+  GBP: '£',
+  EUR: '€',
+  INR: '₹',
+  JPY: '¥',
+};
+
+export function money(minor: number, currency?: string): string {
+  const code = (currency ?? 'USD').toUpperCase();
+  const amount = (minor / 100).toFixed(2);
+  const symbol = CURRENCY_SYMBOL[code];
+  return symbol === undefined ? `${amount} ${code}` : `${symbol}${amount}`;
+}
+
+/** A search-ish string for variant image selection, from a filter. */
+function describeFilter(filter: ProductFilter): string {
+  return [filter.colour, filter.cheaper === true ? 'cheap' : '', filter.dearer === true ? 'premium' : '']
+    .filter((s) => s !== undefined && s !== '')
+    .join(' ');
 }
 
 function cacheControlFor(ext: string, pathname?: string): string {

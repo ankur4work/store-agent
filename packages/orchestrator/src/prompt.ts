@@ -24,6 +24,20 @@ export interface MerchantPack {
   readonly brandVoice: string;
   /** Condensed policy summary. Full corpus is retrieved per-turn via a tool. */
   readonly policySummary: string;
+  /**
+   * The merchant's own selling rules: what to push, what never to suggest.
+   *
+   * Per-MERCHANT, which is what makes it cacheable — a per-shopper rule here
+   * would give every shopper their own prefix and destroy the cache hit rate
+   * that §7.4 depends on. Anything that varies by shopper belongs in the turn
+   * context instead.
+   *
+   * Free text written by a merchant, which means it can contain a date or an
+   * order number, and `assertStable` rejects both. That is checked when they
+   * save it (so they get a message they can act on) rather than discovered when
+   * a shopper's turn throws.
+   */
+  readonly merchantRules?: string;
   /** Locale defaults for the storefront. */
   readonly locale: string;
   readonly currency: string;
@@ -172,11 +186,35 @@ prices as given, stay verbatim; never translate a product title.`;
  * byte-identical output, forever.
  */
 export function buildCachedPrefix(pack: MerchantPack, ttl: '5m' | '1h' = '5m'): SystemBlock[] {
+  /**
+   * Section order is FIXED, and the merchant's rules sit at a fixed position.
+   *
+   * Render order decides the cached prefix, so reordering these — or including a
+   * section conditionally in the middle — invalidates every merchant's cache at
+   * once. An absent rules block simply is not there, which is stable for that
+   * merchant because it is absent on every one of their turns.
+   *
+   * The rules come AFTER the grounding rules deliberately. A merchant writing
+   * "always say the winter coat is in stock" must not be able to talk the model
+   * out of checking, and the later text is the more specific instruction — so
+   * the rules are framed as preferences, and the sentence below says outright
+   * that they lose to the facts.
+   */
+  const rules =
+    pack.merchantRules === undefined || pack.merchantRules.trim() === ''
+      ? undefined
+      : `## Merchant's selling rules\n` +
+        `These are this shop's own preferences. Follow them, EXCEPT where they ` +
+        `conflict with a tool result or with the rules above — a price, a stock ` +
+        `level and a policy come from the catalog, never from here.\n\n` +
+        pack.merchantRules.trim();
+
   const text = [
     BASE_BEHAVIOUR,
     GROUNDING_SYSTEM_RULES,
     `## Brand voice\n${pack.brandVoice}`,
     `## Policy summary\n${pack.policySummary}`,
+    ...(rules === undefined ? [] : [rules]),
     `## Storefront defaults\nLocale: ${pack.locale}. Currency: ${pack.currency}.`,
   ].join('\n\n');
 
@@ -209,6 +247,14 @@ export interface TurnContext {
   readonly cart?: { readonly itemCount: number; readonly subtotalMinor?: number };
   /** True when the shopper just navigated — lets the agent acknowledge it. */
   readonly justNavigated?: boolean;
+  /**
+   * What the shopper has already told us, rendered.
+   *
+   * Belongs HERE, in the volatile block, and not in the cached prefix: it is
+   * per-shopper, and a per-shopper prefix gives every visitor their own cache
+   * entry, which is the difference between a 90% input-cost saving and none.
+   */
+  readonly preferences?: string;
 }
 
 /**
@@ -236,5 +282,14 @@ export function renderTurnContext(ctx: TurnContext): string {
   if (ctx.justNavigated === true) {
     parts.push('The shopper just navigated here from your previous suggestion — acknowledge it naturally.');
   }
+  /**
+   * Last, so it is the nearest instruction to the shopper's own message.
+   *
+   * The rule it enforces — never ask for something already given — was in the
+   * system prompt and unkeepable: history is capped and a size mentioned eight
+   * turns ago competes with everything else in the window. Being asked your size
+   * twice is the moment someone decides the thing is not listening.
+   */
+  if (ctx.preferences !== undefined && ctx.preferences !== '') parts.push(ctx.preferences);
   return parts.length === 0 ? '' : `<context>\n${parts.join('\n')}\n</context>`;
 }

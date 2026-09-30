@@ -1,6 +1,6 @@
 import type { Arm, ArmTotals, AttributionStore, CartLink, Conversion, Exposure } from '@storeagent/attribution';
 import type { Message } from '@storeagent/orchestrator';
-import type { Session, SessionStore } from '../sessions.js';
+import { readPreferences, readVisibleProducts, type Session, type SessionStore } from '../sessions.js';
 import type { NonceStore, Shop, ShopStore } from '../shopify/shops.js';
 import {
   DEFAULT_SETTINGS,
@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS settings (
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS voice_language TEXT NOT NULL DEFAULT 'en';
 -- 'auto' downloads nothing, so an existing shop cannot be surprised by it.
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS on_device_speech TEXT NOT NULL DEFAULT 'auto';
+-- The merchant's own selling rules, which become the cached prompt prefix.
+-- Empty on existing rows, which yields the neutral assistant they have now.
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS brand_voice TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS policy_notes TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS promote_products TEXT NOT NULL DEFAULT '';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS never_recommend TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS sessions (
   id         TEXT PRIMARY KEY,
@@ -108,6 +114,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at);
+-- What the shopper is looking at, so a narrowing turn needs no model. NULL on
+-- rows written before the column existed, which just sends the first such turn
+-- after a deploy to the model.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS products JSONB;
+-- Size, budget, colour, occasion, so the assistant stops asking twice.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS preferences JSONB;
 
 CREATE TABLE IF NOT EXISTS exposures (
   shop       TEXT NOT NULL,
@@ -270,22 +282,29 @@ export class PgSettingsStore implements SettingsStore {
       holdoutFraction: num(row['holdout']),
       voiceLanguage: String(row['voice_language'] ?? DEFAULT_SETTINGS.voiceLanguage),
       onDeviceSpeech: normaliseOnDeviceSpeech(row['on_device_speech']),
+      brandVoice: String(row['brand_voice'] ?? ''),
+      policyNotes: String(row['policy_notes'] ?? ''),
+      promoteProducts: String(row['promote_products'] ?? ''),
+      neverRecommend: String(row['never_recommend'] ?? ''),
       updatedAt: num(row['updated_at']),
     };
   }
 
   async put(s: ShopSettings): Promise<void> {
     await this.sql.query(
-      `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, on_device_speech, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, on_device_speech, brand_voice, policy_notes, promote_products, never_recommend, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (shop) DO UPDATE SET
          accent_color = EXCLUDED.accent_color, corner_radius = EXCLUDED.corner_radius,
          position = EXCLUDED.position, greeting = EXCLUDED.greeting,
          enabled = EXCLUDED.enabled, holdout = EXCLUDED.holdout,
          voice_language = EXCLUDED.voice_language,
          on_device_speech = EXCLUDED.on_device_speech,
+         brand_voice = EXCLUDED.brand_voice, policy_notes = EXCLUDED.policy_notes,
+         promote_products = EXCLUDED.promote_products,
+         never_recommend = EXCLUDED.never_recommend,
          updated_at = EXCLUDED.updated_at`,
-      [s.shop, s.accentColor, s.cornerRadius, s.position, s.greeting, s.enabled, s.holdoutFraction, s.voiceLanguage, s.onDeviceSpeech, Date.now()],
+      [s.shop, s.accentColor, s.cornerRadius, s.position, s.greeting, s.enabled, s.holdoutFraction, s.voiceLanguage, s.onDeviceSpeech, s.brandVoice, s.policyNotes, s.promoteProducts, s.neverRecommend, Date.now()],
     );
   }
 }
@@ -313,6 +332,8 @@ export class PgSessionStore implements SessionStore {
       // JSONB comes back parsed on some drivers and as text on others.
       history: (typeof history === 'string' ? JSON.parse(history) : history) as Message[],
       ...(cartId === null || cartId === undefined ? {} : { cartId: String(cartId) }),
+      ...readVisibleProducts(row['products']),
+      ...readPreferences(row['preferences']),
       updatedAt: num(row['updated_at']),
     };
   }
@@ -323,15 +344,19 @@ export class PgSessionStore implements SessionStore {
       session.history = session.history.slice(-this.maxHistory);
     }
     await this.sql.query(
-      `INSERT INTO sessions (id, shop, history, cart_id, updated_at)
-       VALUES ($1, $2, $3::jsonb, $4, $5)
+      `INSERT INTO sessions (id, shop, history, cart_id, products, preferences, updated_at)
+       VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7)
        ON CONFLICT (id) DO UPDATE SET history = EXCLUDED.history,
-         cart_id = EXCLUDED.cart_id, updated_at = EXCLUDED.updated_at`,
+         cart_id = EXCLUDED.cart_id, products = EXCLUDED.products,
+         preferences = EXCLUDED.preferences,
+         updated_at = EXCLUDED.updated_at`,
       [
         session.id,
         session.shopDomain,
         JSON.stringify(session.history),
         session.cartId ?? null,
+        session.products === undefined ? null : JSON.stringify(session.products),
+        session.preferences === undefined ? null : JSON.stringify(session.preferences),
         session.updatedAt,
       ],
     );

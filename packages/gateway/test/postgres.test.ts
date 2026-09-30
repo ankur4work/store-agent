@@ -168,7 +168,7 @@ describe('settings', () => {
       position: 'left',
       greeting: 'Hi there',
       enabled: false,
-      holdoutFraction: 0.35, voiceLanguage: 'en', onDeviceSpeech: 'auto',
+      holdoutFraction: 0.35, voiceLanguage: 'en', onDeviceSpeech: 'auto', brandVoice: '', policyNotes: '', promoteProducts: '', neverRecommend: '',
       updatedAt: 0,
     });
     const s = await store.get(SHOP);
