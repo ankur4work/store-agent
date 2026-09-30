@@ -42,6 +42,7 @@ import {
   VoiceError,
   synthesize,
   transcribe,
+  type TranscriptOutcome,
 } from './voice/service.js';
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
@@ -343,6 +344,7 @@ export function createGateway(deps: GatewayDeps): Server {
           shop: typeof body.shop === 'string' ? body.shop : null,
           diag: body.diag,
         });
+        recordDeviceCaps(body.diag);
       } catch {
         // A malformed diagnostic is not worth an error response.
       }
@@ -912,11 +914,53 @@ export function createGateway(deps: GatewayDeps): Server {
       : { language: process.env['VOICE_LANGUAGE'] }),
   };
 
+  /**
+   * Count what the shopper's device can do, from the widget's mic-press beacon.
+   *
+   * This exists to answer one question with evidence instead of an assumption:
+   * **should on-device transcription be the primary path, or a desktop
+   * accelerator?** Whisper in the browser needs a WebGPU adapter and a
+   * connection that can afford the model download, and the honest answer
+   * differs per store — a store whose shoppers are all on mid-range Android
+   * would be shipped a feature that silently never engages.
+   *
+   * Every label is a closed set, so the series count is bounded no matter how
+   * many shoppers arrive. The raw values stay in the log; only the buckets are
+   * counted. Nothing here identifies a device — these are four booleans and a
+   * connection class, which is why it is safe to count at all.
+   */
+  function recordDeviceCaps(diag: unknown): void {
+    if (typeof diag !== 'object' || diag === null) return;
+    const caps = (diag as { caps?: unknown }).caps;
+    if (typeof caps !== 'object' || caps === null) return;
+
+    const c = caps as Record<string, unknown>;
+    const yesNo = (v: unknown): string => (v === true ? 'yes' : v === false ? 'no' : 'unknown');
+    // Whatever the browser reports, reduced to the set the Network Information
+    // API actually defines. An unrecognised value becomes 'unknown' rather than
+    // a new series — a label taken straight from client input is an unbounded
+    // label set wearing a useful name.
+    const NET = ['slow-2g', '2g', '3g', '4g', '5g'];
+    const net = typeof c['net'] === 'string' && NET.includes(c['net']) ? c['net'] : 'unknown';
+
+    metrics.deviceCaps.inc({
+      webgpu: yesNo(c['webgpu']),
+      worklet: yesNo(c['worklet']),
+      net,
+      savedata: yesNo(c['saveData']),
+    });
+  }
+
   async function handleTranscribe(
     url: URL,
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
+    // Resolved before the try so the failure path can label its metric by shop
+    // too. Without that, every unclassifiable failure lands on one unlabelled
+    // series and "which merchant is this happening to" stops being answerable
+    // at exactly the moment someone needs to ask it.
+    const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
     try {
       const contentType = header(req, 'content-type') ?? 'audio/webm';
       const audio = await readRawBody(req, MAX_AUDIO_BYTES);
@@ -935,7 +979,6 @@ export function createGateway(deps: GatewayDeps): Server {
        * 'auto' is an explicit opt-in to detection, not the fallback: it is
        * what produced Urdu and then Turkish for the same English sentence.
        */
-      const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
       const merchantDefault = (await settings.get(shop)).voiceLanguage;
       // The header carries the shopper's pick from the widget; it starts on
       // the merchant's default, so it is the more specific answer when
@@ -945,6 +988,10 @@ export function createGateway(deps: GatewayDeps): Server {
       const cfg = {
         ...voiceConfig,
         log,
+        // Both sinks, from one call inside the service. See VoiceConfig.onOutcome.
+        onOutcome: (outcome: TranscriptOutcome) => {
+          metrics.transcripts.inc({ shop, outcome });
+        },
         // VOICE_LANGUAGE, if set, still overrides everything — it is the
         // operator's lever for a single-shop deployment.
         ...(voiceConfig.language === undefined && resolved !== '' ? { language: resolved } : {}),
@@ -963,7 +1010,13 @@ export function createGateway(deps: GatewayDeps): Server {
         header: pageLang === '' ? null : pageLang,
         using: (cfg as { language?: string }).language ?? 'auto-detect',
       });
+      // Measured around the whole thing, including the ogg relabel retry and
+      // the acoustic-model fallback. The shopper waits for all of it, so
+      // timing only the first request would report a number nobody experiences.
+      const startedAt = Date.now();
+      metrics.audioBytes.observe(audio.length, { shop });
       const text = await transcribe(audio, contentType, cfg);
+      metrics.transcribeDuration.observe(Date.now() - startedAt, { shop });
       // An empty transcript is a SUCCESS on the wire and a dead end for the
       // shopper: the widget quietly starts listening again, so a mic that
       // recorded perfectly well looks like it does nothing. Worth a line —
@@ -974,6 +1027,13 @@ export function createGateway(deps: GatewayDeps): Server {
       json(res, 200, { text });
     } catch (err) {
       const status = err instanceof VoiceError ? err.status : 500;
+      // The service already counted anything it could classify. This catches
+      // what it could not — a network failure, a malformed body, a bug here —
+      // so the counter totals every attempt rather than only the ones that got
+      // far enough to be named.
+      if (!(err instanceof VoiceError)) {
+        metrics.transcripts.inc({ shop, outcome: 'error' });
+      }
       // Never the audio, never the transcript — the reason, the format and
       // the size, which is what distinguishes a rejected container from a
       // bad key from an oversized upload.

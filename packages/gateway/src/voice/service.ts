@@ -65,6 +65,99 @@ export interface VoiceConfig {
   readonly fallbackSttModel?: string;
   /** Reports decisions a caller cannot otherwise see. See voice_prompt_echo. */
   readonly log?: { warn(event: string, fields?: Record<string, unknown>): void };
+  /**
+   * Counts what happened, for `/metrics`.
+   *
+   * The log lines below already record every outcome, and that turned out not
+   * to be enough: a log line answers "did this happen once", and the questions
+   * that matter are rates. How often is a transcript discarded as an echo? Is
+   * the whisper-1 fallback rescuing one turn a day or one in five? Those are
+   * subtractions of two counters, and there was no counter.
+   *
+   * Deliberately a separate sink from `log` rather than a second call at each
+   * site: both go through `note()` below, so the metric and the log cannot
+   * drift out of agreement about what happened.
+   */
+  readonly onOutcome?: (outcome: TranscriptOutcome, fields?: Record<string, unknown>) => void;
+}
+
+/**
+ * Every way a transcription attempt can end.
+ *
+ * Kept distinct because the fixes are different and, more importantly, because
+ * they are not all *our* failures. An unpaid account and a misheard word are
+ * both "no usable transcript" to the shopper and have nothing else in common;
+ * one is a billing page and the other is an audio pipeline.
+ */
+export type TranscriptOutcome =
+  /** A usable transcript from the primary model. */
+  | 'heard'
+  /** The primary produced nothing usable and whisper-1 saved the turn. */
+  | 'rescued'
+  /** Upstream heard nothing in audio the browser thought was speech. */
+  | 'empty'
+  /** The decoder handed our own vocabulary hint back as a shopper message. */
+  | 'prompt_echo'
+  /** Answered in a language the storefront did not ask for. */
+  | 'language_mismatch'
+  | 'fallback_failed'
+  | 'fallback_unusable'
+  /** Upstream refused, transiently or for a reason we cannot classify. */
+  | 'upstream_error'
+  /**
+   * Upstream refused because the account cannot be charged.
+   *
+   * Arrives as an HTTP 429, which is the same status as a rate limit and is
+   * not one: retrying is futile and every voice turn will fail identically
+   * until someone visits a billing page. Counting it as a transcription
+   * failure hides an operational problem inside a quality metric — and that
+   * is exactly how it presented when this was first measured, as four
+   * identical 502s that looked like a broken audio pipeline.
+   */
+  | 'upstream_unpaid';
+
+/**
+ * The log event each outcome is reported as.
+ *
+ * `undefined` means it is not logged here: `heard` would be a line on every
+ * voice turn, and the upstream failures are already logged by the caller with
+ * the request detail this function does not have.
+ */
+const LOG_EVENT: Readonly<Record<TranscriptOutcome, string | undefined>> = {
+  heard: undefined,
+  rescued: 'voice_fallback_rescued',
+  empty: 'voice_upstream_empty',
+  prompt_echo: 'voice_prompt_echo',
+  language_mismatch: 'voice_language_mismatch',
+  fallback_failed: 'voice_fallback_failed',
+  fallback_unusable: 'voice_fallback_unusable',
+  upstream_error: undefined,
+  upstream_unpaid: undefined,
+};
+
+/** Report an outcome to both sinks, so they cannot disagree. */
+function note(
+  cfg: VoiceConfig,
+  outcome: TranscriptOutcome,
+  fields?: Record<string, unknown>,
+): void {
+  const event = LOG_EVENT[outcome];
+  if (event !== undefined) cfg.log?.warn(event, fields);
+  cfg.onOutcome?.(outcome, fields);
+}
+
+/**
+ * Is this upstream refusal permanent, and about money rather than audio?
+ *
+ * Matched on the response body rather than the status, because the status is
+ * 429 either way. `type` and `code` are the authoritative fields; the human
+ * message is matched too, since it is the part that has stayed stable across
+ * API revisions while the codes have been renamed.
+ */
+export function isUnpaid(detail: string): boolean {
+  return /billing_not_active|insufficient_quota|account is not active|exceeded your current quota/i.test(
+    detail,
+  );
 }
 
 export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
@@ -104,7 +197,18 @@ export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
 };
 
 export class VoiceError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /**
+     * Which outcome this failure counts as.
+     *
+     * Carried on the error so the caller can label its metric without parsing
+     * the message back apart — a string match on an error message is a
+     * classification that breaks silently when the message is reworded.
+     */
+    readonly outcome: TranscriptOutcome = 'upstream_error',
+  ) {
     super(message);
   }
 }
@@ -235,7 +339,13 @@ export async function transcribe(
     } catch {
       detail = 'no body';
     }
-    throw new VoiceError(`transcription failed (${res.status}): ${detail}`, 502);
+    // An unpaid account is not a transcription problem and must not be counted
+    // as one. It also must not be retried on the acoustic model below: that
+    // request cannot succeed either, and spending it doubles the latency of
+    // every voice turn for as long as the account stays inactive.
+    const outcome: TranscriptOutcome = isUnpaid(detail) ? 'upstream_unpaid' : 'upstream_error';
+    note(cfg, outcome, { status: res.status, container });
+    throw new VoiceError(`transcription failed (${res.status}): ${detail}`, 502, outcome);
   }
   const body = (await res.json()) as { text?: unknown };
   const text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -243,7 +353,7 @@ export async function transcribe(
     // Upstream heard nothing in audio the browser thought was speech. A
     // distinct event from the echo filter below, because the fixes are
     // opposite: one is a recording problem, the other is ours.
-    cfg.log?.warn('voice_upstream_empty', { bytes: audio.length, container });
+    note(cfg, 'empty', { bytes: audio.length, container });
   }
 
   /**
@@ -265,7 +375,7 @@ export async function transcribe(
     // silently eats real speech is indistinguishable from a broken
     // microphone. Words only: never the transcript, which is shopper
     // speech.
-    cfg.log?.warn('voice_prompt_echo', { words: text.split(/\s+/).length });
+    note(cfg, 'prompt_echo', { words: text.split(/\s+/).length });
     return '';
   }
 
@@ -277,7 +387,7 @@ export async function transcribe(
    * rather than the text, which is shopper speech even when invented.
    */
   if (mismatchesLanguage(text, cfg.language)) {
-    cfg.log?.warn('voice_language_mismatch', {
+    note(cfg, 'language_mismatch', {
       asked: cfg.language ?? null,
       got: dominantScript(text),
       words: text.split(/\s+/).length,
@@ -285,6 +395,7 @@ export async function transcribe(
     return retryWithAcousticModel(audio, container, cfg, doFetch, upload);
   }
   if (text === '') return retryWithAcousticModel(audio, container, cfg, doFetch, upload);
+  note(cfg, 'heard', { words: text.split(/\s+/).length, bytes: audio.length });
   return text;
 }
 
@@ -422,22 +533,22 @@ async function retryWithAcousticModel(
   try {
     const res = await upload(container, fallback);
     if (!res.ok) {
-      cfg.log?.warn('voice_fallback_failed', { model: fallback, status: res.status });
+      note(cfg, 'fallback_failed', { model: fallback, status: res.status });
       return '';
     }
     const body = (await res.json()) as { text?: unknown };
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (text === '' || mismatchesLanguage(text, cfg.language)) {
-      cfg.log?.warn('voice_fallback_unusable', {
+      note(cfg, 'fallback_unusable', {
         model: fallback,
         got: text === '' ? 'empty' : dominantScript(text),
       });
       return '';
     }
-    cfg.log?.warn('voice_fallback_rescued', { model: fallback, words: text.split(/\s+/).length });
+    note(cfg, 'rescued', { model: fallback, words: text.split(/\s+/).length });
     return text;
   } catch (err: unknown) {
-    cfg.log?.warn('voice_fallback_failed', {
+    note(cfg, 'fallback_failed', {
       model: fallback,
       reason: err instanceof Error ? err.message : String(err),
     });

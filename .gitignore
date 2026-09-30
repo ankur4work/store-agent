@@ -24,3 +24,7 @@ packages/gateway/public/widget.min.js
 coverage/
 bench-results/
 eval-results/
+
+# Generated and cached voice fixtures. Regenerated on demand by
+# scripts/check-listening.mjs; a few megabytes of audio is not a diff.
+voice-fixtures/

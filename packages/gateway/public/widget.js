@@ -933,6 +933,24 @@ textarea::placeholder{color:var(--muted)}
   var voice = {
     on: false,
     recorder: null,
+    /**
+     * The active capture, whichever rung of the ladder produced it.
+     *
+     * `{ kind, stop(), active() }`. monitorSilence only ever asks "are you
+     * recording" and "stop" — it used to ask a MediaRecorder directly, which
+     * is why adding a second capture method needed this seam. See startCapture.
+     */
+    capture: null,
+    /** Raw mono Float32 blocks, newest last. PCM rungs only. */
+    pcm: [],
+    pcmFrames: 0,
+    /** One addModule per AudioContext, awaited by every later turn. */
+    workletReady: null,
+    /**
+     * While this is in the future, loudness is measured but speech is not
+     * counted. See the calibration window in monitorSilence.
+     */
+    calibratingUntil: 0,
     recognition: null,
     interim: '',
     stream: null,
@@ -979,6 +997,70 @@ textarea::placeholder{color:var(--muted)}
       }).catch(function () {});
     } catch (e) {
       /* diagnostics must never break the feature they are diagnosing */
+    }
+  }
+
+  /**
+   * What this device could do, if we asked it to transcribe locally.
+   *
+   * Sent once per page, on the first mic press. The question it answers is not
+   * rhetorical: on-device Whisper needs a WebGPU adapter and a connection that
+   * can afford a model download, and whether that describes this store's
+   * shoppers or only its developer is a fact about traffic, not about the
+   * technology. Shipping it on an assumption is how you find out afterwards
+   * that everyone was on a phone that fell back to the server anyway.
+   *
+   * Every probe is guarded and the whole thing is time-boxed, because this runs
+   * on the path where the shopper has just pressed a microphone. It is reported
+   * AFTER the mic is granted and never awaited by anything the shopper waits on.
+   */
+  var capsSent = false;
+
+  function probeCaps() {
+    var caps = {
+      worklet: !!(window.AudioWorkletNode && window.AudioContext && AudioContext.prototype.audioWorklet !== undefined),
+      sr: !!(window.SpeechRecognition || window.webkitSpeechRecognition),
+      recorder: typeof MediaRecorder !== 'undefined',
+      mem: navigator.deviceMemory || null,
+      cores: navigator.hardwareConcurrency || null,
+    };
+    try {
+      var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      caps.net = (c && c.effectiveType) || null;
+      caps.saveData = !!(c && c.saveData);
+    } catch (e) {
+      caps.net = null;
+    }
+
+    // `requestAdapter()` is the only honest test — `navigator.gpu` exists on
+    // devices that then fail to produce an adapter, and counting those as
+    // capable would overstate the local path's reach. Time-boxed because it is
+    // allowed to take as long as it likes.
+    if (!navigator.gpu || !navigator.gpu.requestAdapter) {
+      caps.webgpu = false;
+      return Promise.resolve(caps);
+    }
+    return Promise.race([
+      navigator.gpu.requestAdapter().then(
+        function (a) { return !!a; },
+        function () { return false; },
+      ),
+      new Promise(function (r) { setTimeout(function () { r(false); }, 400); }),
+    ]).then(function (ok) {
+      caps.webgpu = ok;
+      return caps;
+    });
+  }
+
+  function reportCaps() {
+    if (capsSent) return;
+    capsSent = true;
+    try {
+      probeCaps().then(function (caps) {
+        voiceDiag('caps', { caps: caps });
+      });
+    } catch (e) {
+      /* a census must never cost a shopper their voice turn */
     }
   }
 
@@ -1099,9 +1181,29 @@ textarea::placeholder{color:var(--muted)}
       hasRecorder: typeof MediaRecorder !== 'undefined',
       mime: typeof MediaRecorder === 'undefined' ? null : pickMime(),
     });
+    warmUpload();
     try {
       voice.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        /**
+         * Stated, not left to the browser.
+         *
+         * These three default differently per browser and per OS, and they
+         * were previously requested without the channel and rate hints — so a
+         * laptop with a stereo array handed back two channels which were then
+         * downmixed anyway, at 48 kHz, and uploaded at three times the bytes
+         * the recogniser reads.
+         *
+         * `sampleRate` is a hint that most browsers ignore, which is why the
+         * capture path resamples regardless rather than trusting it. Asking
+         * costs nothing and occasionally works.
+         */
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
     } catch (e) {
       voiceDiag('mic_denied', { error: String((e && e.name) || e) });
@@ -1113,7 +1215,36 @@ textarea::placeholder{color:var(--muted)}
     }
     voice.on = true;
     els.voicebar.classList.add('on');
+    // After permission, so a shopper who declines is never profiled, and never
+    // awaited — the census must not sit between the press and the chime.
+    reportCaps();
     startCapture();
+  }
+
+  /**
+   * Open the connection to the gateway before the shopper finishes speaking.
+   *
+   * The upload that follows is the first request of the turn, so it pays for
+   * DNS, TCP and the TLS handshake — a few hundred milliseconds on a phone,
+   * spent entirely inside the window where the shopper is waiting to be
+   * answered. Pressing the mic is several seconds of warning that a request is
+   * coming, and this is the whole of what it costs to use it.
+   *
+   * `preconnect` rather than a probe request: no bytes, no log line, and the
+   * browser will drop it harmlessly if it decides otherwise.
+   */
+  function warmUpload() {
+    try {
+      if (!API || voice.warmed) return;
+      voice.warmed = true;
+      var l = document.createElement('link');
+      l.rel = 'preconnect';
+      l.href = API;
+      l.crossOrigin = 'anonymous';
+      document.head.appendChild(l);
+    } catch (e) {
+      /* a missed handshake is slower, not broken */
+    }
   }
 
   function stopVoice(full) {
@@ -1121,7 +1252,19 @@ textarea::placeholder{color:var(--muted)}
     cancelAnimationFrame(voice.playRaf);
     stopRecognition();
     idleWave();
-    if (voice.recorder && voice.recorder.state !== 'inactive') voice.recorder.stop();
+    /**
+     * Tapping the mic off DISCARDS the recording. It used to submit it.
+     *
+     * `stop()` on a MediaRecorder fires `onstop` asynchronously, after
+     * `voice.on` has already been cleared — and the old handler uploaded
+     * anything over 1200 bytes without asking whether the turn was still
+     * wanted. So pressing stop sent the half-sentence anyway and the assistant
+     * answered a question the shopper had visibly cancelled.
+     *
+     * Ending a turn on the endpointer passes `true`; every other caller here
+     * means "stop listening", which is not the same thing as "send it".
+     */
+    if (voice.capture && voice.capture.active()) voice.capture.stop(false);
     if (full && voice.stream) voice.stream.getTracks().forEach(function (t) { t.stop(); });
     if (full) {
       voice.on = false;
@@ -1132,86 +1275,388 @@ textarea::placeholder{color:var(--muted)}
     setVoiceState('idle');
   }
 
-  function startCapture() {
+  /**
+   * The upload sample rate, and why it is not the microphone's.
+   *
+   * Mirrors TARGET_RATE in packages/voice/src/wav.ts — pinned by a test,
+   * because two copies of a number is how they drift.
+   *
+   * A browser hands back 44.1 or 48 kHz because that is what the hardware runs
+   * at. Every speech recogniser in use resamples to 16 kHz internally before it
+   * looks at the audio, so the extra bandwidth carries no information the
+   * decoder will ever read — and it carries three times the bytes. A
+   * four-second turn is 384 KB at 48 kHz and 128 KB at 16 kHz, which on a
+   * phone's uplink is the largest single term in time-to-transcript, larger
+   * than the recogniser's own latency.
+   */
+  var UPLOAD_RATE = 16000;
+
+  /** Stop growing the buffer past this, if the endpointer ever fails to fire. */
+  var MAX_CAPTURE_SECONDS = 25;
+
+  /**
+   * The capture worklet, as source.
+   *
+   * Inlined and loaded from a blob URL rather than served as a file: widget.js
+   * ships as one asset under a 15 KB gzipped budget enforced in
+   * scripts/build-widget.mjs, and a second network request on the mic path is
+   * exactly the latency this change exists to remove.
+   *
+   * Buffers to 2048 frames before posting — about 23 messages a second instead
+   * of the 375 that posting every 128-frame render quantum would cost.
+   */
+  var WORKLET_SRC =
+    'class P extends AudioWorkletProcessor{' +
+    'constructor(){super();this.buf=new Float32Array(2048);this.n=0}' +
+    'process(inputs){' +
+    'var ch=inputs[0]&&inputs[0][0];' +
+    'if(ch){for(var i=0;i<ch.length;i++){this.buf[this.n++]=ch[i];' +
+    'if(this.n===this.buf.length){this.port.postMessage(this.buf.slice(0));this.n=0}}}' +
+    'return true}}' +
+    'registerProcessor("sa-capture",P)';
+
+  function pushPcm(block) {
+    if (!block || !block.length) return;
+    if (voice.pcmFrames > MAX_CAPTURE_SECONDS * (voice.ctx ? voice.ctx.sampleRate : 48000)) return;
+    voice.pcm.push(block);
+    voice.pcmFrames += block.length;
+  }
+
+  /**
+   * A uniform handle over whichever rung captured the audio.
+   *
+   * monitorSilence only ever asks "are you still recording" and "stop". It used
+   * to ask a MediaRecorder those questions directly, which is the reason adding
+   * a second capture method needed a seam at all.
+   */
+  function pcmCapture(kind, teardown) {
+    var live = true;
+    return {
+      kind: kind,
+      active: function () { return live; },
+      stop: function (submit) {
+        if (!live) return;
+        live = false;
+        try {
+          teardown();
+        } catch (e) {
+          /* the graph is going away regardless */
+        }
+        var blob = submit === false ? null : pcmToWav();
+        voice.pcm = [];
+        voice.pcmFrames = 0;
+        if (submit !== false) onCaptured(blob, kind);
+      },
+    };
+  }
+
+  /**
+   * Capture raw PCM off the graph the level meter already built.
+   *
+   * This replaces MediaRecorder → decodeAudioData → downmix → re-encode with a
+   * tap on the microphone source. Two things fall out of it: the encode/decode
+   * round trip disappears from every turn, and the samples exist as the shopper
+   * speaks rather than only after the container is closed — which is what makes
+   * a 16 kHz upload free instead of another pass over the audio.
+   *
+   * Returns the rung's name, or null if none of them worked.
+   */
+  async function startPcmCapture() {
+    var ctx = voice.ctx;
+    if (!ctx || !voice.source) return null;
+
+    if (ctx.audioWorklet && window.AudioWorkletNode) {
+      try {
+        if (!voice.workletReady) {
+          var url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+          voice.workletReady = ctx.audioWorklet.addModule(url).then(
+            function () {
+              URL.revokeObjectURL(url);
+            },
+            function (e) {
+              URL.revokeObjectURL(url);
+              throw e;
+            },
+          );
+        }
+        await voice.workletReady;
+        var node = new AudioWorkletNode(ctx, 'sa-capture');
+        node.port.onmessage = function (e) {
+          pushPcm(e.data);
+        };
+        voice.source.connect(node);
+        // Deliberately NOT connected to the destination. A worklet runs whether
+        // or not its output goes anywhere, and routing the microphone to the
+        // speakers is how a shopper hears themselves half a second late.
+        voice.capture = pcmCapture('worklet', function () {
+          node.port.onmessage = null;
+          voice.source.disconnect(node);
+        });
+        return 'worklet';
+      } catch (e) {
+        // A worklet can fail for reasons that have nothing to do with support —
+        // a blob URL blocked by a merchant's CSP, most likely. Say so, because
+        // otherwise this silently costs every shopper on that store the faster
+        // path and nothing anywhere reports it.
+        voiceDiag('worklet_failed', { error: String((e && e.message) || e) });
+        voice.workletReady = null;
+      }
+    }
+
+    try {
+      if (!ctx.createScriptProcessor) return null;
+      var sp = ctx.createScriptProcessor(4096, 1, 1);
+      sp.onaudioprocess = function (e) {
+        // Copied, not referenced: the buffer is reused by the next callback.
+        pushPcm(new Float32Array(e.inputBuffer.getChannelData(0)));
+      };
+      voice.source.connect(sp);
+      /**
+       * A ScriptProcessorNode does not run unless its output reaches the
+       * destination — and the microphone must not. A zero gain satisfies both
+       * requirements, which is the only reason this node exists.
+       */
+      var mute = ctx.createGain();
+      mute.gain.value = 0;
+      sp.connect(mute);
+      mute.connect(ctx.destination);
+      voice.capture = pcmCapture('script', function () {
+        sp.onaudioprocess = null;
+        voice.source.disconnect(sp);
+        sp.disconnect();
+        mute.disconnect();
+      });
+      return 'script';
+    } catch (e) {
+      voiceDiag('script_processor_failed', { error: String((e && e.message) || e) });
+    }
+    return null;
+  }
+
+  /** Concatenate, resample to 16 kHz, and write a WAV. */
+  function pcmToWav() {
+    if (!voice.pcmFrames) return null;
+    var rate = voice.ctx ? voice.ctx.sampleRate : 48000;
+    var all = new Float32Array(voice.pcmFrames);
+    var at = 0;
+    for (var i = 0; i < voice.pcm.length; i++) {
+      all.set(voice.pcm[i], at);
+      at += voice.pcm[i].length;
+    }
+    return wavBlob(resampleTo(all, rate, UPLOAD_RATE), UPLOAD_RATE);
+  }
+
+  /**
+   * Resample by averaging each output sample's input window.
+   *
+   * Mirrors `resample` in packages/voice/src/wav.ts. The averaging IS the
+   * anti-alias filter: decimating 48 kHz to 16 kHz by picking every third
+   * sample folds everything above 8 kHz back down into the speech band, so
+   * sibilance and room hiss reappear as energy nobody produced. One multiply
+   * per input sample removes it.
+   */
+  function resampleTo(samples, from, to) {
+    if (from === to || !samples.length) return samples;
+    var ratio = from / to;
+    var out = new Float32Array(Math.max(1, Math.floor(samples.length / ratio)));
+    if (ratio <= 1) {
+      for (var i = 0; i < out.length; i++) {
+        var pos = i * ratio;
+        var lo = Math.floor(pos);
+        var hi = Math.min(samples.length - 1, lo + 1);
+        var frac = pos - lo;
+        out[i] = samples[lo] * (1 - frac) + samples[hi] * frac;
+      }
+      return out;
+    }
+    for (var j = 0; j < out.length; j++) {
+      var start = Math.floor(j * ratio);
+      var end = Math.min(samples.length, Math.floor((j + 1) * ratio));
+      var sum = 0;
+      for (var k = start; k < end; k++) sum += samples[k];
+      out[j] = end > start ? sum / (end - start) : samples[start] || 0;
+    }
+    return out;
+  }
+
+  /** Mono 16-bit PCM WAV. Mirrors encodeWav in packages/voice/src/wav.ts. */
+  function wavBlob(samples, rate) {
+    var view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    var ascii = function (off, s) {
+      for (var k = 0; k < s.length; k++) view.setUint8(off + k, s.charCodeAt(k));
+    };
+    ascii(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    ascii(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+    for (var i = 0; i < samples.length; i++) {
+      var v = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+    }
+    return new Blob([view.buffer], { type: 'audio/wav' });
+  }
+
+  async function startCapture() {
+    voice.pcm = [];
+    voice.pcmFrames = 0;
+    voice.chunks = [];
+    voice.capture = null;
+    voice.recorder = null;
+    voice.interim = '';
+
+    // Builds the AudioContext, the analyser and the microphone source. The PCM
+    // tap hangs off that same graph, so it has to exist first — and the tick it
+    // starts will not endpoint while `voice.capture` is still null.
+    monitorSilence();
+
+    var kind = await startPcmCapture();
+    if (kind === null) kind = startRecorderCapture();
+
+    setVoiceState('listening');
+    if (els.wave) els.wave.className = 'wave live';
+    if (els.live) els.live.textContent = 'Listening…';
+    voice.recognition = startRecognition();
+    voiceDiag('capture_start', {
+      interim: !!voice.recognition,
+      capture: kind,
+      rate: voice.ctx ? voice.ctx.sampleRate : null,
+    });
+    // Plays through the same AudioContext, so it has to follow monitorSilence.
+    cue('start');
+  }
+
+  /**
+   * Last resort: the old MediaRecorder path, kept whole.
+   *
+   * Reached when there is no worklet and no ScriptProcessorNode — an unusual
+   * browser, or a Content-Security-Policy that blocks the blob URL the worklet
+   * loads from. It is slower and it is the container that produced every
+   * fabricated transcript in this project's history, so it is third. It is
+   * still here because the alternative on such a device is no voice at all.
+   */
+  function startRecorderCapture() {
+    if (typeof MediaRecorder === 'undefined') return null;
     voice.chunks = [];
     var rec = new MediaRecorder(voice.stream, { mimeType: pickMime() });
     voice.recorder = rec;
+    var discard = false;
     rec.ondataavailable = function (e) { if (e.data.size) voice.chunks.push(e.data); };
     rec.onstop = function () {
-      // The recogniser has done its job once the utterance is over; leaving
-      // it running would keep a second microphone consumer alive through
-      // transcription and the spoken answer.
-      stopRecognition();
-      var blob = new Blob(voice.chunks, { type: rec.mimeType });
-      var spoke = Math.round(voice.spokeMs);
-      voiceDiag('recorder_stopped', { bytes: blob.size, type: rec.mimeType, spokeMs: spoke });
-      /**
-       * Bytes are not speech, and this gate only counted bytes.
-       *
-       * A few seconds of a quiet room is comfortably more than 1200 bytes of
-       * opus, so silence was uploaded like any other turn — and a decoder
-       * handed silence does not return nothing, it returns something. That
-       * is where "context:", "###" and a Polish shopping list came from:
-       * every one of them was a capture in which nobody had said a word.
-       *
-       * We already know whether anyone spoke — spokeMs is what the
-       * endpointer uses to decide the turn is over. Asking it here costs
-       * nothing and removes the entire class at the source, before the
-       * request.
-       */
-      /**
-       * A meter reading nothing at all is a broken meter, not a quiet room.
-       *
-       * Requiring speech before uploading is right, but gating on a signal
-       * without checking the signal exists is how this went from "sometimes
-       * invents a shopper" to "does not work at all": the analyser was wired
-       * to a dead stream, every reading was zero, and so every real sentence
-       * was discarded as silence. A real microphone in a real room produces
-       * a non-zero peak within a frame or two; an exact zero across a whole
-       * capture means the level is not measuring anything.
-       *
-       * So when the meter never moved, trust the recorder instead and send
-       * the audio. The worst case is the fabrication filter earning its keep
-       * server-side. Silently disabling the feature is not on the list.
-       */
-      if (spoke < MIN_SPEECH_MS && (voice.peak || 0) > 0) {
-        voiceDiag('discarded_silence', { bytes: blob.size, spokeMs: spoke });
-        if (els.live) els.live.textContent = "I didn't catch that — tap to try again.";
-        endVoiceTurn();
-        return;
-      }
-      if (spoke < MIN_SPEECH_MS) {
-        // Uploading anyway, but say so: this is the level meter failing, and
-        // it is the only place that failure is visible.
-        voiceDiag('level_meter_dead', { bytes: blob.size, peak: voice.peak || 0 });
-      }
-      if (blob.size > 1200) transcribeAndSend(blob);
-      else if (voice.on) startCapture(); // too short to be speech
+      // A cancelled turn ends here and goes no further, so `null` reaching
+      // onCaptured means one thing everywhere: we meant to send and had
+      // nothing. See the dead-capture path there.
+      if (discard) return;
+      onCaptured(new Blob(voice.chunks, { type: rec.mimeType }), 'recorder');
     };
     /**
      * No timeslice.
      *
-     * `start(100)` asks for a chunk every 100ms, and nothing here wants
-     * them — the blob is only ever read once, on stop. What it does do is
-     * force the encoder to emit a fragmented stream, where the first chunk
-     * carries the header and the rest are bare clusters with no duration.
-     * Concatenated back into a file, that is a container a decoder is
-     * entitled to give up on partway through, and a decoder that has run
-     * out of audio does not stop — it invents.
-     *
-     * Without a timeslice the recorder writes one complete file on stop.
+     * `start(100)` asks for a chunk every 100ms, and nothing here wants them —
+     * the blob is only ever read once, on stop. What it does do is force the
+     * encoder to emit a fragmented stream, where the first chunk carries the
+     * header and the rest are bare clusters with no duration. Concatenated back
+     * into a file, that is a container a decoder is entitled to give up on
+     * partway through, and a decoder that has run out of audio does not stop —
+     * it invents.
      */
     rec.start();
-    setVoiceState('listening');
-    if (els.wave) els.wave.className = 'wave live';
-    voice.interim = '';
-    if (els.live) els.live.textContent = 'Listening…';
-    voice.recognition = startRecognition();
-    voiceDiag('capture_start', { interim: !!voice.recognition });
-    // The analyser is created inside monitorSilence, so the chime has to
-    // follow it — it plays through the same AudioContext.
-    monitorSilence();
-    cue('start');
+    voice.capture = {
+      kind: 'recorder',
+      active: function () { return rec.state === 'recording'; },
+      // MediaRecorder cannot be cancelled synchronously, so the intent is
+      // recorded here and read in onstop above.
+      stop: function (submit) {
+        discard = submit === false;
+        if (rec.state !== 'inactive') rec.stop();
+      },
+    };
+    return 'recorder';
+  }
+
+  /**
+   * One place every capture rung ends up, so the gates below cannot diverge.
+   *
+   * A cancelled turn never arrives here, so `blob` is null for exactly one
+   * reason: the endpointer asked for the audio and the capture had none.
+   */
+  function onCaptured(blob, kind) {
+    // The recogniser has done its job once the utterance is over; leaving it
+    // running would keep a second microphone consumer alive through
+    // transcription and the spoken answer.
+    stopRecognition();
+    var spoke = Math.round(voice.spokeMs);
+    voiceDiag('captured', {
+      bytes: blob ? blob.size : 0,
+      type: blob ? blob.type : null,
+      capture: kind,
+      spokeMs: spoke,
+    });
+    /**
+     * A capture that delivered nothing at all.
+     *
+     * The graph was connected, the endpointer fired, and not one sample
+     * arrived — a worklet that never ran, a track that ended underneath us, a
+     * context left suspended. Returning quietly here is what a first draft of
+     * this did, and it left the panel reading "Listening…" forever with a
+     * capture that had already stopped: nothing would endpoint again, because
+     * nothing was recording.
+     *
+     * So it ends the turn and says so. An unexplained dead end is the failure
+     * mode this whole path has been fighting.
+     */
+    if (blob === null) {
+      voiceDiag('capture_empty', { capture: kind, spokeMs: spoke });
+      if (els.live) els.live.textContent = "I didn't catch that — tap to try again.";
+      endVoiceTurn();
+      return;
+    }
+
+    /**
+     * Bytes are not speech, and this gate only counted bytes.
+     *
+     * A few seconds of a quiet room is comfortably more than 1200 bytes of
+     * opus, so silence was uploaded like any other turn — and a decoder handed
+     * silence does not return nothing, it returns something. That is where
+     * "context:", "###" and a Polish shopping list came from: every one of them
+     * was a capture in which nobody had said a word.
+     *
+     * We already know whether anyone spoke — spokeMs is what the endpointer
+     * uses to decide the turn is over. Asking it here costs nothing and removes
+     * the entire class at the source, before the request.
+     *
+     * A meter reading nothing at all, though, is a broken meter and not a quiet
+     * room. Gating on a signal without checking the signal exists is how this
+     * once went from "sometimes invents a shopper" to "does not work at all":
+     * the analyser was wired to a dead stream, every reading was zero, and so
+     * every real sentence was discarded as silence. A real microphone in a real
+     * room produces a non-zero peak within a frame or two, so an exact zero
+     * across a whole capture means the level is not measuring anything — and
+     * then we trust the recording and send it. The worst case is the
+     * fabrication filter earning its keep server-side; silently disabling the
+     * feature is not on the list.
+     */
+    if (spoke < MIN_SPEECH_MS && (voice.peak || 0) > 0) {
+      voiceDiag('discarded_silence', { bytes: blob.size, spokeMs: spoke });
+      if (els.live) els.live.textContent = "I didn't catch that — tap to try again.";
+      endVoiceTurn();
+      return;
+    }
+    if (spoke < MIN_SPEECH_MS) {
+      // Uploading anyway, but say so: this is the level meter failing, and
+      // it is the only place that failure is visible.
+      voiceDiag('level_meter_dead', { bytes: blob.size, peak: voice.peak || 0 });
+    }
+    if (blob.size > 1200) transcribeAndSend(blob);
+    else if (voice.on) startCapture(); // too short to be speech
   }
 
   function pickMime() {
@@ -1245,6 +1690,17 @@ textarea::placeholder{color:var(--muted)}
   var ENDPOINT_SILENCE_MS = 550;   // nothing conclusive either way
   var ENDPOINT_HANGING_MS = 1100;  // ends mid-thought — do not cut in
   var MIN_SPEECH_MS = 250;       // shorter than this is a cough, not a turn
+  /**
+   * The window in which the room is measured and the shopper is not.
+   *
+   * Starts at 180ms so it does not measure our own opening chime, which is an
+   * acoustic event we caused and not the room. 300ms of it is enough for a
+   * stable mean at ~60 frames a second, and short enough that a shopper who
+   * starts talking straight away loses no words — capture runs from t=0; only
+   * the speech accounting waits.
+   */
+  var CALIBRATE_FROM_MS = 180;
+  var CALIBRATE_TO_MS = 480;
   var MAX_UTTERANCE_MS = 20000;  // a hard stop, so noise cannot record forever
   var IDLE_GIVE_UP_MS = 8000;    // heard nothing at all — mic muted or dead
 
@@ -1405,6 +1861,10 @@ textarea::placeholder{color:var(--muted)}
     var floorRaw = 255;
     var peak = 0;
     var last = startedAt;
+    // How many frames the calibration window actually contributed. Zero means
+    // it never ran, which is a different state from "the room measured zero".
+    var calibFrames = 0;
+    var calibSum = 0;
 
     function tick() {
       if (!voice.on) return;
@@ -1418,35 +1878,61 @@ textarea::placeholder{color:var(--muted)}
       var dt = now - last;
       last = now;
 
+      /**
+       * Measure the room before believing anything about the shopper.
+       *
+       * The floor used to be seeded by whatever arrived first, which on this
+       * path is the shopper — everybody presses the mic and starts talking.
+       * So the floor became the speaking level, the threshold then demanded
+       * they exceed their own voice by half again, nothing registered as
+       * speech, and nothing registered as the end of it: the recorder ran
+       * until the hard timeout. The `peak * 0.5` clamp below was added to stop
+       * that, and it is a backstop doing a measurement's job.
+       *
+       * Now there is an explicit window. It starts AFTER the opening chime,
+       * which is an acoustic event of our own making and not the room; and
+       * while it is open, loudness is measured but speech is not counted, so a
+       * shopper who talks immediately cannot poison the reading. Their words
+       * are still recorded — capture begins before this tick does — only the
+       * "did anyone speak" accounting waits.
+       */
+      var sinceStart = now - startedAt;
+      var calibrating = sinceStart < CALIBRATE_TO_MS;
+      if (sinceStart >= CALIBRATE_FROM_MS && calibrating) {
+        calibSum += level;
+        calibFrames++;
+        // The room, as measured, plus a little headroom for its own variance.
+        floorRaw = calibSum / calibFrames;
+      }
+
       // Fall to a new quiet level at once, climb back very slowly — so a gap
       // between words re-reads the room honestly while a passing truck does
       // not raise the floor for good.
-      if (level < floorRaw) floorRaw = level;
-      else floorRaw += (level - floorRaw) * 0.002;
+      if (!calibrating) {
+        if (level < floorRaw) floorRaw = level;
+        else floorRaw += (level - floorRaw) * 0.002;
+      }
       if (level > peak) peak = level;
       else peak *= 0.9997;
       // Published so the upload gate can tell "the room was quiet" from "the
-      // meter is not working" — see the peak check in rec.onstop.
+      // meter is not working" — see the peak check in onCaptured.
       voice.peak = peak;
 
-      // The floor is CAPPED against the peak, and that cap is the whole fix.
+      // The floor stays CAPPED against the peak.
       //
-      // Taking the plain minimum meant the floor calibrated to whatever was
-      // heard first. Press the mic and start talking — which is what everyone
-      // does — and the first frames are speech, so the floor became the
-      // speaking level and the threshold then demanded you exceed your own
-      // voice by half again. Nothing ever registered as speech, so nothing
-      // ever registered as the end of it, and the recorder ran forever.
-      //
-      // A real noise floor is never half the peak, so clamping there keeps a
-      // speech-poisoned reading from swallowing the signal.
+      // With the calibration window above, this is no longer the only thing
+      // standing between a talkative shopper and a mic that never stops. It is
+      // kept because a real noise floor is never half the peak, so the clamp
+      // still catches a reading poisoned some other way — a cough during
+      // calibration, a door, someone else's voice.
       voice.floor = Math.min(floorRaw, peak * 0.5);
 
       // Whichever is higher: clear of the room, or a real fraction of how
       // loud this speaker actually is. The first handles a noisy shop, the
       // second a quiet room with a soft voice.
       var threshold = Math.max(6, voice.floor + 6, peak * 0.3);
-      var speaking = level > threshold;
+      // Speech is not counted until the room has been measured. See above.
+      var speaking = level > threshold && !calibrating;
 
       if (speaking) {
         voice.silenceSince = now;
@@ -1458,7 +1944,9 @@ textarea::placeholder{color:var(--muted)}
         }
       }
 
-      var recording = voice.recorder && voice.recorder.state === 'recording';
+      // Whichever rung captured this turn. Null until startCapture has chosen
+      // one, which is why the tick can safely start before capture exists.
+      var recording = !!(voice.capture && voice.capture.active());
       // Varies with what has actually been said, where a transcript exists.
       var window_ = silenceWindowFor(voice.interim);
       var quietLongEnough =
@@ -1481,12 +1969,17 @@ textarea::placeholder{color:var(--muted)}
         elapsedMs: Math.round(now - startedAt),
         waitMs: window_,
         words: voice.interim ? voice.interim.split(/s+/).length : 0,
+        // Frames the room measurement actually got. Zero here with a wrong
+        // threshold means the window never ran, which is a different bug from
+        // the window measuring the wrong thing.
+        calib: calibFrames,
       };
 
       if (recording && (quietLongEnough || tooLong || heardNothing)) {
         reading.reason = quietLongEnough ? 'silence' : tooLong ? 'max-duration' : 'no-speech';
         voiceDiag('endpoint', reading);
-        voice.recorder.stop();
+        // `true`: the endpointer is the one caller that means "send it".
+        voice.capture.stop(true);
         return;
       }
 
@@ -1603,28 +2096,11 @@ textarea::placeholder{color:var(--muted)}
         for (var i = 0; i < len; i++) mono[i] += src[i] / chans;
       }
 
-      var view = new DataView(new ArrayBuffer(44 + len * 2));
-      var ascii = function (off, s) {
-        for (var k = 0; k < s.length; k++) view.setUint8(off + k, s.charCodeAt(k));
-      };
-      ascii(0, 'RIFF');
-      view.setUint32(4, 36 + len * 2, true);
-      ascii(8, 'WAVE');
-      ascii(12, 'fmt ');
-      view.setUint32(16, 16, true);
-      view.setUint16(20, 1, true); // PCM
-      view.setUint16(22, 1, true); // mono
-      view.setUint32(24, audio.sampleRate, true);
-      view.setUint32(28, audio.sampleRate * 2, true);
-      view.setUint16(32, 2, true);
-      view.setUint16(34, 16, true);
-      ascii(36, 'data');
-      view.setUint32(40, len * 2, true);
-      for (var j = 0; j < len; j++) {
-        var v = Math.max(-1, Math.min(1, mono[j]));
-        view.setInt16(44 + j * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
-      }
-      return new Blob([view.buffer], { type: 'audio/wav' });
+      // Downsampled and written by the same two functions the PCM rungs use.
+      // This path used to hand-roll its own header and upload at the
+      // microphone's native rate, so the fallback paid three times the bytes
+      // for audio no recogniser reads at that rate.
+      return wavBlob(resampleTo(mono, audio.sampleRate, UPLOAD_RATE), UPLOAD_RATE);
     } catch (e) {
       voiceDiag('wav_failed', { error: String((e && e.message) || e) });
       return blob;
@@ -1632,8 +2108,13 @@ textarea::placeholder{color:var(--muted)}
   }
 
   async function transcribeAndSend(raw) {
-    var blob = await toWav(raw);
+    // The PCM rungs already produce a 16 kHz WAV. Only the MediaRecorder
+    // fallback needs the decode-and-re-encode pass, which is most of what the
+    // capture rework removed — running it on a WAV would decode our own file
+    // and write it back out at the microphone's rate, undoing the saving.
+    var blob = raw.type === 'audio/wav' ? raw : await toWav(raw);
     setVoiceState('thinking');
+    var startedAt = performance.now();
     try {
       // ?shop= so the gateway can read THIS merchant's voice language. The
       // same pattern the widget bundle and rate limiter already use.
@@ -1649,6 +2130,23 @@ textarea::placeholder{color:var(--muted)}
       });
       var d = await r.json();
       var text = (d && d.text ? d.text : '').trim();
+      /**
+       * What the shopper actually waited for.
+       *
+       * The eval harness measures the server: audio in, transcript out. It
+       * cannot see the upload, and the upload is the part that changed — 16 kHz
+       * instead of 48 kHz is three times fewer bytes, and on a phone the bytes
+       * ARE the latency. This is the only number that includes it, which makes
+       * it the one that says whether the change reached anybody.
+       *
+       * No transcript and no audio: a duration, a size, and a rate.
+       */
+      voiceDiag('transcript', {
+        ms: Math.round(performance.now() - startedAt),
+        bytes: blob.size,
+        rate: blob.type === 'audio/wav' ? UPLOAD_RATE : null,
+        heard: text !== '',
+      });
       // Nothing heard. Ending the turn says so; restarting silently did not.
       if (!text) {
         /**

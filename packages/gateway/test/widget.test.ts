@@ -923,10 +923,22 @@ describe('widget audio upload format', () => {
     expect(SRC).not.toContain('rec.start(100)');
   });
 
-  it('re-encodes to PCM WAV, which has nothing left to misparse', () => {
+  it('uploads PCM WAV, which has nothing left to misparse', () => {
+    /**
+     * The guarantee is unchanged and now arrives by a shorter route.
+     *
+     * Every upload used to be re-encoded here, because every capture was a
+     * webm container. The PCM rungs write the WAV directly, so the re-encode
+     * is reached only by the MediaRecorder fallback — and running it on a file
+     * that is already WAV would decode our own output and write it back at the
+     * microphone's rate, undoing the byte saving.
+     *
+     * What matters is that nothing reaches the recogniser in a container it
+     * may give up on partway through. See widget-capture.test.ts for the rest.
+     */
     expect(SRC).toContain('async function toWav(');
-    expect(SRC).toContain("new Blob([view.buffer], { type: 'audio/wav' })");
-    expect(SRC).toContain('var blob = await toWav(raw)');
+    expect(SRC).toContain("return new Blob([view.buffer], { type: 'audio/wav' })");
+    expect(SRC).toContain("raw.type === 'audio/wav' ? raw : await toWav(raw)");
   });
 
   it('reports how much audio actually decoded', () => {

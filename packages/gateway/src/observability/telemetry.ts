@@ -29,6 +29,23 @@ export const TURN_BUCKETS = [250, 500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_00
 /** Upstream calls: UCP catalog, model, STT/TTS. */
 export const UPSTREAM_BUCKETS = [25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, Infinity];
 
+/**
+ * Bytes per voice upload.
+ *
+ * The widget used to send WAV at the microphone's native 48 kHz; it now
+ * resamples to 16 kHz, which is what every recogniser uses internally anyway.
+ * That is 32 KB per second of audio instead of 96 KB, and on a phone's uplink
+ * the byte count *is* the latency — it is the largest single term in
+ * time-to-transcript on mobile.
+ *
+ * This histogram is how we know the change actually reached shoppers rather
+ * than only the test suite. A fleet still uploading at 90 KB/s of audio is a
+ * fleet running a cached copy of the old widget, and nothing else would say so.
+ */
+export const AUDIO_BYTES_BUCKETS = [
+  32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152, 8_388_608, Infinity,
+];
+
 export class Telemetry {
   readonly registry = new Registry();
 
@@ -101,6 +118,55 @@ export class Telemetry {
     'storeagent_upstream_ms',
     'Milliseconds for an upstream call, labelled by target',
     UPSTREAM_BUCKETS,
+  );
+
+  // --- listening -----------------------------------------------------------
+
+  /**
+   * How every transcription attempt ended.
+   *
+   * `voice/service.ts` has always distinguished these — a prompt echo, a
+   * language mismatch, a whisper-1 rescue — and reported them as log lines.
+   * A log line answers "did this happen once". The questions that matter are
+   * rates: what fraction of turns are discarded, and is the fallback rescuing
+   * one turn a day or one in five. Neither was answerable before this.
+   *
+   * The `upstream_unpaid` label earns its place on its own: an inactive
+   * account arrives as an HTTP 429 and presented as four identical 502s that
+   * looked exactly like a broken audio pipeline.
+   */
+  readonly transcripts = this.registry.counter(
+    'storeagent_transcripts_total',
+    'Transcription attempts, labelled by shop and outcome',
+  );
+
+  readonly transcribeDuration: Histogram = this.registry.histogram(
+    'storeagent_transcribe_ms',
+    'Milliseconds from audio received to transcript returned',
+    UPSTREAM_BUCKETS,
+  );
+
+  readonly audioBytes: Histogram = this.registry.histogram(
+    'storeagent_audio_upload_bytes',
+    'Bytes per voice upload — the dominant term in mobile time-to-transcript',
+    AUDIO_BYTES_BUCKETS,
+  );
+
+  /**
+   * What the shoppers' devices can actually do.
+   *
+   * Level 2 puts Whisper in the browser over WebGPU, and whether that is the
+   * primary path or a desktop accelerator is a question about this store's
+   * traffic, not about the technology. Shipping it on an assumption is how you
+   * find out afterwards that most of your shoppers are on a phone that fell
+   * back to the server anyway.
+   *
+   * Every label is a small closed set — present/absent, a connection class —
+   * so the series count is bounded regardless of how many shoppers arrive.
+   */
+  readonly deviceCaps = this.registry.counter(
+    'storeagent_device_caps_total',
+    'Voice-capable devices seen, labelled by webgpu/worklet/network class',
   );
 
   // --- money --------------------------------------------------------------

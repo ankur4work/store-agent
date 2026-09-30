@@ -17,6 +17,7 @@
     "check-deploy": "npm run build && node scripts/check-deploy.mjs",
     "check-launch": "npm run build && node scripts/check-launch.mjs",
     "check-limits": "npm run build && node scripts/check-limits.mjs",
+    "check-listening": "npm run build && node scripts/check-listening.mjs",
     "check-observability": "npm run build && node scripts/check-observability.mjs",
     "check-secrets": "node scripts/check-secrets.mjs",
     "check-secrets:all": "node scripts/check-secrets.mjs --all",

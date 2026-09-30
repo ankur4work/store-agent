@@ -1,0 +1,406 @@
+# Phase 6 — Listening quality, and the agent around it
+
+**Date:** 2026-09-30 · **Status:** plan, nothing built yet
+**Goal in one line:** the shopper speaks and is understood, on the first try,
+on a phone, in a noisy room — and everything downstream of the transcript gets
+faster and more deliberate.
+
+Five levels. Each one ends at a **gate**: a measurement plus a thing you do by
+hand on the dev store. Nothing starts on level N+1 until the level N gate is
+green and you have said so.
+
+---
+
+## 0. What already exists (read this first)
+
+A large part of the requested architecture is built. This plan is a delta, not
+a rewrite. Where a request is already satisfied, the honest answer is "no work"
+rather than a rebuild that ships risk and no capability.
+
+| You asked for | Today | Phase 6 work |
+|---|---|---|
+| Voice input: Whisper via Transformers.js + WebGPU, server fallback | Server-only: mic → WAV upload → `gpt-4o-transcribe`, `whisper-1` fallback (`gateway/src/voice/service.ts`) | **Level 2** — local first rung, server stays the floor |
+| AI brain: LLM with tool/function calling | Built — hand-rolled loop, 5 tools, mid-stream grounding tripwire (`packages/orchestrator`) | Level 3 adds a deterministic lane *around* it |
+| Product search: Shopify API + own semantic search | Built — UCP MCP `search_catalog` + own 1536-dim embedding index with a 0.3 score floor, incl. vision-described images (`gateway/src/search/*`) | Level 5: webhook-driven freshness. Storefront API: **declined**, see §0.2 |
+| Vector search: pgvector + Postgres/Supabase | `VectorStore` interface, SQLite implementation, brute-force cosine (~10 ms at 5k vectors) | **Level 5, gated** — see §0.1 |
+| Agent backend: Node.js + TypeScript | Built, Node 22, zero runtime dependencies | no work |
+| Streaming: SSE or WebSockets | Built — SSE, and product cards already stream *before* the prose (~44 ms) | no work |
+| Conversation state: Redis | `SessionStore` is already Redis-shaped (async, TTL, string keys); SQLite behind it | **Level 5, gated** |
+| Catalog sync: webhooks + background workers | Missing. Index rebuilds on 6 h staleness or on a suspicious miss | **Level 5** — build it |
+| Analytics: PostHog or own events | Own: Prometheus `/metrics`, `/api/slo`, attribution + holdout tables | **Level 5** — own funnel. PostHog: see §0.3 |
+| WebMCP, not depended on | Not present | Level 5, additive namespace only |
+| UI: floating assistant, cards not text, next-choice chips | Built — square listening box, image-forward card rail above the prose, chip row, skeletons, Shadow DOM both ways | **Level 4** — card *actions* and per-turn chips |
+| Salesman brain prompt | Mostly built — `orchestrator/src/prompt.ts` already carries 13 of your 14 rules | **Level 3** — merchant-specific pack, which is a stub today |
+| Not every response is an LLM call | Not true today. Every turn hits the model | **Level 3** — deterministic lane |
+
+### 0.1 pgvector / Supabase — deliberately deferred, not forgotten
+
+Three reasons, in order of weight:
+
+1. **It would make search slower.** Brute-force cosine over a Shopify catalog
+   (hundreds of products; thousands at the top end) is ~10 ms in-process. A
+   Supabase round trip is 30–80 ms before it does any work. You would pay
+   latency to gain an index you do not need until ~100k vectors.
+2. **It breaks the holdout.** This deployment is deliberately single-node
+   SQLite because two writers corrupt holdout assignment silently, and
+   incrementality is the thing the product is sold on. Moving to Postgres is
+   the right move *when multi-node is the goal*, and then holdout assignment
+   has to move into the shared store first — that is a Level 5 task with its
+   own gate, not a side effect of changing a vector store.
+3. **The seam already exists.** `VectorStore` has four methods. A pgvector
+   implementation is a file, not a migration of call sites. Writing it early
+   buys nothing; the interface is the part that mattered and it is done.
+
+**Trigger to build it (any one):** a merchant catalog over 25k products; a
+second gateway node becomes necessary; or p95 semantic search exceeds 40 ms.
+Level 5 includes the implementation behind that trigger so it is ready.
+
+### 0.2 Shopify Storefront API — declined for now
+
+UCP MCP already does natural-language catalog search and returns per-variant
+price and availability, and the `update_cart` full-replacement semantics are
+already handled with hostile fixtures. Adding the Storefront API duplicates
+that surface, needs a second scope (`unauthenticated_read_product_listings`)
+and a storefront access token per shop, and gives us one thing we cannot get
+today: metafields and tag-level filtering.
+
+If a merchant needs filtering on metafields, this becomes a Level 4 add-on
+scoped to *that*. Building it now is a parallel integration to keep in sync
+with no shopper-visible gain.
+
+### 0.3 PostHog — recommend own events
+
+PostHog on a storefront is a third-party data processor observing shoppers who
+never agreed to it. That means: a `PRIVACY.md` rewrite, a Shopify App Store
+data-disclosure change, a GDPR processor entry, and bytes on the merchant's
+page against a CWV contract we currently pass. The funnel you actually want
+(opened → engaged → cards shown → card clicked → add to cart → checkout) is
+six columns in a table we already own, joined to a holdout arm nobody else
+has. Level 5 builds that. PostHog stays available as a merchant-side opt-in if
+one ever asks.
+
+---
+
+## 1. Level 1 — Make listening measurable, then take the free wins
+
+**Why first.** "Improve listen quality" is not yet a falsifiable statement
+about this app. There is no word-error-rate number, no count of how often a
+transcript is discarded, and no latency breakdown of a voice turn. Every later
+level is judged against Level 1's baseline, and two of the levels can be
+cancelled by what it measures.
+
+### Build
+
+1. **A voice eval harness** — `packages/voice/test/fixtures/` plus a runner in
+   `packages/eval`, mirroring the existing 28-case grounding eval.
+   - ~30 utterances: short ("how much"), long, mid-sentence pause, accented,
+     background noise, music, two people, and **four silence/noise-only
+     clips** whose correct answer is the empty string.
+   - Baseline clips are generated from our own TTS (repeatable, free) and
+     clearly labelled as such — synthetic audio flatters a recogniser. Then
+     8–10 real recordings from a phone, committed as 16 kHz mono WAV.
+   - Scores: WER, fabrication rate (a transcript where silence was the truth),
+     discard rate, language-mismatch rate, p50/p95 time-to-transcript.
+2. **Instrument the live path** — counters in `observability/metrics.ts` for
+   each existing outcome that is currently invisible: `heard`, `empty`,
+   `prompt_echo`, `language_mismatch`, `fallback_rescued`,
+   `fallback_unusable`, `discarded_silence`. Today these are log lines; a rate
+   cannot be read from log lines.
+3. **Capability census from the widget** — one field on the existing
+   `/api/diag` beacon: WebGPU adapter present, `deviceMemory`,
+   `connection.effectiveType`, `saveData`, `AudioWorklet` support, whether
+   `SpeechRecognition` exists. **This number decides Level 2's default.** If
+   under ~30% of this store's voice sessions have a usable WebGPU adapter,
+   local Whisper is a desktop accelerator, not the primary path — and the plan
+   changes accordingly rather than shipping on an assumption.
+4. **Free wins, in the current server path** (no new dependency, no new asset):
+   - **Capture PCM directly** via `AudioWorklet` instead of
+     MediaRecorder-webm → `decodeAudioData` → re-encode WAV. Removes a decode
+     pass and a whole-utterance buffer wait from every turn.
+   - **Start uploading while they are still speaking.** Today the upload
+     begins after endpointing. Chunk it and the network time overlaps the
+     speech instead of following it.
+   - **Explicit mic constraints**: mono, 16 kHz, `echoCancellation`,
+     `noiseSuppression`, `autoGainControl` stated rather than left to the
+     browser's defaults, which differ per browser and per OS.
+   - **Noise-floor calibration.** The silence threshold is a fixed energy
+     value today; calibrate it over the first ~300 ms of the turn so a noisy
+     room raises the floor instead of holding the mic open.
+   - **`preconnect` to the gateway** on mic press, so the TLS handshake is not
+     inside the shopper's turn.
+
+### Will NOT do at this level
+
+No new dependency. No model download. No change to the transcript→answer path.
+
+### Status — built 2026-09-30, one gate outstanding
+
+Everything in this level is written and tested; 1,196 tests pass and the widget
+budget gate is green at 14.39 KB of 15 KB. What is **not** done is the
+measurement, and for a reason outside the code:
+
+> The OpenAI account returns `billing_not_active` as an HTTP 429. No
+> transcription, TTS, embedding or model call can succeed, so there is no
+> baseline yet. The harness runs end to end regardless — it generated clips,
+> uploaded them, scored them, gated, and wrote `eval-results/listening.json`.
+
+| Landed | Where |
+|---|---|
+| WER scorer, corpus WER weighted by words, fabrication counted separately | `packages/voice/src/transcript-score.ts` |
+| 16 kHz WAV encode/decode + anti-aliased resample | `packages/voice/src/wav.ts` |
+| Seeded room/music noise, SNR mixing | `packages/voice/src/noise.ts` |
+| 24-clip corpus over 7 groups, 3 degradation variants | `packages/voice/src/listening-corpus.ts` |
+| Runner with `--rate`, `--group`, `--real`, `--save-baseline` | `scripts/check-listening.mjs` |
+| Per-outcome counters, transcribe duration, upload bytes | `observability/telemetry.ts`, `voice/service.ts` |
+| Device census → bounded-label counter | `widget.js` → `/api/diag` |
+| AudioWorklet PCM capture, 16 kHz upload, calibration window, preconnect | `packages/gateway/public/widget.js` |
+
+Three defects were found and fixed on the way:
+
+1. **An unpaid account was indistinguishable from mishearing.** It arrives as an
+   HTTP 429 — the same status as a rate limit — and was reported as
+   `transcription failed`. It is now classified as `upstream_unpaid`, counted
+   separately, and no longer spends the acoustic-model fallback request that
+   cannot succeed either. Verified live: `storeagent_transcripts_total{outcome="upstream_unpaid"} 1`.
+2. **Tapping the mic off submitted the recording.** `MediaRecorder.stop()` fires
+   `onstop` asynchronously, after `voice.on` is cleared, and the handler
+   uploaded anything over 1200 bytes — so a visibly cancelled half-sentence was
+   answered anyway. Cancelling now discards; only the endpointer submits.
+3. **The MediaRecorder fallback uploaded at the microphone's native rate**,
+   paying 3× the bytes for audio no recogniser reads at that rate. It now shares
+   the same 16 kHz path.
+
+Measured, not asserted: the upload is **31 KB per second of audio against 94 KB**
+before (`check-listening.mjs --rate 48000` reproduces the old behaviour).
+
+### Gate
+
+- `npm run check-listening` prints a baseline table, then an after table.
+  Required: **WER down, p95 time-to-transcript down by ≥ 25%, and 4/4 silence
+  clips return empty** (zero fabrications). **Blocked on the billing account.**
+- Every new counter appears in `/metrics` with a non-zero sample after a real
+  voice turn.
+- **You, on the dev store, on a phone:** five spoken questions in a normal
+  room. You tell me how many were understood first try, and whether it feels
+  faster. If it does not, Level 1 is not done — the numbers are a proxy, your
+  ear is the gate.
+- Rollback: all of this is behind the existing voice path; reverting is one
+  commit.
+
+---
+
+## 2. Level 2 — Whisper in the browser: Transformers.js + WebGPU, server as the floor
+
+### The design, which differs from the sketch in one important way
+
+A cold local Whisper is a **~40 MB download** (whisper-tiny int8; base is
+~80 MB) plus ~1.5 MB of runtime. A first-time shopper on mobile data cannot
+pay that inside their first sentence, and the widget's enforced budget is
+15 KB gzipped for what ships on every page view. So the ladder is:
+
+```
+turn 1   mic → server STT  (fast, known, already works)
+         ↓  in the background, after the turn succeeds
+         prefetch model IF: WebGPU adapter present
+                        AND not saveData
+                        AND effectiveType is 4g/wifi-class
+                        AND Cache Storage has room
+turn 2+  mic → local Whisper (streaming partials, no upload at all)
+         ↓  if not ready within 250 ms, or it errors
+         server STT — same as turn 1, shopper notices nothing
+```
+
+Local Whisper is therefore an **accelerator that engages when it is free**,
+never a gate the shopper waits behind. The wasm path is kept only as a
+last resort when the server is unreachable, because multi-threaded wasm needs
+cross-origin isolation (COOP/COEP) that we cannot impose on a merchant's page
+— single-threaded wasm transcription is too slow to be a real rung.
+
+### Build
+
+- **New lazily-fetched asset**, `packages/gateway/public/voice-local.js`,
+  bundled by `scripts/build-widget.mjs` as a second entry point with its own
+  budget. It is `import()`ed on first mic press and never referenced from the
+  loader, so `widget.min.js` stays under its 15 KB gate. `transformers.js` is
+  bundled at build time, not pulled from a CDN — external hosts are both a CSP
+  problem on merchant storefronts and against this repo's zero-CDN posture.
+- **Self-hosted weights** under `/voice-models/…`, served by `serveStatic`
+  with immutable long cache, correct `application/wasm` and `application/octet-stream`
+  types, CORS for the merchant origin, and no gzip on already-compressed
+  weights. Persisted in Cache Storage keyed by model + revision.
+- **Streaming partial transcripts**, which is the real listen-quality win:
+  the tested semantic endpointer in `packages/voice/src/endpoint.ts` — which
+  runs server-side today and is wired to nothing — finally runs in the browser
+  against a real interim transcript, replacing the Chrome-only
+  `SpeechRecognition` hint and the conservative energy thresholds. This is the
+  "next voice latency win" that `STATUS.md` names.
+- **A ladder with a budget**: local → server → local-wasm → "didn't catch
+  that". Every rung reports which one produced the transcript, as a metric.
+- **A merchant switch** in admin settings: on-device transcription on / off /
+  auto, defaulting to whatever Level 1's census says is right for this store.
+
+### Will NOT do
+
+No removal of the server path. No blocking the first turn on a download. No
+COOP/COEP demands on the merchant's page. No CDN.
+
+### Gate
+
+- **Automated:** the Level 1 eval runs against the local engine too, and local
+  WER must be **≤ server WER** on the fixture set. Widget size gate still
+  green: `widget.min.js` unchanged within 200 bytes.
+- **You, on desktop Chrome:** open DevTools → Network, do a voice turn (the
+  second one). Expect **zero requests to `/api/voice/transcribe`**, partial
+  text appearing while you are still talking, and the answer starting sooner
+  than it does today.
+- **You, on a phone:** voice still works. If the phone takes the local path,
+  it must not be slower than Level 1; if it takes the server path, it must be
+  exactly Level 1. Either outcome passes — silently degrading to something
+  worse than Level 1 does not.
+- **Cold shopper simulation:** clear site data, first voice turn must still
+  answer in Level-1 time. This is the one that catches a plan that quietly put
+  a 40 MB download in front of a shopper.
+- Rollback: the merchant switch set to `off` restores Level 1 exactly, with no
+  deploy.
+
+---
+
+## 3. Level 3 — A deterministic lane, and a merchant's own salesman brain
+
+### Build
+
+1. **Intent router before the model** (`packages/orchestrator/src/router.ts`
+   grows a sibling; the model router already exists). Deterministic, no
+   tokens, no round trip:
+   - `open cart`, `show my cart`, `checkout`, `go to checkout`
+   - `add this`, `add it`, `remove that`, `quantity two`
+   - `show blue ones`, `cheaper`, `under fifty` → a filter over the products
+     already on screen, not a new search
+   - `scroll`, `next`, `back`, `open the first one`
+   These emit the **same SSE events** the model path emits, so the widget
+   needs no special case, and they cost £0 and ~50 ms. Anything ambiguous
+   falls through to the model — the router's default answer is "not mine".
+   A regression test asserts that every phrase it claims is genuinely
+   unambiguous, because a router that swallows "add this to a wishlist" is
+   worse than no router.
+2. **Merchant pack wired to reality.** `MerchantPack` (brand voice, policy
+   summary, locale, currency) is a typed stub today with nothing feeding it.
+   Add admin fields — brand tone, products to promote, products never to
+   recommend, discount rules, shipping and returns notes — persisted per shop
+   and rendered into the **cached prefix** (per-merchant is cache-safe;
+   per-shopper is not). `assertStable()` already guards the prefix; add a
+   metric on `prefixFingerprint` so a change that silently kills prompt
+   caching pages someone instead of showing up in a bill.
+3. **Preference memory.** Size, budget, colour, occasion — extracted
+   deterministically from the turn, stored on the session, rendered into the
+   turn context. This is your rule 13 ("never ask again for what was already
+   given"), and it is the one rule in your list the current prompt cannot
+   keep, because nothing carries the answer forward.
+
+### Gate
+
+- **Automated:** `open cart` and `add this` complete with **zero model tokens**
+  — asserted in a test and visible as a flat token counter in `/metrics` — in
+  under 150 ms. The router's ambiguity test passes. Cached-read tokens stay
+  non-zero across turns after a merchant edits their tone (proves the prefix
+  is still cacheable).
+- **You, in the admin:** set the brand tone to something distinctive, save,
+  ask the same question in the storefront, and see the reply change. Set a
+  "never recommend" product and confirm it stops being offered.
+- **You, in the storefront:** say "I'm a medium", then two turns later ask for
+  a jacket. It must not ask your size again.
+
+---
+
+## 4. Level 4 — The multimodal surface
+
+The UI you sketched is largely the UI that exists — cards above the prose,
+chips, a listening box rather than a chat window. What is missing is that the
+cards are currently **read-only**, and the chips come from the page rather than
+from the answer.
+
+### Build
+
+- **Card actions:** add to cart from the card, variant picker in place, "more
+  like this", open PDP. Cart actions already exist as tools and already have
+  the full-replacement `update_cart` safety; this exposes them to a thumb.
+- **Per-turn chips generated from the turn's own tool results** — actual
+  colours, sizes, price bands and collections present in the results, not
+  model-invented categories and not the static page-based set. Deterministic,
+  so a chip can never offer something the store does not have.
+- **"Something like this but black."** The page context (product id, title) is
+  already sent every turn. This makes it *usable*: resolve the current
+  product's options and family, then search within it constrained by the new
+  attribute, so the answer is siblings rather than a fresh keyword search.
+- **Barge-in and modality parity:** speaking over the assistant cancels TTS
+  and aborts the in-flight model call; push-to-talk as well as hands-free;
+  the text composer never disappears when voice is active.
+
+### Gate
+
+**The exact scenario you described, on the dev store, by hand:**
+
+1. Stand on a product page. Say "something like this but black."
+2. Cards appear in under a second, and they are the same kind of product.
+3. Tap a card's size, tap add — the cart updates, and the assistant says so.
+4. Tap a chip ("casual") — the rail changes with no model call.
+5. Interrupt the assistant mid-sentence — it stops within ~50 ms.
+
+Automated backing: an integration test per step, and the CWV/size gates still
+green — the widget is a guest on the merchant's revenue and Level 4 is the
+level most likely to forget it.
+
+---
+
+## 5. Level 5 — The scale-out pieces, each behind its own trigger
+
+Two things here are unconditional because they pay for themselves immediately.
+The rest is written, tested, and left switched off until a trigger fires —
+that is what keeps this level from becoming a rewrite of a working system.
+
+### Unconditional
+
+- **Catalog freshness via webhooks + a background worker.** Subscribe
+  `products/create`, `products/update`, `products/delete` and
+  `collections/update`; re-embed only the affected products into the existing
+  `VectorStore`; debounce a bulk import so a 400-product CSV upload is one
+  rebuild and not 400. Today a merchant's price or title change can be up to
+  six hours stale in semantic search. Needs no new scope — `read_products` is
+  already granted.
+- **Own analytics funnel.** An events table plus an admin view: opened →
+  engaged → cards shown → card tapped → add to cart → checkout, split by
+  holdout arm. This is the number that renews the subscription, and no
+  competitor can show it.
+
+### Gated (built, off by default)
+
+| Piece | Trigger to switch on |
+|---|---|
+| Redis `SessionStore` | Conversations lost on deploy start mattering, or a second node |
+| pgvector `VectorStore` + Postgres wiring | >25k vectors for one shop, or p95 search > 40 ms |
+| Multi-node | Sustained load one node cannot serve — **and only after holdout assignment moves into the shared store**, which is the precondition the single-node SQLite constraint exists to protect |
+| WebMCP / agent-facing tool surface | Shopify's agent support stops being environment-limited. Additive namespace beside our own tools; nothing existing depends on it |
+
+### Gate
+
+- Restart the gateway mid-conversation: the session survives and the shopper
+  continues (Redis rung) — or, with Redis off, it degrades exactly as today.
+- Change a product's title and price in the Shopify admin: it is findable by
+  the new words, and priced correctly, within 60 seconds.
+- Two nodes behind the proxy produce **one** consistent holdout assignment for
+  the same session id — tested before multi-node is ever enabled, because the
+  failure mode is silent and destroys the incrementality claim retroactively.
+
+---
+
+## 6. Sequencing and honesty about risk
+
+- Levels 1 → 2 are the listening work you asked for, and Level 1 can cancel
+  part of Level 2 on evidence. That is the point of it.
+- Levels 3 → 4 are where the shopper feels the product get smarter and
+  cheaper to run.
+- Level 5 is infrastructure that should be *ready* long before it is needed.
+- The biggest risk in this whole plan is not technical: **none of this has
+  been verified against a live install with a real microphone and a real
+  shopper.** Level 1's hand check is the first time that happens, and it is
+  deliberately the first gate.
