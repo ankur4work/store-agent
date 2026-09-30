@@ -169,6 +169,21 @@ export class Telemetry {
     'Voice-capable devices seen, labelled by webgpu/worklet/network class',
   );
 
+  /**
+   * Which rung produced the live caption for a turn.
+   *
+   * The interim transcript is what lets the endpointer tell a pause mid-sentence
+   * from the end of a question, so where it comes from decides how often a
+   * shopper gets cut off. On-device recognition is chosen by a probe, on a
+   * machine we cannot see, against an experimental API that a merchant's
+   * Permissions-Policy can withhold — so "it worked", "it silently never ran"
+   * and "it ran for nobody" are indistinguishable without counting them.
+   */
+  readonly partials = this.registry.counter(
+    'storeagent_voice_partials_total',
+    'Voice turns by live-caption source (ondevice/cloud/none) and merchant mode',
+  );
+
   // --- money --------------------------------------------------------------
 
   /**

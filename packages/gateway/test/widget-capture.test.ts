@@ -26,8 +26,17 @@ import { TARGET_RATE, encodeWav, resample } from '@storeagent/voice';
  *     the honest way to check that without a real Web Audio implementation.
  */
 
+/**
+ * The voice chunk, not widget.js.
+ *
+ * Everything in this file is about the microphone, and the microphone moved out
+ * of widget.js when it was split: the host ships on every page view against a
+ * 15 KB budget, and voice loads on the first mic press. Reading the host here
+ * would assert nothing — and would keep passing if this code drifted back into
+ * it, which is the one thing the split exists to prevent.
+ */
 const SRC = readFileSync(
-  resolve(dirname(fileURLToPath(import.meta.url)), '../public/widget.js'),
+  resolve(dirname(fileURLToPath(import.meta.url)), '../public/widget-voice.js'),
   'utf8',
 ).replace(/\r\n/g, '\n');
 

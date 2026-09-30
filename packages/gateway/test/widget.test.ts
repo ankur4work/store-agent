@@ -30,10 +30,32 @@ import { THRESHOLDS } from '@storeagent/voice';
  * checkout is worse than one that simply fails, because it teaches people
  * to ignore it.
  */
-const SRC = readFileSync(
-  resolve(dirname(fileURLToPath(import.meta.url)), '../public/widget.js'),
-  'utf8',
-).replace(/\r\n/g, '\n');
+const here = dirname(fileURLToPath(import.meta.url));
+
+/** The host: loader and panel, shipped on every page view of every storefront. */
+const HOST_SRC = readFileSync(resolve(here, '../public/widget.js'), 'utf8').replace(/\r\n/g, '\n');
+
+/** The voice chunk, fetched on the first mic press and not before. */
+const VOICE_SRC = readFileSync(resolve(here, '../public/widget-voice.js'), 'utf8').replace(
+  /\r\n/g,
+  '\n',
+);
+
+/**
+ * Both files, for the assertions that are about the widget's BEHAVIOUR rather
+ * than about which bundle a line ended up in.
+ *
+ * The split moved voice into its own file, and repointing forty pattern
+ * assertions one at a time would have been forty chances to point one at the
+ * wrong source and have it silently stop asserting. What stops voice drifting
+ * back into the host is not these tests — it is the 15 KB budget the build
+ * enforces, and the explicit checks in `describe('the voice split')` below.
+ *
+ * Anything that genuinely cares which file it is in uses HOST_SRC or VOICE_SRC
+ * directly. `buildSync` below must use HOST_SRC: it extracts the stylesheet,
+ * which ships with the panel.
+ */
+const SRC = `${HOST_SRC}\n${VOICE_SRC}`;
 
 /**
  * The same two steps `scripts/build-widget.mjs` ships, run in process.
@@ -45,12 +67,16 @@ const SRC = readFileSync(
  * minifier treats as an opaque string.
  */
 function buildSync(): string {
-  const open = SRC.indexOf('var CSS = `');
+  // HOST_SRC, not SRC: this mirrors what the build ships as widget.js, and the
+  // voice chunk is a separate bundle fetched at runtime. Splicing both together
+  // here would execute voice code in a sandbox that has no microphone and would
+  // stop resembling what a storefront actually runs.
+  const open = HOST_SRC.indexOf('var CSS = `');
   const start = open + 'var CSS = `'.length;
-  const end = SRC.indexOf('`', start);
+  const end = HOST_SRC.indexOf('`', start);
   expect(open, 'the CSS literal moved — scripts/build-widget.mjs needs updating too').toBeGreaterThan(-1);
-  const css = transformSync(SRC.slice(start, end), { loader: 'css', minify: true }).code;
-  const spliced = SRC.slice(0, start) + css + SRC.slice(end);
+  const css = transformSync(HOST_SRC.slice(start, end), { loader: 'css', minify: true }).code;
+  const spliced = HOST_SRC.slice(0, start) + css + HOST_SRC.slice(end);
   return transformSync(spliced, { loader: 'js', minify: true, target: 'es2019' }).code;
 }
 
@@ -419,12 +445,19 @@ describe('widget voice endpointing', () => {
     expect(SRC).toMatch(/if \(!SR\) return null;/);
   });
 
-  it('releases the recogniser with the recorder', () => {
-    // Otherwise a second microphone consumer stays alive through
-    // transcription and the spoken answer.
+  it('releases the recogniser when the capture ends', () => {
+    /**
+     * Otherwise a second microphone consumer stays alive through transcription
+     * and the spoken answer.
+     *
+     * This used to slice to `rec.start(100)` — a string that does not appear in
+     * the file, so `indexOf` returned -1, the slice ran to the end of the
+     * source, and the assertion passed on any `stopRecognition()` anywhere. It
+     * now reads the one function every capture rung ends in.
+     */
     expect(SRC).toMatch(/function stopRecognition\(\)/);
-    const onstop = SRC.slice(SRC.indexOf('rec.onstop = function'), SRC.indexOf('rec.start(100)'));
-    expect(onstop).toContain('stopRecognition()');
+    const onCaptured = SRC.slice(SRC.indexOf('function onCaptured'), SRC.indexOf('function pickMime'));
+    expect(onCaptured).toContain('stopRecognition()');
   });
 
   it('reports the endpoint decision to the server, not just the console', () => {
@@ -726,7 +759,9 @@ describe('voice as the primary input', () => {
 describe('launcher opens into listening, not typing', () => {
   it('starts the microphone instead of focusing the composer', () => {
     expect(SRC).toMatch(/if \(voiceFirst && canListen\(\)\)/);
-    expect(SRC).toMatch(/if \(!voice\.on\) void toggleVoice\(\)/);
+    // Through the chunk loader since the split: `voice.on` lives in the voice
+    // bundle now, and the host asks rather than reaching for it.
+    expect(HOST_SRC).toMatch(/if \(!voiceIsOn\(\)\) withVoice\(function \(v\) \{ v\.toggle\(\); \}\)/);
   });
 
   it('does not raise the keyboard over the thing being discussed', () => {
@@ -1042,5 +1077,111 @@ describe('built widget bundle', () => {
     expect(built).toContain('position:fixed');
     // And the prose that makes the source readable is gone from the wire.
     expect(built).not.toContain('hairline');
+  });
+});
+
+/**
+ * The split.
+ *
+ * `widget.js` ships on every page view of every storefront and has a hard 15 KB
+ * gzipped ceiling enforced in the build. Voice had grown to fill it — 79 bytes
+ * of headroom — while the microphone is the least often used thing the widget
+ * does. `ARCHITECTURE §3.1` specified the fix from the start and it was never
+ * built: "voice chunk loads only when the mic toggle is first pressed."
+ *
+ * These are the checks that keep it split. The budget catches a regression
+ * eventually; these say which line caused it.
+ */
+describe('the voice split', () => {
+  it('keeps the microphone out of the file every shopper downloads', () => {
+    for (const name of [
+      'function monitorSilence',
+      'function startCapture',
+      'function onCaptured',
+      'function startPcmCapture',
+      'function transcribeAndSend',
+      'function startRecognition',
+      'function probeOnDevice',
+      'AudioWorkletProcessor',
+      'webkitAudioContext',
+    ]) {
+      expect(HOST_SRC, `${name} belongs in widget-voice.js`).not.toContain(name);
+      expect(VOICE_SRC, `${name} should be in widget-voice.js`).toContain(name);
+    }
+  });
+
+  it('feature-detects the microphone in the host but never opens it', () => {
+    /**
+     * `canListen()` has to stay: it decides whether the mic button is rendered
+     * at all, which is a question answered before the chunk exists. Detecting
+     * `getUserMedia` is not the same as calling it — the permission prompt, and
+     * everything that follows, belongs to the chunk.
+     */
+    expect(HOST_SRC).toMatch(/navigator\.mediaDevices\.getUserMedia\s*&&/);
+    expect(HOST_SRC).not.toMatch(/getUserMedia\(\{/);
+    expect(VOICE_SRC).toMatch(/getUserMedia\(\{/);
+  });
+
+  it('fetches the chunk only when the microphone is used', () => {
+    // Not on mount, not on open — on press, and on hover as a prefetch.
+    expect(HOST_SRC).toMatch(/function loadVoice\(\)/);
+    expect(HOST_SRC).toMatch(/els\.mic\.addEventListener\('pointerenter', prefetchVoice\)/);
+    const mount = HOST_SRC.slice(HOST_SRC.indexOf('function mount()'));
+    expect(mount).not.toMatch(/loadVoice\(\)/);
+  });
+
+  it('versions the chunk against the host, so a stale pair cannot happen', () => {
+    // widget.js is unversioned and cached for up to an hour. A host that asked
+    // for an unversioned chunk could pair new code with old and the mismatch
+    // would be invisible.
+    expect(HOST_SRC).toMatch(/widget-voice\.js\?v=' \+ encodeURIComponent\(BUILD\)/);
+  });
+
+  it('hands over the objects that are mutated and an accessor for the one replaced', () => {
+    /**
+     * `els` and `state` are populated and mutated in place, so a reference is
+     * correct. `CONFIG` is REASSIGNED when /api/config answers, so handing over
+     * its value would pin the chunk to an empty object for the life of the page
+     * — and the merchant's on-device setting lives in it.
+     */
+    expect(HOST_SRC).toMatch(/els: els,/);
+    expect(HOST_SRC).toMatch(/state: state,/);
+    expect(HOST_SRC).toMatch(/config: function \(\) \{\s*return CONFIG;/);
+    expect(VOICE_SRC).toMatch(/host\.config\(\)\.onDeviceSpeech/);
+    // And neither object may be reassigned in the host, or the reference goes
+    // stale without anything failing.
+    expect(HOST_SRC).not.toMatch(/^\s{2}els = /m);
+    expect(HOST_SRC).not.toMatch(/^\s{2}state = /m);
+  });
+
+  it('cleans up the global it hands itself over on', () => {
+    // A global that outlives its handoff is a name another script on the
+    // merchant's page can collide with.
+    expect(VOICE_SRC).toMatch(/window\.__storeagentVoice = function \(host\)/);
+    expect(HOST_SRC).toMatch(/delete window\.__storeagentVoice/);
+  });
+
+  it('lets a failed load fall back to text rather than a dead button', () => {
+    expect(HOST_SRC).toMatch(/voice chunk failed to load/);
+    expect(HOST_SRC).toMatch(/I couldn’t start the microphone/);
+    // And does not cache the failure: the shopper may have been offline for a
+    // moment and the next press should retry.
+    expect(HOST_SRC).toMatch(/voiceLoading = null;/);
+  });
+
+  it('asks the chunk rather than reaching into it', () => {
+    // Eight calls out, and the host holds no voice state of its own.
+    for (const call of ['v.toggle()', 'voiceApi.stop(true)', 'voiceApi.enqueueSpeech', 'voiceApi.stopPlayback', 'voiceApi.endTurn', 'voiceApi.isSpeaking', 'voiceApi.isOn']) {
+      expect(HOST_SRC).toContain(call);
+    }
+    expect(HOST_SRC).not.toMatch(/voice\.playing/);
+    expect(HOST_SRC).not.toMatch(/voice\.queue/);
+  });
+
+  it('does not speak for a text turn that never loaded the chunk', () => {
+    // `speak` events only arrive on a voice turn, but a server that sent one
+    // anyway must not throw inside the SSE reader and kill the whole answer.
+    expect(HOST_SRC).toMatch(/if \(voiceApi\) voiceApi\.enqueueSpeech\(d\.text\)/);
+    expect(HOST_SRC).toMatch(/if \(voiceApi\) voiceApi\.stopPlayback\(\)/);
   });
 });

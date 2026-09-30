@@ -28,3 +28,7 @@ eval-results/
 # Generated and cached voice fixtures. Regenerated on demand by
 # scripts/check-listening.mjs; a few megabytes of audio is not a diff.
 voice-fixtures/
+
+# Second build output of scripts/build-widget.mjs — the lazily-loaded voice
+# chunk. Same reasoning as widget.min.js above.
+packages/gateway/public/widget-voice.min.js

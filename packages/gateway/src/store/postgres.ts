@@ -2,7 +2,12 @@ import type { Arm, ArmTotals, AttributionStore, CartLink, Conversion, Exposure }
 import type { Message } from '@storeagent/orchestrator';
 import type { Session, SessionStore } from '../sessions.js';
 import type { NonceStore, Shop, ShopStore } from '../shopify/shops.js';
-import { DEFAULT_SETTINGS, type SettingsStore, type ShopSettings } from '../admin/settings.js';
+import {
+  DEFAULT_SETTINGS,
+  normaliseOnDeviceSpeech,
+  type SettingsStore,
+  type ShopSettings,
+} from '../admin/settings.js';
 import type { SpendStore } from '../limits/budget.js';
 import { randomBytes } from 'node:crypto';
 
@@ -87,10 +92,13 @@ CREATE TABLE IF NOT EXISTS settings (
   enabled       BOOLEAN NOT NULL,
   holdout       DOUBLE PRECISION NOT NULL,
   voice_language TEXT NOT NULL DEFAULT 'en',
+  on_device_speech TEXT NOT NULL DEFAULT 'auto',
   updated_at    BIGINT NOT NULL
 );
 
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS voice_language TEXT NOT NULL DEFAULT 'en';
+-- 'auto' downloads nothing, so an existing shop cannot be surprised by it.
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS on_device_speech TEXT NOT NULL DEFAULT 'auto';
 
 CREATE TABLE IF NOT EXISTS sessions (
   id         TEXT PRIMARY KEY,
@@ -261,21 +269,23 @@ export class PgSettingsStore implements SettingsStore {
       enabled: row['enabled'] === true,
       holdoutFraction: num(row['holdout']),
       voiceLanguage: String(row['voice_language'] ?? DEFAULT_SETTINGS.voiceLanguage),
+      onDeviceSpeech: normaliseOnDeviceSpeech(row['on_device_speech']),
       updatedAt: num(row['updated_at']),
     };
   }
 
   async put(s: ShopSettings): Promise<void> {
     await this.sql.query(
-      `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, on_device_speech, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (shop) DO UPDATE SET
          accent_color = EXCLUDED.accent_color, corner_radius = EXCLUDED.corner_radius,
          position = EXCLUDED.position, greeting = EXCLUDED.greeting,
          enabled = EXCLUDED.enabled, holdout = EXCLUDED.holdout,
          voice_language = EXCLUDED.voice_language,
+         on_device_speech = EXCLUDED.on_device_speech,
          updated_at = EXCLUDED.updated_at`,
-      [s.shop, s.accentColor, s.cornerRadius, s.position, s.greeting, s.enabled, s.holdoutFraction, s.voiceLanguage, Date.now()],
+      [s.shop, s.accentColor, s.cornerRadius, s.position, s.greeting, s.enabled, s.holdoutFraction, s.voiceLanguage, s.onDeviceSpeech, Date.now()],
     );
   }
 }

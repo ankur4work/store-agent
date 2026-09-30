@@ -129,10 +129,18 @@ describe('cross-origin headers the widget actually sends', () => {
       fileURLToPath(new URL('../src/server.ts', import.meta.url)),
       'utf8',
     );
-    const widget = readFileSync(
-      fileURLToPath(new URL('../public/widget.js', import.meta.url)),
-      'utf8',
-    );
+    /**
+     * BOTH bundles. `x-storefront-lang` is set by the voice upload, which lives
+     * in widget-voice.js since the split — so scanning widget.js alone found no
+     * headers at all and this test passed by having nothing to check.
+     *
+     * That is the failure mode it exists to catch, one level up: a header the
+     * server does not advertise fails the preflight, the request never arrives,
+     * and nothing server-side can see it.
+     */
+    const widget =
+      readFileSync(fileURLToPath(new URL('../public/widget.js', import.meta.url)), 'utf8') +
+      readFileSync(fileURLToPath(new URL('../public/widget-voice.js', import.meta.url)), 'utf8');
 
     const advertised = /access-control-allow-headers',\s*'([^']+)'/.exec(src)?.[1] ?? '';
     // Every x-* header literal in the widget's fetch calls.
@@ -238,6 +246,7 @@ describe('the merchant chooses the voice language', () => {
       enabled: true,
       holdoutFraction: 0.2,
       voiceLanguage: 'hi',
+      onDeviceSpeech: 'auto' as const,
       updatedAt: Date.now(),
     };
     await store.put(saved);

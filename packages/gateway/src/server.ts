@@ -326,6 +326,9 @@ export function createGateway(deps: GatewayDeps): Server {
         // sets Hindi here, and an English-speaking customer still switches.
         voiceLanguage: s.voiceLanguage,
         voiceLanguages: VOICE_LANGUAGES,
+        // Whether the widget may use the browser's own recogniser for the live
+        // caption and the endpointer. See ShopSettings.onDeviceSpeech.
+        onDeviceSpeech: s.onDeviceSpeech,
       });
       return;
     }
@@ -345,6 +348,7 @@ export function createGateway(deps: GatewayDeps): Server {
           diag: body.diag,
         });
         recordDeviceCaps(body.diag);
+        recordPartials(body.diag);
       } catch {
         // A malformed diagnostic is not worth an error response.
       }
@@ -948,6 +952,42 @@ export function createGateway(deps: GatewayDeps): Server {
       worklet: yesNo(c['worklet']),
       net,
       savedata: yesNo(c['saveData']),
+    });
+  }
+
+  /**
+   * Count which rung produced the live caption for a turn.
+   *
+   * Three closed sets — the source, the merchant's setting, and what the
+   * availability probe found — so a browser cannot invent a series. The three
+   * together are what make the result actionable: `kind=cloud` with
+   * `state=downloadable` is a merchant who has not enabled installs, while
+   * `kind=cloud` with `state=error` is a Permissions-Policy blocking us, and
+   * those need different answers.
+   */
+  function recordPartials(diag: unknown): void {
+    if (typeof diag !== 'object' || diag === null) return;
+    const d = diag as Record<string, unknown>;
+    // Read off the beacon the widget already sends once per turn rather than
+    // asking it for a second one: two beacons carrying the same three fields is
+    // a request per turn per shopper spent on nothing.
+    if (d['voice'] !== 'capture_start') return;
+
+    const oneOf = (v: unknown, allowed: readonly string[]): string =>
+      typeof v === 'string' && allowed.includes(v) ? v : 'unknown';
+
+    metrics.partials.inc({
+      kind: oneOf(d['partials'], ['ondevice', 'cloud', 'none']),
+      mode: oneOf(d['mode'], ['off', 'auto', 'on']),
+      state: oneOf(d['state'], [
+        'available',
+        'downloadable',
+        'downloading',
+        'unavailable',
+        'unsupported',
+        'error',
+        'unprobed',
+      ]),
     });
   }
 
@@ -1663,10 +1703,16 @@ function serveStatic(pathname: string, req: IncomingMessage, res: ServerResponse
  * production always serves the small one.
  */
 function builtWidget(root: string, pathname: string): string | undefined {
-  if (pathname !== '/widget.js') return undefined;
-  const built = resolve(root, 'widget.min.js');
+  // Both bundles, by the same rule. `/widget-voice.js` is fetched by the host
+  // on the first mic press; it is a separate file because the microphone is the
+  // heaviest thing the widget does and the least often used, so it must not
+  // ship with every page view. See ARCHITECTURE §3.1.
+  const name =
+    pathname === '/widget.js' ? 'widget' : pathname === '/widget-voice.js' ? 'widget-voice' : undefined;
+  if (name === undefined) return undefined;
+  const built = resolve(root, `${name}.min.js`);
   try {
-    if (statSync(built).mtimeMs >= statSync(resolve(root, 'widget.js')).mtimeMs) return built;
+    if (statSync(built).mtimeMs >= statSync(resolve(root, `${name}.js`)).mtimeMs) return built;
   } catch {
     // Not built yet — a fresh checkout, or `npm run build` has not run.
   }
@@ -1693,6 +1739,18 @@ function cacheControlFor(ext: string, pathname?: string): string {
   // the shopper's NEXT navigation instead of stalling this one. An hour, not a
   // week — the ceiling on running old code stays measured in minutes.
   if (pathname === '/widget.js') return 'public, max-age=300, stale-while-revalidate=3600';
+
+  /**
+   * The voice chunk is requested with `?v=<BUILD>`, so it is genuinely
+   * immutable at that URL: a new build asks for a new one. That earns a long
+   * cache with no revalidation, which matters because the request sits between
+   * a shopper pressing the microphone and being able to speak — the one place
+   * in this product where a 304 round trip is felt directly.
+   *
+   * The query string is not part of the file we serve; it exists only to make
+   * the URL change, which is exactly what makes this safe.
+   */
+  if (pathname === '/widget-voice.js') return 'public, max-age=31536000, immutable';
 
   return 'public, max-age=600, stale-while-revalidate=604800';
 }

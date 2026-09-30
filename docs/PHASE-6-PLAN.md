@@ -189,7 +189,96 @@ before (`check-listening.mjs --rate 48000` reproduces the old behaviour).
 
 ---
 
-## 2. Level 2 — Whisper in the browser: Transformers.js + WebGPU, server as the floor
+## 2. Level 2 — local recognition for the live caption, server still the authority
+
+### Status — restructured 2026-09-30 on three measurements
+
+The plan below assumed local Whisper would be the transcriber. Measuring the
+actual assets changed that, and the level was rescoped **before** building:
+
+| Asset | Measured |
+|---|---|
+| whisper-tiny multilingual, fp16 (what WebGPU wants) | 72.6 MB |
+| whisper-tiny multilingual, int8 | 39 MB |
+| whisper-base fp16 | 139 MB — not viable on a storefront |
+| ONNX runtime `ort-wasm-simd-threaded.jsep.wasm` | **27 MB** |
+| `transformers.web.min.js` | 0.45 MB |
+| **Total, first use, int8 + WebGPU runtime** | **~69 MB** |
+
+Two conclusions the earlier estimate of "~40 MB" hid:
+
+1. The runtime is as big as the model. A 69 MB first-use download cannot be the
+   default path on a storefront.
+2. **whisper-tiny is less accurate than `gpt-4o-transcribe`**, and markedly so
+   for Hindi, Arabic and Urdu — languages this merchant's `VOICE_LANGUAGES` list
+   already offers. Level 1's own gate (local WER ≤ server WER) would refuse to
+   ship it as the transcriber.
+
+What local recognition is genuinely good for here is the **interim** transcript.
+That is what `endpoint.ts` reads to tell a pause mid-sentence from the end of a
+question, so it decides how often a shopper gets cut off — the largest
+real-world cause of a mangled turn. Partial accuracy does not have to beat the
+server, because the server still produces the answer.
+
+And the browser will now do exactly that for free. Chrome ships
+`SpeechRecognition.processLocally` with `available()` / `install()` and
+**browser-managed language packs**: local recognition, private, zero bytes from
+us. So the ladder is:
+
+| Rung | Live caption from | Cost to the shopper |
+|---|---|---|
+| 1 | On-device Web Speech (`processLocally: true`) | **0 MB** |
+| 2 | Cloud `SpeechRecognition` (the previous behaviour) | 0 MB |
+| 3 | Whisper via Transformers.js + WebGPU — merchant opt-in | ~69 MB |
+| — | **Final transcript: always the server** | unchanged |
+
+Rung 3 keeps its place for the cases rungs 1–2 cannot serve — Firefox, and a
+merchant who will not have speech touched by a third party — but as a deliberate
+choice rather than a default.
+
+### Built (rungs 1–2, and the split that unblocks rung 3)
+
+- **`processLocally = true` is a requirement, not a hint**: the recogniser
+  refuses rather than silently using the cloud, which is what makes the privacy
+  claim in the admin copy true. Availability is probed once per page and never
+  awaited on the path to the chime — the first turn behaves exactly as before,
+  later turns use what the probe found. One retry to cloud if the pack was
+  evicted since.
+- **Language packs install between turns only**, when the merchant opted in,
+  never on `saveData` or a slow connection.
+- **`onDeviceSpeech` setting** — `off | auto | on`, migrated in SQLite and
+  Postgres, rendered in the admin with the download cost stated, carried in
+  `/api/config`. `auto` (the default) downloads nothing.
+- **`storeagent_voice_partials_total{kind,mode,state}`** — `cloud`+`downloadable`
+  (merchant has not enabled installs) and `cloud`+`error` (a Permissions-Policy
+  is blocking us) need opposite fixes and are otherwise indistinguishable.
+- **The widget is split**, which `ARCHITECTURE §3.1` asked for and never got:
+
+  ```
+  widget.js        10.18 KB gz  — every page view  (was 14.91 of a 15 KB gate)
+  widget-voice.js   5.84 KB gz  — first mic press  (40 KB gate)
+  ```
+
+  One file had been carrying loader, panel and voice against the loader's own
+  budget, with 79 bytes left. A shopper who never presses the microphone now
+  downloads none of it, and rung 3 has 34 KB of room for its loader. The seam is
+  eight calls each way; `els` and `state` cross as references and `CONFIG` as an
+  accessor, because it is reassigned when `/api/config` answers.
+
+  The split's sharpest edge was caught by an existing test: `x-storefront-lang`
+  moved into the chunk, and a header the server does not advertise fails the
+  CORS preflight invisibly. That scan now covers both bundles.
+
+### Still to build
+
+Rung 3, and the pinned, integrity-verified vendoring it needs. The registry
+integrity hash for `@huggingface/transformers@4.3.0` was verified to match
+before any of this was designed, and the weights are to be baked into the Docker
+image rather than fetched at boot.
+
+---
+
+## 2b. Original Level 2 sketch — Whisper as the transcriber (superseded)
 
 ### The design, which differs from the sketch in one important way
 

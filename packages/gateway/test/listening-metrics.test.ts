@@ -229,4 +229,47 @@ describe('device capability census', () => {
     await send('not an object');
     expect(telemetry.deviceCaps.total()).toBe(0);
   });
+
+  /**
+   * Which rung produced the live caption.
+   *
+   * On-device recognition is chosen by a probe, on a machine we cannot see,
+   * against an experimental API a merchant's Permissions-Policy can withhold.
+   * "It worked", "it silently never ran" and "it ran for nobody" are
+   * indistinguishable from the server without counting them.
+   */
+  describe('live-caption source', () => {
+    it('counts the rung, the merchant setting, and what the probe found', async () => {
+      await send({
+        voice: 'capture_start',
+        partials: 'ondevice',
+        mode: 'on',
+        state: 'available',
+        capture: 'worklet',
+      });
+      expect(telemetry.partials.get({ kind: 'ondevice', mode: 'on', state: 'available' })).toBe(1);
+    });
+
+    it('keeps the two cases that need different answers apart', async () => {
+      // A merchant who has not enabled installs...
+      await send({ voice: 'capture_start', partials: 'cloud', mode: 'auto', state: 'downloadable' });
+      // ...and a Permissions-Policy blocking the API entirely.
+      await send({ voice: 'capture_start', partials: 'cloud', mode: 'on', state: 'error' });
+      expect(telemetry.partials.get({ kind: 'cloud', mode: 'auto', state: 'downloadable' })).toBe(1);
+      expect(telemetry.partials.get({ kind: 'cloud', mode: 'on', state: 'error' })).toBe(1);
+    });
+
+    it('collapses anything it does not recognise', async () => {
+      await send({ voice: 'capture_start', partials: 'whisper-local', mode: 'sometimes', state: '../../x' });
+      expect(telemetry.partials.get({ kind: 'unknown', mode: 'unknown', state: 'unknown' })).toBe(1);
+    });
+
+    it('counts once per turn, off the beacon the widget already sends', async () => {
+      // A second beacon carrying the same three fields would be a request per
+      // turn per shopper spent on nothing.
+      await send({ voice: 'partials', kind: 'ondevice', mode: 'on', state: 'available' });
+      await send({ voice: 'endpoint', partials: 'ondevice' });
+      expect(telemetry.partials.total()).toBe(0);
+    });
+  });
 });

@@ -43,7 +43,58 @@ export interface ShopSettings {
    * repeating themselves, while a wrong guess is answered out loud.
    */
   voiceLanguage: string;
+  /**
+   * Whether the browser may recognise speech on the shopper's own device.
+   *
+   * This is about the LIVE CAPTION and the endpointer, not the answer. The
+   * authoritative transcript is still produced server-side and the audio is
+   * still uploaded — what changes is where the interim text comes from while
+   * the shopper is still talking, and interim text is what tells the endpointer
+   * whether a pause is the end of a question or the middle of a thought.
+   *
+   * Three values, because there are three genuinely different behaviours and a
+   * boolean would hide the one that costs the shopper bandwidth:
+   *
+   * - `off`      — always use the browser's cloud recogniser. A merchant who
+   *                wants every shopper treated identically picks this.
+   * - `auto`     — use the on-device model only if the browser ALREADY has the
+   *                language pack. Never triggers a download. The default,
+   *                because it is free in both bandwidth and privacy.
+   * - `on`       — also install the language pack when it is missing. Better
+   *                captions and no audio leaving the device, paid for with a
+   *                one-time download the browser manages.
+   *
+   * Every value degrades to the cloud recogniser, and then to loudness-only
+   * endpointing, so no setting here can leave a shopper unable to speak.
+   */
+  onDeviceSpeech: 'off' | 'auto' | 'on';
   updatedAt: number;
+}
+
+/**
+ * The accepted values, and the labels the merchant reads.
+ *
+ * A closed list for the same reason `VOICE_LANGUAGES` is one: the value reaches
+ * a browser API, and a free-text field is both a validation problem and a
+ * support problem.
+ */
+export const ON_DEVICE_SPEECH_OPTIONS: readonly (readonly [string, string])[] = [
+  ['auto', 'Use it when the browser already has it'],
+  ['on', 'Install it on the shopper’s device when missing'],
+  ['off', 'Off — always use the cloud recogniser'],
+];
+
+/**
+ * Read a stored value back, falling to the default for anything unexpected.
+ *
+ * A row written before the column existed reads NULL, and the widget branches
+ * on this string — an unrecognised value must land on the behaviour that
+ * downloads nothing rather than on whatever `if` happens to catch it.
+ */
+export function normaliseOnDeviceSpeech(value: unknown): 'off' | 'auto' | 'on' {
+  return value === 'off' || value === 'on' || value === 'auto'
+    ? value
+    : DEFAULT_SETTINGS.onDeviceSpeech;
 }
 
 export const DEFAULT_SETTINGS: Omit<ShopSettings, 'shop' | 'updatedAt'> = {
@@ -54,6 +105,10 @@ export const DEFAULT_SETTINGS: Omit<ShopSettings, 'shop' | 'updatedAt'> = {
   enabled: true,
   holdoutFraction: 0.2,
   voiceLanguage: 'en',
+  // Free in bandwidth and in privacy: it uses what the browser already has and
+  // downloads nothing. A merchant has to opt in before a shopper pays for a
+  // language pack.
+  onDeviceSpeech: 'auto',
 };
 
 /**
@@ -159,6 +214,11 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
     errors.push('voiceLanguage must be one of the supported languages');
   }
 
+  const onDeviceSpeech = String(input['onDeviceSpeech'] ?? DEFAULT_SETTINGS.onDeviceSpeech).trim();
+  if (!ON_DEVICE_SPEECH_OPTIONS.some(([code]) => code === onDeviceSpeech)) {
+    errors.push('onDeviceSpeech must be off, auto, or on');
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   return {
@@ -173,6 +233,7 @@ export function validateSettings(shop: string, input: Record<string, unknown>): 
       enabled,
       holdoutFraction,
       voiceLanguage,
+      onDeviceSpeech: onDeviceSpeech as 'off' | 'auto' | 'on',
       updatedAt: Date.now(),
     },
   };

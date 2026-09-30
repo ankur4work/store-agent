@@ -3,6 +3,7 @@ import { PLANS, PLAN_ORDER } from '@storeagent/billing';
 import {
   accentIsAccessible,
   contrastWithWhite,
+  ON_DEVICE_SPEECH_OPTIONS,
   VOICE_LANGUAGES,
   type ShopSettings,
 } from './settings.js';
@@ -550,6 +551,22 @@ function renderHomeSections(vm: AdminViewModel): string {
           <span class="sub">The language your customers speak out loud. This cannot be read from your
             storefront — a store selling in English is often serving customers who speak something
             else. Picking the right one is what stops the microphone guessing wrong.</span>
+        </div>
+
+        <div class="field">
+          <label for="onDeviceSpeech">On-device speech</label>
+          <select id="onDeviceSpeech" name="onDeviceSpeech">
+            ${ON_DEVICE_SPEECH_OPTIONS.map(
+              ([code, label]) =>
+                `<option value="${esc(code)}"${s.onDeviceSpeech === code ? ' selected' : ''}>${esc(label)}</option>`,
+            ).join('\n            ')}
+          </select>
+          <span class="sub">Where the live caption comes from while a customer is still speaking.
+            On-device means their words are recognised by their own browser and no audio is sent to a
+            speech service — and it lets the assistant tell a pause mid-sentence from the end of a
+            question, so it stops cutting people off. The answer itself is unaffected. Installing the
+            language pack costs the customer a one-time download their browser manages; leaving this
+            on the default uses it only where it is already there.</span>
         </div>
 
         <div class="field">

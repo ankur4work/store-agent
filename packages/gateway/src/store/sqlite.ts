@@ -4,7 +4,12 @@ import type { Arm, ArmTotals, AttributionStore, CartLink, Conversion, Exposure }
 import type { Message } from '@storeagent/orchestrator';
 import type { Session, SessionStore } from '../sessions.js';
 import type { NonceStore, Shop, ShopStore } from '../shopify/shops.js';
-import { DEFAULT_SETTINGS, type SettingsStore, type ShopSettings } from '../admin/settings.js';
+import {
+  DEFAULT_SETTINGS,
+  normaliseOnDeviceSpeech,
+  type SettingsStore,
+  type ShopSettings,
+} from '../admin/settings.js';
 import { randomBytes } from 'node:crypto';
 
 /**
@@ -145,6 +150,10 @@ function migrate(db: DatabaseSync): void {
     // The microphone's language, chosen by the merchant. Existing rows
     // default to English, which is what they were effectively getting.
     ['settings', 'voice_language', "TEXT NOT NULL DEFAULT 'en'"],
+    // Whether the browser may recognise speech on the shopper's own device.
+    // Existing rows default to 'auto', which downloads nothing and so cannot
+    // surprise a merchant who has not read about it.
+    ['settings', 'on_device_speech', "TEXT NOT NULL DEFAULT 'auto'"],
   ];
   for (const [table, column, type] of columns) {
     try {
@@ -267,6 +276,7 @@ export class SqliteSettingsStore implements SettingsStore {
       holdoutFraction: Number(row['holdout']),
       // A row written before the column existed reads NULL, not 'en'.
       voiceLanguage: String(row['voice_language'] ?? DEFAULT_SETTINGS.voiceLanguage),
+      onDeviceSpeech: normaliseOnDeviceSpeech(row['on_device_speech']),
       updatedAt: Number(row['updated_at']),
     };
   }
@@ -274,13 +284,14 @@ export class SqliteSettingsStore implements SettingsStore {
   async put(s: ShopSettings): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO settings (shop, accent_color, corner_radius, position, greeting, enabled, holdout, voice_language, on_device_speech, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(shop) DO UPDATE SET
            accent_color = excluded.accent_color, corner_radius = excluded.corner_radius,
            position = excluded.position, greeting = excluded.greeting,
            enabled = excluded.enabled, holdout = excluded.holdout,
            voice_language = excluded.voice_language,
+           on_device_speech = excluded.on_device_speech,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -292,6 +303,7 @@ export class SqliteSettingsStore implements SettingsStore {
         s.enabled ? 1 : 0,
         s.holdoutFraction,
         s.voiceLanguage,
+        s.onDeviceSpeech,
         Date.now(),
       );
   }
