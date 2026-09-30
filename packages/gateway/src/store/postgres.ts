@@ -1,4 +1,13 @@
-import type { Arm, ArmTotals, AttributionStore, CartLink, Conversion, Exposure } from '@storeagent/attribution';
+import type {
+  Arm,
+  ArmTotals,
+  AttributionStore,
+  CartLink,
+  Conversion,
+  Exposure,
+  FunnelCounts,
+  FunnelStep,
+} from '@storeagent/attribution';
 import type { Message } from '@storeagent/orchestrator';
 import { readPreferences, readVisibleProducts, type Session, type SessionStore } from '../sessions.js';
 import type { NonceStore, Shop, ShopStore } from '../shopify/shops.js';
@@ -150,6 +159,18 @@ CREATE TABLE IF NOT EXISTS conversions (
   PRIMARY KEY (shop, order_id)
 );
 CREATE INDEX IF NOT EXISTS conversions_shop_time ON conversions(shop, created_at);
+
+-- The funnel. One row per session per step, because a merchant asks "how many
+-- people got this far", not "how many times did this happen" — a shopper who
+-- taps six cards is one person who tapped a card.
+CREATE TABLE IF NOT EXISTS funnel_steps (
+  shop       TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  step       TEXT NOT NULL,
+  at         BIGINT NOT NULL,
+  PRIMARY KEY (shop, session_id, step)
+);
+CREATE INDEX IF NOT EXISTS funnel_steps_shop ON funnel_steps(shop, step);
 
 CREATE TABLE IF NOT EXISTS spend (
   scope TEXT NOT NULL,
@@ -471,6 +492,76 @@ export class PgAttributionStore implements AttributionStore {
       }
     }
 
+    return { exposed: out['exposed']!, holdout: out['holdout']! };
+  }
+
+  async recordStep(shop: string, sessionId: string, step: FunnelStep, at = Date.now()): Promise<void> {
+    // DO NOTHING on conflict: the funnel counts people, so reaching a step twice
+    // is one person reaching it, and the first time is the interesting one.
+    await this.sql.query(
+      `INSERT INTO funnel_steps (shop, session_id, step, at) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (shop, session_id, step) DO NOTHING`,
+      [shop, sessionId, step, at],
+    );
+  }
+
+  /**
+   * Sessions reaching each step, by arm.
+   *
+   * Joined outward from the exposure rows, so a step belonging to a session with
+   * no exposure is not counted — that would put a shopper in the funnel who is in
+   * neither arm, and the arms are the whole reason for measuring it this way.
+   *
+   * `COUNT(s.session_id)` over a LEFT JOIN rather than a correlated subquery per
+   * step: one pass, and Postgres will not run six of them per row.
+   */
+  async funnel(shop: string, sinceMs = 0): Promise<{ exposed: FunnelCounts; holdout: FunnelCounts }> {
+    const { rows } = await this.sql.query(
+      `SELECT e.arm AS arm,
+              COUNT(*) AS sessions,
+              COUNT(*) FILTER (WHERE e.engaged) AS engaged,
+              COUNT(*) FILTER (WHERE cards.session_id IS NOT NULL) AS cards_shown,
+              COUNT(*) FILTER (WHERE taps.session_id IS NOT NULL) AS card_tapped,
+              COUNT(*) FILTER (WHERE adds.session_id IS NOT NULL) AS cart_add,
+              COUNT(*) FILTER (WHERE conv.session_id IS NOT NULL) AS converted
+         FROM exposures e
+         LEFT JOIN funnel_steps cards
+                ON cards.shop = e.shop AND cards.session_id = e.session_id
+               AND cards.step = 'cards_shown'
+         LEFT JOIN funnel_steps taps
+                ON taps.shop = e.shop AND taps.session_id = e.session_id
+               AND taps.step = 'card_tapped'
+         LEFT JOIN funnel_steps adds
+                ON adds.shop = e.shop AND adds.session_id = e.session_id
+               AND adds.step = 'cart_add'
+         LEFT JOIN (SELECT DISTINCT shop, session_id FROM conversions WHERE session_id IS NOT NULL) conv
+                ON conv.shop = e.shop AND conv.session_id = e.session_id
+        WHERE e.shop = $1 AND e.created_at >= $2
+        GROUP BY e.arm`,
+      [shop, sinceMs],
+    );
+
+    const blank = (): FunnelCounts => ({
+      sessions: 0,
+      engaged: 0,
+      cardsShown: 0,
+      cardTapped: 0,
+      cartAdd: 0,
+      converted: 0,
+    });
+    const out: Record<string, FunnelCounts> = { exposed: blank(), holdout: blank() };
+    for (const row of rows) {
+      const arm = String(row['arm']);
+      if (out[arm] === undefined) continue;
+      out[arm] = {
+        sessions: num(row['sessions']),
+        engaged: num(row['engaged']),
+        cardsShown: num(row['cards_shown']),
+        cardTapped: num(row['card_tapped']),
+        cartAdd: num(row['cart_add']),
+        converted: num(row['converted']),
+      };
+    }
     return { exposed: out['exposed']!, holdout: out['holdout']! };
   }
 

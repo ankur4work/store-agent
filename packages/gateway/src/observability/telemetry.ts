@@ -232,6 +232,21 @@ export class Telemetry {
     'Times a cached prompt prefix changed between turns, by shop',
   );
 
+  /**
+   * Semantic index rebuilds, driven by Shopify webhooks.
+   *
+   * The index used to refresh only on a six-hour TTL, so this number rising is
+   * the difference between a merchant's price change being searchable in seconds
+   * and in hours. It should track catalog edits loosely and NOT one-for-one: a
+   * bulk import that produced four hundred webhooks and four hundred rebuilds
+   * would mean the coalescing is broken and the embedding bill is four hundred
+   * times what it should be.
+   */
+  readonly catalogRefreshes = this.registry.counter(
+    'storeagent_catalog_refreshes_total',
+    'Semantic index rebuilds, by shop',
+  );
+
   readonly billableConversations = this.registry.counter(
     'storeagent_billable_conversations_total',
     'Conversations counted as resolved for billing',

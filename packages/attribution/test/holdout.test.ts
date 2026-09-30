@@ -218,3 +218,53 @@ describe('order payload parsing', () => {
     expect(parseOrderPayload({})).toEqual({ orderId: undefined, revenueMinor: 0, cartToken: undefined });
   });
 });
+
+/**
+ * The property multi-node rests on, stated explicitly.
+ *
+ * `docs/PHASE-6-PLAN.md` listed "holdout assignment must move into the shared
+ * store" as a precondition for running two gateway nodes. That was wrong, and
+ * worth recording as wrong: assignment is a pure hash of `shop:sessionId`
+ * against a fraction, so two nodes with no shared state whatsoever already agree
+ * on every session. Nothing needs to move.
+ *
+ * The real single-node constraint was never the assignment — it was SQLite
+ * having one writer, which is a storage problem that the Postgres stores solve.
+ * Conflating the two made the harder-sounding blocker the visible one.
+ */
+describe('two nodes agree without sharing anything', () => {
+  it('assigns identically from identical inputs, with no shared state', () => {
+    // Two processes, no coordination, no database: same answer every time.
+    const nodeA = (id: string): string => assignArm('acme.myshopify.com', id, 0.2);
+    const nodeB = (id: string): string => assignArm('acme.myshopify.com', id, 0.2);
+    for (let i = 0; i < 500; i++) {
+      const id = `sess-${i}`;
+      expect(nodeB(id)).toBe(nodeA(id));
+    }
+  });
+
+  it('is stable across restarts, because nothing about it is stateful', () => {
+    // No seed, no counter, no clock. The hash is the whole mechanism.
+    const before = assignArm('acme.myshopify.com', 'sess-42', 0.2);
+    const after = assignArm('acme.myshopify.com', 'sess-42', 0.2);
+    expect(after).toBe(before);
+  });
+
+  it('depends on the fraction, which is the one thing nodes must share', () => {
+    /**
+     * This is the genuine coupling, and it is already shared: `holdoutFraction`
+     * lives in the settings table. Two nodes reading different fractions would
+     * disagree — so the fraction must never be a per-node default, and this test
+     * is here to say so out loud.
+     */
+    const ids = Array.from({ length: 200 }, (_, i) => `sess-${i}`);
+    const at20 = ids.map((id) => assignArm('acme.myshopify.com', id, 0.2));
+    const at50 = ids.map((id) => assignArm('acme.myshopify.com', id, 0.5));
+    expect(at50).not.toEqual(at20);
+    // And the disagreement is one-directional: raising the fraction only ever
+    // moves sessions INTO the holdout, never back out.
+    for (let i = 0; i < ids.length; i++) {
+      if (at20[i] === 'holdout') expect(at50[i]).toBe('holdout');
+    }
+  });
+});

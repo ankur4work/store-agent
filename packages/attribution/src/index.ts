@@ -7,4 +7,12 @@ export {
   parseOrderPayload,
   decimalStringToMinor,
 } from './store.js';
-export type { AttributionStore, CartLink, Conversion, Exposure } from './store.js';
+export type {
+  AttributionStore,
+  CartLink,
+  Conversion,
+  Exposure,
+  FunnelCounts,
+  FunnelStep,
+} from './store.js';
+export { FUNNEL_STEPS, isFunnelStep } from './store.js';

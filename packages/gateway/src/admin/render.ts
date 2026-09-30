@@ -1,4 +1,4 @@
-import type { Incrementality } from '@storeagent/attribution';
+import type { FunnelCounts, Incrementality } from '@storeagent/attribution';
 import { PLANS, PLAN_ORDER } from '@storeagent/billing';
 import {
   accentIsAccessible,
@@ -53,6 +53,11 @@ export interface AdminViewModel {
   readonly liftSummary: string;
   readonly recommendedHoldout: number;
   readonly unmatchedOrders: number;
+  /**
+   * The funnel, by arm. Absent when nothing has been measured yet, so the card
+   * is not rendered as a table of zeroes on a shop that opened the app today.
+   */
+  readonly funnel?: { exposed: FunnelCounts; holdout: FunnelCounts };
   /** Absent when billing is not configured on this deployment. */
   readonly billing?: {
     readonly planName: string;
@@ -382,6 +387,22 @@ export function renderAdmin(vm: AdminViewModel): string {
   .errors[hidden]{display:none}
   .errors li{margin-left:16px}
 
+  /* The funnel table. Right-aligned numbers so the eye can compare down a
+     column, which is the only reading of this that matters. */
+  table.funnel{width:100%;border-collapse:collapse;font-size:13.5px}
+  table.funnel th,table.funnel td{padding:8px 10px;border-bottom:1px solid var(--line);
+    text-align:right;vertical-align:baseline}
+  table.funnel thead th{font-size:12.5px;color:var(--sub);font-weight:550;
+    border-bottom:1px solid #8a8a8a}
+  table.funnel th[scope=row]{text-align:left;font-weight:550;display:flex;flex-direction:column}
+  table.funnel th[scope=col]:first-child{text-align:left}
+  table.funnel td{font-variant-numeric:tabular-nums}
+  table.funnel td .sub{margin-left:8px}
+  /* Not applicable rather than zero: a held-back shopper never saw a card, so
+     the cell is empty on purpose and must not read as "none of them did". */
+  table.funnel td.na{color:var(--sub)}
+  table.funnel tbody tr:last-child th,table.funnel tbody tr:last-child td{border-bottom:0}
+
   code{background:#f1f2f4;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:12.5px}
   .muted{color:var(--sub);font-size:12.5px}
   a{color:#005bd3}
@@ -486,6 +507,75 @@ function renderPlanPage(vm: AdminViewModel): string {
 }
 
 /** Everything on the dashboard below the tiles. */
+/**
+ * What happens between seeing the assistant and buying something.
+ *
+ * ## Why both arms, side by side
+ *
+ * A funnel on its own is a shape with no scale: "18% of people who saw cards
+ * bought something" could be the assistant working or could be what this shop
+ * does anyway. The held-back group is the only thing that turns it into a
+ * statement about US, and it is already being collected for the incrementality
+ * figure — so it costs nothing to show here.
+ *
+ * The holdout column is mostly blank on purpose. Those shoppers never saw the
+ * assistant, so they have no cards and no taps; the rows they DO have —
+ * sessions and bought — are the comparison, and the gaps are the explanation of
+ * what the assistant added.
+ *
+ * ## What each number is worth
+ *
+ * Stated in the footnote rather than hidden, because a merchant making decisions
+ * on these deserves to know which are observations and which are reports.
+ */
+function renderFunnel(f: { exposed: FunnelCounts; holdout: FunnelCounts }): string {
+  const rows: { label: string; key: keyof FunnelCounts; holdout: boolean; hint: string }[] = [
+    { label: 'Saw the assistant', key: 'sessions', holdout: true, hint: 'the launcher was on the page' },
+    { label: 'Opened it', key: 'engaged', holdout: true, hint: 'tapped or spoke' },
+    { label: 'Were shown products', key: 'cardsShown', holdout: false, hint: 'an answer included cards' },
+    { label: 'Opened a product', key: 'cardTapped', holdout: false, hint: 'followed a card' },
+    { label: 'Added to cart', key: 'cartAdd', holdout: false, hint: 'from a card' },
+    { label: 'Bought something', key: 'converted', holdout: true, hint: 'matched to an order' },
+  ];
+
+  const pct = (n: number, of: number): string => (of === 0 ? '' : `${Math.round((n / of) * 100)}%`);
+  const top = f.exposed.sessions;
+
+  return `
+  <section class="card">
+    <h2>What shoppers did</h2>
+    <p class="hint">Everyone who saw the assistant, and the held-back group who did not —
+      the comparison is what makes the rest mean anything.</p>
+    <div class="body">
+      <table class="funnel">
+        <thead>
+          <tr><th scope="col">Step</th><th scope="col">Saw the assistant</th>
+              <th scope="col">Held back</th></tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map((r) => {
+              const n = f.exposed[r.key];
+              const held = r.holdout ? String(f.holdout[r.key].toLocaleString()) : '—';
+              return `<tr>
+            <th scope="row">${esc(r.label)}<span class="sub">${esc(r.hint)}</span></th>
+            <td>${n.toLocaleString()}<span class="sub">${esc(pct(n, top))}</span></td>
+            <td class="${r.holdout ? '' : 'na'}">${esc(held)}</td>
+          </tr>`;
+            })
+            .join('\n          ')}
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:12px">
+        Everything here is counted once per shopper, not once per click.
+        <strong>Bought something</strong> comes from Shopify's own order webhook;
+        <strong>opened a product</strong> is reported by the shopper's browser and
+        can be blocked by an ad blocker, so treat it as a floor.
+      </p>
+    </div>
+  </section>`;
+}
+
 function renderHomeSections(vm: AdminViewModel): string {
   const s = vm.settings;
   const contrast = contrastWithWhite(s.accentColor);
@@ -720,6 +810,8 @@ function renderHomeSections(vm: AdminViewModel): string {
     measurement is months of accumulated data and must not be collateral.
   -->
   <input form="settingsForm" type="hidden" name="holdoutFraction" value="${esc(s.holdoutFraction)}">
+
+  ${vm.funnel === undefined ? '' : renderFunnel(vm.funnel)}
 
   <section class="card">
     <h2>Turning it on</h2>

@@ -4,6 +4,7 @@ import { DEMO_POLICIES, searchDemoCatalog } from './catalog-fixture.js';
 import { formatMinor } from '@storeagent/grounding';
 import type { Session } from './sessions.js';
 import type { CatalogIndex } from './search/catalog-index.js';
+import { refreshCatalogIndex, type CatalogSource } from './search/refresh.js';
 
 /**
  * Wires the model's tool calls to real systems.
@@ -280,14 +281,14 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   }
 
   async function rebuildIndex(): Promise<void> {
-    const full = (await ucp!.searchCatalog({
-      query: '',
-      // 250 in one call is the single most expensive request we make against
-      // a complexity-budgeted endpoint. A catalog larger than this was always
-      // going to be truncated anyway; taking less of the budget matters more.
-      pagination: { limit: 100 },
-    })) as unknown as { products?: readonly unknown[] };
-    await deps.catalogIndex!.build(session.shopDomain, full.products ?? []);
+    // Shared with the webhook worker in search/refresh.ts. Two copies of "fetch
+    // 100 products and build" drift, and the limit in particular is a decision
+    // with a cost attached that should only be made in one place.
+    await refreshCatalogIndex(
+      session.shopDomain,
+      ucp as unknown as CatalogSource,
+      deps.catalogIndex!,
+    );
   }
 
   /**

@@ -1,5 +1,6 @@
 import { verifyWebhookHmac } from './hmac.js';
 import { parseShopDomain } from './domain.js';
+import { CATALOG_TOPICS, isCatalogTopic } from '../search/refresh.js';
 import type { ShopStore } from './shops.js';
 
 /**
@@ -38,6 +39,14 @@ export interface WebhookDeps {
   readonly onSubscription?: (shop: string, payload: unknown) => Promise<void> | void;
   /** Called for app/uninstalled and shop/redact, so billing state goes too. */
   readonly onPurge?: (shop: string) => Promise<void> | void;
+  /**
+   * Called for products/* and collections/update — the semantic index is stale.
+   *
+   * Deliberately NOT awaited by the caller below: Shopify expects a webhook
+   * acknowledged in seconds and re-embedding a catalog takes longer than that. A
+   * slow 200 here turns into a retry, and then into a disabled subscription.
+   */
+  readonly onCatalogChange?: (shop: string, topic: string) => void;
   readonly log?: (line: string) => void;
 }
 
@@ -107,6 +116,18 @@ export async function handleWebhook(req: WebhookRequest, deps: WebhookDeps): Pro
       return { status: 200, body: { ok: true } };
 
     default:
+      /**
+       * A catalog change: the semantic index no longer matches the shop.
+       *
+       * Acknowledged immediately and handled after. Re-embedding takes longer
+       * than Shopify's patience, and a slow 200 becomes a retry, which becomes a
+       * disabled subscription — so the work is queued and this returns now.
+       */
+      if (isCatalogTopic(req.topic)) {
+        deps.onCatalogChange?.(shop, req.topic);
+        return { status: 200, body: { ok: true } };
+      }
+
       // Unknown topics get a 200. A non-2xx makes Shopify retry and eventually
       // disable the subscription for a topic we simply do not handle yet.
       deps.log?.(`[webhook] ${shop} unhandled topic ${req.topic}`);
@@ -122,6 +143,19 @@ export const REQUIRED_TOPICS: readonly WebhookTopic[] = [
   'customers/data_request',
   // Not mandated by review, but billing state is wrong without it.
   'app_subscriptions/update',
+  /**
+   * Catalog freshness.
+   *
+   * Without these the semantic index runs up to six hours behind the shop: a
+   * price change or a new line is findable by keyword immediately and by meaning
+   * not at all, which reads as the assistant not knowing about products the
+   * merchant can see in their own admin.
+   *
+   * Needs no scope beyond `read_products`, which is already granted, and carries
+   * no protected customer data — so unlike `orders/create` these can be
+   * registered without an access request.
+   */
+  ...CATALOG_TOPICS,
 ];
 
 /**

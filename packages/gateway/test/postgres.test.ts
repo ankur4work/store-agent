@@ -10,6 +10,8 @@ import {
   migrate,
   type SqlClient,
 } from '../src/store/postgres.js';
+import { PgVectorStore } from '../src/search/pg-vectors.js';
+import { vectorToBlob } from '../src/search/embeddings.js';
 import { newSession } from '../src/sessions.js';
 import { newShop } from '../src/shopify/shops.js';
 import { DEFAULT_SETTINGS } from '../src/admin/settings.js';
@@ -37,7 +39,7 @@ const SHOP = 'acme.myshopify.com';
 let db: PGlite;
 let sql: SqlClient;
 
-const TABLES = ['shops', 'nonces', 'settings', 'sessions', 'exposures', 'carts', 'conversions', 'spend'];
+const TABLES = ['shops', 'nonces', 'settings', 'sessions', 'exposures', 'carts', 'conversions', 'spend', 'funnel_steps', 'catalog_vectors', 'catalog_index_meta', 'product_vision'];
 
 // One database for the file, truncated between tests. Booting a fresh WASM
 // Postgres per test cost ~1.3s each and turned a 3s suite into a 43s one — a
@@ -46,6 +48,13 @@ beforeAll(async () => {
   db = await PGlite.create();
   sql = client(db);
   await migrate(sql);
+  /**
+   * The vector tables are created by `PgVectorStore.init()` and NOT by
+   * `migrate()`, deliberately: that store is opt-in, and a deployment still on
+   * SQLite for its vectors should not be carrying its tables. They are created
+   * here so the truncation below has something to truncate.
+   */
+  await new PgVectorStore(sql).init();
 });
 
 beforeEach(async () => {
@@ -62,15 +71,27 @@ describe('migration', () => {
     const { rows } = await sql.query(
       "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
     );
-    expect(rows.map((r) => r['tablename'])).toEqual([
+    const VECTOR_TABLES = ['catalog_vectors', 'catalog_index_meta', 'product_vision'];
+    expect(
+      rows.map((r) => r['tablename']).filter((t) => !VECTOR_TABLES.includes(String(t))),
+    ).toEqual([
       'carts',
       'conversions',
       'exposures',
+      // The funnel: one row per session per step. Added with the merchant-facing
+      // funnel card, and listed here because this test exists to notice exactly
+      // that — a schema change nobody mentioned.
+      'funnel_steps',
       'nonces',
       'sessions',
       'settings',
       'shops',
       'spend',
+      // Note what is NOT here: catalog_vectors, catalog_index_meta and
+      // product_vision. Those belong to PgVectorStore, which is opt-in and
+      // creates them itself — a deployment still keeping its vectors in SQLite
+      // should not be carrying their tables. The test harness creates them in
+      // beforeAll, hence the filter below.
     ]);
   });
 });
@@ -389,5 +410,239 @@ describe('spend across nodes', () => {
     // down with it. The local cache keeps answering.
     expect(() => store.add('global', '2026-09-04', 1)).not.toThrow();
     expect(store.total('global', '2026-09-04')).toBe(1);
+  });
+});
+
+/**
+ * The funnel, executed by a real Postgres.
+ *
+ * Its query is the most complex SQL in this file — four LEFT JOINs and five
+ * `COUNT(... ) FILTER` clauses — and `FILTER` in particular is Postgres-specific
+ * syntax that a typechecker cannot verify at all. The SQLite implementation of
+ * the same interface is tested separately; this is here because the two are
+ * different queries and only one of them is exercised by the other suite.
+ */
+describe('PgAttributionStore funnel', () => {
+  const store = (): PgAttributionStore => new PgAttributionStore(sql);
+
+  async function expose(sessionId: string, arm: 'exposed' | 'holdout', engaged = false) {
+    await store().recordExposure({ shop: SHOP, sessionId, arm, createdAt: 1000, engaged });
+  }
+
+  it('counts a session once per step however often it is recorded', async () => {
+    await expose('a', 'exposed');
+    for (let i = 0; i < 5; i++) await store().recordStep(SHOP, 'a', 'card_tapped');
+    const f = await store().funnel(SHOP);
+    expect(f.exposed.cardTapped).toBe(1);
+  });
+
+  it('fills every step for the exposed arm', async () => {
+    await expose('a', 'exposed', true);
+    await store().recordStep(SHOP, 'a', 'cards_shown');
+    await store().recordStep(SHOP, 'a', 'card_tapped');
+    await store().recordStep(SHOP, 'a', 'cart_add');
+    await store().recordConversion({
+      shop: SHOP,
+      orderId: 'o1',
+      sessionId: 'a',
+      cartId: undefined,
+      revenueMinor: 9900,
+      createdAt: 2000,
+      matchedBy: 'pixel',
+    });
+
+    const f = await store().funnel(SHOP);
+    expect(f.exposed).toEqual({
+      sessions: 1,
+      engaged: 1,
+      cardsShown: 1,
+      cardTapped: 1,
+      cartAdd: 1,
+      converted: 1,
+    });
+  });
+
+  it('leaves the holdout arm with only the rows it can have', async () => {
+    // Those shoppers never saw the assistant, so no cards and no taps — and
+    // sessions and purchases are exactly the comparison.
+    await expose('h', 'holdout', false);
+    await store().recordConversion({
+      shop: SHOP,
+      orderId: 'o2',
+      sessionId: 'h',
+      cartId: undefined,
+      revenueMinor: 5000,
+      createdAt: 2000,
+      matchedBy: 'pixel',
+    });
+    const f = await store().funnel(SHOP);
+    expect(f.holdout).toMatchObject({ sessions: 1, cardsShown: 0, cardTapped: 0, converted: 1 });
+  });
+
+  it('does not multiply a session by its orders', async () => {
+    // The LEFT JOIN on conversions is DISTINCT for exactly this reason: two
+    // orders in one session would otherwise double every count on that row.
+    await expose('a', 'exposed', true);
+    await store().recordStep(SHOP, 'a', 'cards_shown');
+    for (const orderId of ['o1', 'o2', 'o3']) {
+      await store().recordConversion({
+        shop: SHOP,
+        orderId,
+        sessionId: 'a',
+        cartId: undefined,
+        revenueMinor: 1000,
+        createdAt: 2000,
+        matchedBy: 'pixel',
+      });
+    }
+    const f = await store().funnel(SHOP);
+    expect(f.exposed.sessions).toBe(1);
+    expect(f.exposed.cardsShown).toBe(1);
+    expect(f.exposed.converted).toBe(1);
+  });
+
+  it('ignores a step with no exposure behind it', async () => {
+    await store().recordStep(SHOP, 'ghost', 'cart_add');
+    expect((await store().funnel(SHOP)).exposed.sessions).toBe(0);
+  });
+
+  it('honours the time window', async () => {
+    await expose('old', 'exposed');
+    await store().recordExposure({
+      shop: SHOP,
+      sessionId: 'new',
+      arm: 'exposed',
+      createdAt: 9000,
+      engaged: false,
+    });
+    expect((await store().funnel(SHOP, 5000)).exposed.sessions).toBe(1);
+  });
+
+  it('is idempotent on a repeated step, as the primary key requires', async () => {
+    await expose('a', 'exposed');
+    await store().recordStep(SHOP, 'a', 'cart_add', 1);
+    await store().recordStep(SHOP, 'a', 'cart_add', 2);
+    const { rows } = await sql.query('SELECT COUNT(*) AS n, MIN(at) AS first FROM funnel_steps');
+    // ON CONFLICT DO NOTHING: one row, and the FIRST time is what is kept.
+    expect(Number((rows[0] as { n: unknown }).n)).toBe(1);
+    expect(Number((rows[0] as { first: unknown }).first)).toBe(1);
+  });
+});
+
+/**
+ * Catalog vectors in Postgres, executed by a real Postgres.
+ *
+ * Written and deliberately NOT switched on: the reason to move is multiple
+ * nodes, not catalog size, and `CatalogIndex` explains at length why brute-force
+ * cosine over a few hundred products is the right shape today. This is the piece
+ * that would otherwise be missing at the moment a second node is needed.
+ *
+ * The property that matters most is that it is a pure STORAGE swap — the same
+ * bytes, the same arithmetic, the same results as SQLite — so these tests
+ * compare the two rather than restating expected values.
+ */
+describe('PgVectorStore', () => {
+  const vec = (...xs: number[]): Float32Array => Float32Array.from(xs);
+
+  async function store(): Promise<PgVectorStore> {
+    const s = new PgVectorStore(sql);
+    await s.init();
+    return s;
+  }
+
+  it('round-trips a vector byte-for-byte', async () => {
+    /**
+     * A BYTEA read back in the wrong shape does not throw — it produces a vector
+     * of garbage floats and a search that silently returns nonsense, which is
+     * the worst failure mode available here.
+     */
+    const s = await store();
+    const original = vec(0.5, -0.25, 0, 1, -1, 0.123456);
+    s.replace(SHOP, [{ productId: 'p1', text: 'a tee', vector: original }]);
+    await s.warm(SHOP);
+
+    const back = s.all(SHOP);
+    expect(back).toHaveLength(1);
+    expect(back[0]!.productId).toBe('p1');
+    for (let i = 0; i < original.length; i++) {
+      expect(back[0]!.vector[i]).toBeCloseTo(original[i]!, 6);
+    }
+  });
+
+  it('stores bytes identical to the SQLite encoding', async () => {
+    // What makes this a storage swap rather than a second implementation.
+    const s = await store();
+    const v = vec(0.1, 0.2, 0.3);
+    s.replace(SHOP, [{ productId: 'p1', text: 't', vector: v }]);
+    await s.flush();
+    const { rows } = await sql.query('SELECT vec FROM catalog_vectors WHERE shop = $1', [SHOP]);
+    const stored = (rows[0] as { vec: Uint8Array }).vec;
+    expect([...new Uint8Array(stored)]).toEqual([...new Uint8Array(vectorToBlob(v))]);
+  });
+
+  it('REMOVES a product that left the catalog', async () => {
+    /**
+     * Delete-then-insert rather than upsert. An upsert would leave a deleted
+     * product in the index, to be returned by a search for something the shop no
+     * longer sells — and the shopper would be shown it.
+     */
+    const s = await store();
+    s.replace(SHOP, [
+      { productId: 'p1', text: 'a', vector: vec(1, 0) },
+      { productId: 'p2', text: 'b', vector: vec(0, 1) },
+    ]);
+    s.replace(SHOP, [{ productId: 'p1', text: 'a', vector: vec(1, 0) }]);
+    await s.warm(SHOP);
+    expect(s.all(SHOP).map((r) => r.productId)).toEqual(['p1']);
+  });
+
+  it('keeps shops apart', async () => {
+    const s = await store();
+    s.replace(SHOP, [{ productId: 'p1', text: 'a', vector: vec(1, 0) }]);
+    s.replace('other.myshopify.com', [{ productId: 'q1', text: 'b', vector: vec(0, 1) }]);
+    await s.warm(SHOP);
+    expect(s.all(SHOP).map((r) => r.productId)).toEqual(['p1']);
+    await s.warm('other.myshopify.com');
+    expect(s.all('other.myshopify.com').map((r) => r.productId)).toEqual(['q1']);
+  });
+
+  it('records when it was built and to which recipe', async () => {
+    // INDEX_VERSION is what makes a changed embedding recipe invalidate a fresh
+    // index; without it a rebuild would be skipped and the new feature would
+    // look switched off.
+    const s = await store();
+    s.replace(SHOP, [{ productId: 'p1', text: 'a', vector: vec(1, 0) }], 1700, 7);
+    await s.warm(SHOP);
+    expect(s.builtAt(SHOP)).toBe(1700);
+    expect(s.version(SHOP)).toBe(7);
+    expect(s.count(SHOP)).toBe(1);
+  });
+
+  it('reports an unbuilt shop as unbuilt rather than as empty', async () => {
+    // `undefined` means "never built" and drives a rebuild; 0 would mean "built
+    // and contains nothing", which would leave search permanently cold.
+    const s = await store();
+    await s.warm('fresh.myshopify.com');
+    expect(s.builtAt('fresh.myshopify.com')).toBeUndefined();
+    expect(s.version('fresh.myshopify.com')).toBeUndefined();
+    expect(s.all('fresh.myshopify.com')).toEqual([]);
+  });
+
+  it('applies writes in order, so a search never sees half an index', async () => {
+    const s = await store();
+    s.replace(SHOP, [
+      { productId: 'old1', text: 'a', vector: vec(1, 0) },
+      { productId: 'old2', text: 'b', vector: vec(0, 1) },
+    ]);
+    s.replace(SHOP, [{ productId: 'new1', text: 'c', vector: vec(1, 1) }]);
+    await s.warm(SHOP);
+    expect(s.all(SHOP).map((r) => r.productId)).toEqual(['new1']);
+  });
+
+  it('searches nothing rather than throwing before it is warmed', async () => {
+    // Same behaviour as a cold index: the caller falls back to keyword search.
+    const s = await store();
+    s.replace(SHOP, [{ productId: 'p1', text: 'a', vector: vec(1, 0) }]);
+    expect(s.all(SHOP)).toEqual([]);
   });
 });

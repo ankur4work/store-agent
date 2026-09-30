@@ -560,6 +560,85 @@ level most likely to forget it.
 
 ## 5. Level 5 — The scale-out pieces, each behind its own trigger
 
+### Status — built 2026-09-30
+
+1,417 tests pass; both budgets green; check-launch passes.
+
+**Catalog freshness now comes from Shopify's webhooks.** `products/create`,
+`products/update`, `products/delete` and `collections/update` are subscribed and
+declared in the manifest; none needs a scope beyond `read_products` and none
+carries protected customer data, so unlike `orders/create` they cannot block a
+deploy.
+
+The work is coalesced per shop, which is the part that matters financially: a CSV
+import of four hundred products sends four hundred webhooks in seconds, and
+rebuilding on each would embed the whole catalog four hundred times — hundreds of
+API calls and a bill — to arrive at the index one rebuild produces. The first
+change starts a 30 s timer, each subsequent one extends it, and a five-minute
+ceiling stops a merchant working steadily through their catalog from deferring
+the rebuild for the whole hour. A change arriving *during* a rebuild queues
+another, so the index is never quietly one version behind.
+
+The webhook is acknowledged before any of it runs. Re-embedding takes longer than
+Shopify's patience, and a slow 200 becomes a retry, which becomes a disabled
+subscription.
+
+**The funnel is built and merchant-facing**: saw it → opened it → shown products
+→ opened a product → added to cart → bought something, with the held-back arm
+beside it. Two properties are enforced rather than assumed:
+
+- **It counts people, not events.** One row per session per step, so a shopper
+  who taps six cards is one person who tapped a card. An event stream would
+  report six and make the funnel widen in the middle, which is nonsense a
+  merchant would rightly stop trusting.
+- **A client may only report what the server cannot see.** `card_tapped` is a
+  navigation away from us, so the widget reports it; `cards_shown` and `cart_add`
+  are recorded from things the server did, and the endpoint refuses them. The
+  admin footnote says which figures are observations and which are reports,
+  because a merchant making decisions on them deserves to know.
+
+The holdout column is mostly blank on purpose — those shoppers never saw the
+assistant, so the gaps are the explanation of what it added.
+
+**pgvector is written and switched off.** `PgVectorStore` implements the same
+four-method `VectorStore` and is tested against real PostgreSQL. It deliberately
+does *not* use the `vector` extension: that would need an extension a managed
+Postgres may not offer and a superuser may have to enable — a deployment
+prerequisite for a capability we do not need yet, on a path that must not fail.
+Vectors are `BYTEA`, byte-identical to the SQLite encoding, and the cosine still
+runs in process, which keeps this a pure storage swap rather than a second
+implementation that can disagree.
+
+### A correction to this plan
+
+It listed **"holdout assignment must move into the shared store"** as the
+precondition for multi-node. That was wrong. `assignArm` is a pure SHA-256 hash
+of `shop:sessionId` compared against a fraction, so two nodes sharing nothing at
+all already agree on every session — now pinned by a test that says so.
+
+The real single-node constraint was never the assignment; it was **SQLite having
+one writer**, which is a storage problem the Postgres stores already solve. The
+one genuine coupling is `holdoutFraction`, which must be read from the shared
+settings table and never be a per-node default.
+
+### Not built, and why
+
+- **Redis `SessionStore`.** The plan wanted it for multi-node, and
+  `PgSessionStore` already provides that — it exists and is tested against real
+  PostgreSQL. What Redis would add beyond it is latency on session reads, which
+  has not been measured. Building an unmeasured optimisation for a deployment
+  that is still single-node is the kind of work that looks like progress. The
+  interface is already Redis-shaped, so it stays a file when there is a number
+  justifying it.
+- **WebMCP / an agent-facing tool surface.** Shopify's own note is that agent
+  support is still limited in some environments, and there is nothing here to
+  test against. A speculative surface built now would be a guess shipped as an
+  integration. Trigger: Shopify's agent support becoming generally available,
+  at which point it is an additive namespace beside our own tools and nothing
+  existing depends on it.
+
+
+
 Two things here are unconditional because they pay for themselves immediately.
 The rest is written, tested, and left switched off until a trigger fires —
 that is what keeps this level from becoming a rewrite of a working system.

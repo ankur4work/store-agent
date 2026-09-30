@@ -52,9 +52,11 @@ import {
   analyze,
   assignArm,
   describe as describeLift,
+  isFunnelStep,
   parseOrderPayload,
   recommendedHoldout,
   type AttributionStore,
+  type FunnelCounts,
 } from '@storeagent/attribution';
 import { SpeechChunker } from '@storeagent/voice';
 import {
@@ -69,6 +71,11 @@ import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
 import type { CatalogIndex } from './search/catalog-index.js';
+import {
+  CatalogRefreshQueue,
+  refreshCatalogIndex,
+  type CatalogSource,
+} from './search/refresh.js';
 import { withVariantImages } from './search/variant-image.js';
 import { BillingApiError } from './billing/shopify-billing.js';
 import {
@@ -138,6 +145,30 @@ export function createGateway(deps: GatewayDeps): Server {
   const metrics = deps.telemetry ?? new Telemetry();
   const log = deps.logger ?? createLogger(config.production);
   const startedAt = Date.now();
+
+  /**
+   * Catalog freshness, driven by Shopify's own webhooks.
+   *
+   * The semantic index used to rebuild only on a six-hour TTL, so a merchant who
+   * changed a price or added a line was invisible to meaning-based search for up
+   * to six hours — findable by keyword the whole time, which reads as an
+   * assistant that does not know about products in the merchant's own admin.
+   *
+   * Changes are coalesced per shop: a CSV import of four hundred products sends
+   * four hundred webhooks in seconds, and rebuilding on each would embed the
+   * whole catalog four hundred times to reach the same index one rebuild
+   * produces.
+   */
+  const catalogQueue = new CatalogRefreshQueue({
+    log,
+    refresh: async (shop) => {
+      const ucp = ucpFor(shop);
+      if (ucp === undefined || deps.catalogIndex === undefined) return;
+      const count = await refreshCatalogIndex(shop, ucp as unknown as CatalogSource, deps.catalogIndex);
+      metrics.catalogRefreshes.inc({ shop });
+      log.info('catalog_refresh_done', { shop, products: count });
+    },
+  });
 
   // Per merchant: a storefront that keeps failing must not hold connections
   // and starve every other merchant's turns. See resilience/breaker.ts.
@@ -330,6 +361,42 @@ export function createGateway(deps: GatewayDeps): Server {
       return;
     }
 
+    /**
+     * A funnel step the server cannot see for itself.
+     *
+     * Only `card_tapped` today: a shopper following a card to the product page is
+     * a navigation away from us, so nothing server-side observes it. Client
+     * reported and therefore forgeable, like any analytics of behaviour — which
+     * is what it is for. Every revenue figure still comes from the
+     * `orders/create` webhook and none of them pass through here.
+     *
+     * The step name is checked against a closed list, so this cannot become a
+     * way to write arbitrary rows.
+     */
+    if (url.pathname === '/api/event' && req.method === 'POST') {
+      try {
+        const body = JSON.parse(await readBody(req, 2 * 1024)) as {
+          shop?: unknown;
+          sessionId?: unknown;
+          step?: unknown;
+        };
+        const claimed = parseShopDomain(body.shop);
+        const shop = claimed.ok ? claimed.shop! : (config.shopDomain ?? 'demo.local');
+        if (typeof body.sessionId === 'string' && body.sessionId !== '' && isFunnelStep(body.step)) {
+          // Only the steps a client is allowed to report. `cards_shown` and
+          // `cart_add` are recorded by the server from things the server did, and
+          // accepting them here would let a client inflate its own funnel.
+          if (body.step === 'card_tapped') {
+            await attribution.recordStep(shop, body.sessionId, body.step);
+          }
+        }
+      } catch {
+        // A malformed beacon is not worth an error response.
+      }
+      json(res, 204, {});
+      return;
+    }
+
     if (url.pathname === '/api/config' && req.method === 'GET') {
       const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
       const s = await settings.get(shop);
@@ -510,6 +577,16 @@ export function createGateway(deps: GatewayDeps): Server {
           log: (l) => log.info('webhook', { detail: l }),
           // Billing data is not in ShopStore, so redaction must reach it too.
           onPurge: (shopDomain) => billing?.purge(shopDomain),
+          /**
+           * Queued, not awaited. Shopify expects a webhook acknowledged in
+           * seconds and re-embedding a catalog takes longer than that — a slow
+           * 200 becomes a retry, and a retried topic eventually gets its
+           * subscription disabled.
+           */
+          onCatalogChange: (shopDomain, topic) => {
+            log.info('catalog_changed', { shop: shopDomain, topic });
+            catalogQueue.touch(shopDomain);
+          },
           // Shopify is the authority on subscription state. Without this,
           // local state drifts: we would keep serving a cancelled shop, or
           // keep a frozen one blocked after they have paid.
@@ -691,6 +768,10 @@ export function createGateway(deps: GatewayDeps): Server {
           liftSummary: describeLift(lift),
           recommendedHoldout: recommendedHoldout(totals.exposed.sessions + totals.holdout.sessions),
           unmatchedOrders: await attribution.unmatchedCount(shop),
+        ...(await funnelFor(shop)),
+          // Absent when nothing has been measured, so a shop that installed
+          // today sees no card rather than a table of zeroes.
+          ...(await funnelFor(shop)),
           ...(billing === undefined ? {} : { billing: billing.summary(shop) }),
         }),
         shop,
@@ -788,6 +869,7 @@ export function createGateway(deps: GatewayDeps): Server {
         liftSummary: describeLift(lift),
         recommendedHoldout: recommendedHoldout(totals.exposed.sessions + totals.holdout.sessions),
         unmatchedOrders: await attribution.unmatchedCount(shop),
+        ...(await funnelFor(shop)),
         // Read straight from the store rather than reconciling with Shopify:
         // the page must render fast, and a network call on the critical path
         // would block it. /admin/billing does the reconciliation.
@@ -1021,6 +1103,29 @@ export function createGateway(deps: GatewayDeps): Server {
   }
 
   /**
+   * The funnel for the admin, or nothing at all.
+   *
+   * Omitted entirely on a shop with no sessions yet: a table of zeroes looks like
+   * a broken feature, where an absent card simply is not there. A shop that has
+   * installed today should see the setup instructions, not evidence that nobody
+   * has ever used it.
+   */
+  async function funnelFor(shop: string): Promise<{
+    funnel?: { exposed: FunnelCounts; holdout: FunnelCounts };
+  }> {
+    try {
+      const funnel = await attribution.funnel(shop);
+      if (funnel.exposed.sessions === 0 && funnel.holdout.sessions === 0) return {};
+      return { funnel };
+    } catch (err) {
+      // The admin must render without it. A funnel is a nice-to-have on a page
+      // whose other job is telling the merchant how to switch the thing on.
+      log.warn('funnel_failed', { shop, reason: err instanceof Error ? err.message : String(err) });
+      return {};
+    }
+  }
+
+  /**
    * Add a variant to the cart, from a tap on a product card.
    *
    * ## Why this is a button and not a sentence
@@ -1112,6 +1217,8 @@ export function createGateway(deps: GatewayDeps): Server {
         return;
       }
       metrics.fastLane.inc({ shop: shopDomain, intent: 'card_add' });
+      // Funnel: the step nearest the sale that we can see without a webhook.
+      void attribution.recordStep(shopDomain, sessionId, 'cart_add');
       json(res, 200, {
         ok: true,
         sessionId,
@@ -1827,6 +1934,12 @@ export function createGateway(deps: GatewayDeps): Server {
       // as SQL NULL.
       if (shown.length === 0) delete session.products;
       else session.products = shown.slice(0, MAX_VISIBLE_PRODUCTS);
+
+      // Funnel: products actually reached the screen. Recorded from what the
+      // server sent rather than from a client beacon, so it cannot be inflated.
+      if (shown.length > 0) {
+        void attribution.recordStep(session.shopDomain, sessionId, 'cards_shown');
+      }
 
       /**
        * Offer the next narrowing, from what is actually on screen.

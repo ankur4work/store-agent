@@ -1,6 +1,15 @@
 import { createRequire } from 'node:module';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Arm, ArmTotals, AttributionStore, CartLink, Conversion, Exposure } from '@storeagent/attribution';
+import type {
+  Arm,
+  ArmTotals,
+  AttributionStore,
+  CartLink,
+  Conversion,
+  Exposure,
+  FunnelCounts,
+  FunnelStep,
+} from '@storeagent/attribution';
 import type { Message } from '@storeagent/orchestrator';
 import { readPreferences, readVisibleProducts, type Session, type SessionStore } from '../sessions.js';
 import type { NonceStore, Shop, ShopStore } from '../shopify/shops.js';
@@ -112,6 +121,18 @@ CREATE TABLE IF NOT EXISTS conversions (
   PRIMARY KEY (shop, order_id)
 );
 CREATE INDEX IF NOT EXISTS conversions_shop_time ON conversions(shop, created_at);
+
+-- The funnel. One row per session per step, because the question a merchant
+-- asks is "how many people got this far", not "how many times did this happen"
+-- — a shopper who taps six cards is one person who tapped a card.
+CREATE TABLE IF NOT EXISTS funnel_steps (
+  shop       TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  step       TEXT NOT NULL,
+  at         INTEGER NOT NULL,
+  PRIMARY KEY (shop, session_id, step)
+);
+CREATE INDEX IF NOT EXISTS funnel_steps_shop ON funnel_steps(shop, step);
 `;
 
 /**
@@ -497,6 +518,72 @@ export class SqliteAttributionStore implements AttributionStore {
       }
     }
 
+    return { exposed: out['exposed']!, holdout: out['holdout']! };
+  }
+
+  async recordStep(shop: string, sessionId: string, step: FunnelStep, at = Date.now()): Promise<void> {
+    // DO NOTHING on conflict: the funnel counts people, so reaching a step twice
+    // is one person reaching it, and the FIRST time is the interesting one.
+    this.db
+      .prepare(
+        `INSERT INTO funnel_steps (shop, session_id, step, at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(shop, session_id, step) DO NOTHING`,
+      )
+      .run(shop, sessionId, step, at);
+  }
+
+  /**
+   * Sessions reaching each step, by arm.
+   *
+   * One statement, joined from the exposure rows outward, so a step recorded for
+   * a session we never saw an exposure for is not counted — that would put a
+   * shopper in the funnel who is in neither arm, and the arms are the entire
+   * point of measuring it this way.
+   */
+  async funnel(shop: string, sinceMs = 0): Promise<{ exposed: FunnelCounts; holdout: FunnelCounts }> {
+    const rows = this.db
+      .prepare(
+        `SELECT e.arm AS arm,
+                COUNT(*) AS sessions,
+                SUM(e.engaged) AS engaged,
+                SUM(EXISTS (SELECT 1 FROM funnel_steps s
+                             WHERE s.shop = e.shop AND s.session_id = e.session_id
+                               AND s.step = 'cards_shown')) AS cards_shown,
+                SUM(EXISTS (SELECT 1 FROM funnel_steps s
+                             WHERE s.shop = e.shop AND s.session_id = e.session_id
+                               AND s.step = 'card_tapped')) AS card_tapped,
+                SUM(EXISTS (SELECT 1 FROM funnel_steps s
+                             WHERE s.shop = e.shop AND s.session_id = e.session_id
+                               AND s.step = 'cart_add')) AS cart_add,
+                SUM(EXISTS (SELECT 1 FROM conversions c
+                             WHERE c.shop = e.shop AND c.session_id = e.session_id)) AS converted
+           FROM exposures e
+          WHERE e.shop = ? AND e.created_at >= ?
+          GROUP BY e.arm`,
+      )
+      .all(shop, sinceMs) as Record<string, unknown>[];
+
+    const blank = (): FunnelCounts => ({
+      sessions: 0,
+      engaged: 0,
+      cardsShown: 0,
+      cardTapped: 0,
+      cartAdd: 0,
+      converted: 0,
+    });
+    const out: Record<string, FunnelCounts> = { exposed: blank(), holdout: blank() };
+    for (const row of rows) {
+      const arm = String(row['arm']);
+      if (out[arm] === undefined) continue;
+      out[arm] = {
+        sessions: Number(row['sessions'] ?? 0),
+        engaged: Number(row['engaged'] ?? 0),
+        cardsShown: Number(row['cards_shown'] ?? 0),
+        cardTapped: Number(row['card_tapped'] ?? 0),
+        cartAdd: Number(row['cart_add'] ?? 0),
+        converted: Number(row['converted'] ?? 0),
+      };
+    }
     return { exposed: out['exposed']!, holdout: out['holdout']! };
   }
 

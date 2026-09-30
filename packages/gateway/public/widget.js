@@ -894,6 +894,26 @@ textarea::placeholder{color:var(--muted)}
    * authoritative message comes from.
    */
   /**
+   * Report a funnel step the server cannot observe for itself.
+   *
+   * Fire and forget, and never allowed to matter: a merchant's funnel is worth
+   * less than the shopper's turn, so a failure here is silent by design.
+   */
+  function step(name) {
+    try {
+      if (!state.sessionId) return;
+      fetch(API + '/api/event', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ shop: SHOP, sessionId: state.sessionId, step: name }),
+        keepalive: true,
+      }).catch(function () {});
+    } catch (e) {
+      /* analytics must never cost a shopper anything */
+    }
+  }
+
+  /**
    * The one variant a card may add, or null when there is a choice to make.
    *
    * A tap must mean exactly one thing. With two sizes in stock there is no way
@@ -1026,6 +1046,14 @@ textarea::placeholder{color:var(--muted)}
         // reopens on the product page.
         c.addEventListener('click', function () {
           persist();
+          /**
+           * The one funnel step the server cannot see.
+           *
+           * Following a card is a navigation AWAY from us, so nothing
+           * server-side observes it. `keepalive` because the page is about to
+           * unload and an ordinary fetch would be cancelled mid-flight.
+           */
+          step('card_tapped');
         });
       } else {
         c.addEventListener('click', function () {

@@ -64,6 +64,21 @@ api_version = "2026-07"
   topics = [ "orders/create" ]
   uri = "https://storeagent.tech/shopify/webhooks"
 
+  # Catalog freshness. The semantic index rebuilt only on a six-hour TTL, so a
+  # price change or a new product was findable by keyword immediately and by
+  # meaning not at all — which reads as an assistant that does not know about
+  # products the merchant can see in their own admin.
+  #
+  # Needs no scope beyond read_products, already granted, and carries no
+  # protected customer data — so unlike orders/create these need no access
+  # request and cannot block a deploy.
+  #
+  # Bursts are coalesced server-side: a CSV import of 400 products sends 400 of
+  # these in seconds and must produce one rebuild, not 400.
+  [[webhooks.subscriptions]]
+  topics = [ "products/create", "products/update", "products/delete", "collections/update" ]
+  uri = "https://storeagent.tech/shopify/webhooks"
+
   # Billing state. Shopify is the authority on whether a subscription is
   # active, cancelled or frozen; without this our record drifts silently and we
   # keep serving a shop that stopped paying — or keep a paid one blocked.
