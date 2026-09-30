@@ -1185,3 +1185,32 @@ describe('the voice split', () => {
     expect(HOST_SRC).toMatch(/if \(voiceApi\) voiceApi\.stopPlayback\(\)/);
   });
 });
+
+/**
+ * Multimodality, which means every input stays available rather than taking
+ * turns. A shopper who starts by talking and then wants to type a size should
+ * not have to find a way back.
+ */
+describe('voice never takes the keyboard away', () => {
+  it('keeps the composer present in the compact voice box', () => {
+    const compact = HOST_SRC.slice(HOST_SRC.indexOf('.panel.compact{'), HOST_SRC.indexOf('@media (max-width:480px)'));
+    // Styled smaller, never removed. The rail, chips and intro ARE hidden there
+    // — those are invitations; the composer is a capability.
+    expect(compact).toMatch(/\.panel\.compact form\{/);
+    expect(compact).not.toMatch(/\.panel\.compact form\{display:none/);
+    expect(compact).not.toMatch(/\.panel\.compact textarea\{display:none/);
+  });
+
+  it('shows cards and chips as soon as there is something to show', () => {
+    // The square listening box expands on a product answer, because pictures and
+    // a list of options are not things to hear.
+    expect(HOST_SRC).toMatch(/if \(turnUi\.rail \|\| String\(d\.reply \|\| ''\)\.length > 220\) expand\(\)/);
+  });
+
+  it('accepts a chip tap as a message, so taps and speech go the same way', () => {
+    // One path in: whatever the shopper did, it becomes a turn.
+    const fn = HOST_SRC.slice(HOST_SRC.indexOf('function showChips'), HOST_SRC.indexOf('function grow'));
+    expect(fn).toMatch(/els\.input\.value = chip\.message \|\| chip\.label/);
+    expect(fn).toMatch(/submit\(\)/);
+  });
+});

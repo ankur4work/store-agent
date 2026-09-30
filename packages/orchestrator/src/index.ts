@@ -18,8 +18,9 @@ export {
   mentionsColour,
   parseAmountMinor,
   priceMinorOf,
+  suggestChips,
 } from './intents.js';
-export type { FastIntent, IntentContext, ProductFilter } from './intents.js';
+export type { Chip, FastIntent, IntentContext, ProductFilter } from './intents.js';
 export { extractPreferences, mergePreferences, renderPreferences } from './preferences.js';
 export type { Preferences } from './preferences.js';
 export { planSpeculation, speculationMatches } from './speculate.js';

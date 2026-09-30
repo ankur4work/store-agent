@@ -210,7 +210,7 @@ export class Orchestrator {
     const fingerprint = prefixFingerprint(system);
 
     // --- 1. Speculative prefetch, in parallel with everything below --------
-    const plan = planSpeculation(input.message, input.context.page?.title);
+    const plan = planSpeculation(input.message, input.context.page);
     const speculation = plan.shouldSearch
       ? this.deps.tools
           .execute('search_catalog', { query: plan.query, limit: 6 }, signal)

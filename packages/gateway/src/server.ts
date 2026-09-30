@@ -10,9 +10,11 @@ import {
   buildCachedPrefix,
   classifyIntent,
   extractPreferences,
+  suggestChips,
   mergePreferences,
   reachedHuman,
   renderPreferences,
+  type Chip,
   type FastIntent,
   type MerchantPack,
   type ProductFilter,
@@ -321,6 +323,13 @@ export function createGateway(deps: GatewayDeps): Server {
     // Widget config. One cheap call the widget makes before deciding whether to
     // render, so holdout assignment and appearance come from the server rather
     // than being guessable or edit-able in the page.
+    // A tap on a product card. Deterministic because a tap names an exact
+    // variant, which is the ambiguity that keeps "add this" out of the lane.
+    if (url.pathname === '/api/cart/add' && req.method === 'POST') {
+      await handleCartAdd(req, res);
+      return;
+    }
+
     if (url.pathname === '/api/config' && req.method === 'GET') {
       const shop = url.searchParams.get('shop') ?? config.shopDomain ?? 'demo.local';
       const s = await settings.get(shop);
@@ -1012,6 +1021,119 @@ export function createGateway(deps: GatewayDeps): Server {
   }
 
   /**
+   * Add a variant to the cart, from a tap on a product card.
+   *
+   * ## Why this is a button and not a sentence
+   *
+   * The deterministic lane deliberately refuses to act on "add this": a sentence
+   * does not say which size, and a wrong variant is discovered by the shopper at
+   * checkout. A tap on a card carries an exact variant id, so the ambiguity that
+   * made the text version unsafe is simply not present — which is the whole
+   * distinction this endpoint rests on. The widget only offers the button when
+   * there is exactly one available variant to offer.
+   *
+   * Goes through the same `add_to_cart` executor the model uses, so it inherits
+   * the cart-merge safety and the attribution hook rather than reimplementing
+   * either.
+   */
+  async function handleCartAdd(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: { sessionId?: unknown; shop?: unknown; variantId?: unknown; quantity?: unknown };
+    try {
+      body = JSON.parse(await readBody(req, 4 * 1024)) as typeof body;
+    } catch {
+      json(res, 400, { error: 'invalid_json' });
+      return;
+    }
+
+    const variantId = typeof body.variantId === 'string' ? body.variantId.trim() : '';
+    // Shape-checked because it is client-supplied and reaches the storefront.
+    // The same bounded exposure the chat route already accepts, and all it can
+    // name is a variant in this merchant's own catalog.
+    /**
+     * `..` is refused as well as the obvious junk.
+     *
+     * Not because it could traverse anything — the id becomes a field in a
+     * JSON-RPC payload, never a path segment — but because no real variant id
+     * contains it. Shopify ids are `gid://shopify/ProductVariant/123`, numeric,
+     * or handle-shaped. Refusing a value that cannot be legitimate costs one
+     * `includes` and removes the need to reason about where it ends up later.
+     */
+    if (
+      variantId === '' ||
+      variantId.length > 200 ||
+      variantId.includes('..') ||
+      !/^[\w:/.=-]+$/.test(variantId)
+    ) {
+      json(res, 400, { error: 'variant_required' });
+      return;
+    }
+    const quantity =
+      typeof body.quantity === 'number' && Number.isInteger(body.quantity) && body.quantity > 0
+        ? Math.min(body.quantity, 10)
+        : 1;
+
+    const claimed = parseShopDomain(body.shop);
+    const shopDomain = claimed.ok ? claimed.shop! : (config.shopDomain ?? 'demo.local');
+    const sessionId = typeof body.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : randomUUID();
+    const existing = await sessions.get(sessionId);
+    // Same rule as the chat route: a session id must never carry a cart from one
+    // storefront into another.
+    const session =
+      existing !== undefined && existing.shopDomain === shopDomain
+        ? existing
+        : newSession(sessionId, shopDomain);
+
+    const executor = createToolExecutor({
+      session,
+      ucp: ucpFor(shopDomain),
+      log,
+      onCartChange: (cartId) => {
+        // The deterministic join for attribution. A card tap creates carts just
+        // as the agent does, and a cart with no session attached is revenue that
+        // cannot be credited to the assistant that sold it.
+        void attribution.linkCart({ shop: shopDomain, sessionId, cartId, createdAt: Date.now() });
+      },
+    });
+
+    try {
+      const result = (await executor.execute('add_to_cart', {
+        variant_id: variantId,
+        quantity,
+      })) as {
+        demo?: boolean;
+        cart?: Parameters<typeof cartSummary>[0];
+        messages?: readonly { text: string }[];
+        error?: unknown;
+      };
+      await sessions.put(session);
+
+      if (result.error !== undefined) {
+        json(res, 502, { error: 'add_failed' });
+        return;
+      }
+      metrics.fastLane.inc({ shop: shopDomain, intent: 'card_add' });
+      json(res, 200, {
+        ok: true,
+        sessionId,
+        ...(session.cartId === undefined ? {} : { cartId: session.cartId }),
+        // Demo mode has no cart to describe, and inventing a subtotal is exactly
+        // what the grounding layer exists to prevent.
+        reply:
+          result.cart === undefined
+            ? 'Added to your cart.'
+            : `Added. ${cartSummary(result.cart, result.messages)}`,
+      });
+    } catch (err) {
+      log.warn('card_add_failed', {
+        shop: shopDomain,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      metrics.errors.inc({ kind: 'card_add' });
+      json(res, 502, { error: 'add_failed' });
+    }
+  }
+
+  /**
    * The cached prompt prefix for a shop, from what the merchant wrote.
    *
    * Replaces a single hardcoded pack that every merchant shared, which meant
@@ -1074,10 +1196,11 @@ export function createGateway(deps: GatewayDeps): Server {
       session: Session;
       send: (event: string, data: unknown) => void;
       speakIfVoice: (text: string) => void;
+      sendChips: (products: readonly unknown[]) => void;
       startedAt: number;
     },
   ): Promise<boolean> {
-    const { session, send, speakIfVoice, startedAt } = ctx;
+    const { session, send, speakIfVoice, sendChips, startedAt } = ctx;
 
     const finish = (reply: string, products?: readonly unknown[]): true => {
       // Cards first: they are the answer, and the sentence is commentary on
@@ -1119,6 +1242,9 @@ export function createGateway(deps: GatewayDeps): Server {
       if (kept.length === visible.length && intent.filter.colour !== undefined) return false;
 
       session.products = kept;
+      // Narrowing composes: the chips offered now come from the narrowed set, so
+      // a shopper can keep going without ever reaching the model.
+      sendChips(kept);
       /**
        * Short, and read aloud as often as it is read.
        *
@@ -1150,26 +1276,7 @@ export function createGateway(deps: GatewayDeps): Server {
 
     try {
       const { cart, messages } = await ucp.getCart(session.cartId);
-      const lines = (cart.line_items ?? []).filter((li) => li.quantity > 0);
-      if (lines.length === 0) return finish('Your cart is empty.');
-
-      const named = lines.map((li) => `${li.title ?? 'item'}${li.quantity > 1 ? ` ×${li.quantity}` : ''}`);
-      const parts = [`${named.join(', ')}.`];
-      if (cart.subtotal !== undefined) {
-        parts.push(`Subtotal ${money(cart.subtotal.amount, cart.subtotal.currency)}.`);
-      }
-      /**
-       * Authoritative, and passed through verbatim.
-       *
-       * `CartMessage` carries business outcomes — out of stock, quantity
-       * adjusted — and ARCHITECTURE §4 is explicit that these must not be
-       * paraphrased, because paraphrasing is where hallucination enters. There
-       * is no model on this path to paraphrase them, which is one more reason
-       * the cart read belongs here.
-       */
-      for (const m of messages ?? []) if (m.text !== '') parts.push(m.text);
-
-      return finish(parts.join(' '));
+      return finish(cartSummary(cart, messages));
     } catch (err) {
       // A cart that cannot be read is not an answer we can fake. The model gets
       // the turn, with tools that can try again.
@@ -1447,6 +1554,18 @@ export function createGateway(deps: GatewayDeps): Server {
       if (body.voice === true && text !== '') send('speak', { text });
     };
 
+    /**
+     * Offer the next narrowing, or explicitly clear what was offered before.
+     *
+     * Always sent, empty included. A chip row left over from the previous answer
+     * is a suggestion about products that are no longer on screen — the same
+     * mistake the early product cards made, where the pictures contradicted the
+     * words and the pictures are what people believe.
+     */
+    const sendChips = (products: readonly unknown[]): void => {
+      send('chips', { chips: renderChips(suggestChips(products), currencyOf(products)) });
+    };
+
     // The bottom two rungs need no model at all. Answering here costs nothing
     // and is still not an error page — the shopper gets a route to a person.
     const bottomRung = shopperMessage(level.level);
@@ -1496,6 +1615,7 @@ export function createGateway(deps: GatewayDeps): Server {
         session,
         send,
         speakIfVoice,
+        sendChips,
         startedAt: Date.now(),
       });
       if (answered) {
@@ -1707,6 +1827,17 @@ export function createGateway(deps: GatewayDeps): Server {
       // as SQL NULL.
       if (shown.length === 0) delete session.products;
       else session.products = shown.slice(0, MAX_VISIBLE_PRODUCTS);
+
+      /**
+       * Offer the next narrowing, from what is actually on screen.
+       *
+       * Derived from the products rather than invented by the model, for the same
+       * reason the catalog is never summarised into the prompt: the answer is in
+       * the data. Each chip is verified against the real filter before being
+       * offered, so it cannot suggest a colour nothing has — and because the
+       * phrases classify, tapping one is answered with no model call at all.
+       */
+      sendChips(session.products ?? []);
 
       // A turn reaches a human two ways: the loop gave up (`escalated`) or the
       // agent chose to hand off (`handedOff`). A client asking "did this reach
@@ -2031,6 +2162,73 @@ export function money(minor: number, currency?: string): string {
   const amount = (minor / 100).toFixed(2);
   const symbol = CURRENCY_SYMBOL[code];
   return symbol === undefined ? `${amount} ${code}` : `${symbol}${amount}`;
+}
+
+/**
+ * Turn chip specs into what the widget shows and sends.
+ *
+ * The `message` comes from the orchestrator because it has to be a phrase the
+ * classifier recognises — tapping a chip must be answered deterministically, not
+ * cost a model turn. Only the LABEL is built here, because labelling a price
+ * needs the shop's currency and `money` already knows how to do that without
+ * rounding.
+ */
+function renderChips(
+  chips: readonly Chip[],
+  currency: string | undefined,
+): { label: string; message: string }[] {
+  return chips.map((c) => ({
+    message: c.message,
+    label:
+      c.kind === 'colour'
+        ? `Just the ${c.colour}`
+        : c.kind === 'cheaper'
+          ? 'Cheaper'
+          : c.kind === 'similar'
+            ? 'More like this'
+            : `Under ${money(c.maxMinor ?? 0, currency)}`,
+  }));
+}
+
+/**
+ * Say what is in a cart, from the cart.
+ *
+ * Shared by the cart read and the add-from-a-card confirmation so the two cannot
+ * describe the same cart differently. Every figure is copied from the payload and
+ * formatted by `money`, which never rounds — there is no model on either path, so
+ * nothing downstream would catch it if it did.
+ *
+ * `messages` are passed through VERBATIM. They carry business outcomes — out of
+ * stock, quantity adjusted — and ARCHITECTURE §4 is explicit that paraphrasing
+ * them is where hallucination enters.
+ */
+function cartSummary(
+  cart: { line_items?: readonly { title?: string; quantity: number }[]; subtotal?: { amount: number; currency?: string } },
+  messages: readonly { text: string }[] | undefined,
+): string {
+  const lines = (cart.line_items ?? []).filter((li) => li.quantity > 0);
+  if (lines.length === 0) return 'Your cart is empty.';
+
+  const named = lines.map((li) => `${li.title ?? 'item'}${li.quantity > 1 ? ` ×${li.quantity}` : ''}`);
+  const parts = [`${named.join(', ')}.`];
+  if (cart.subtotal !== undefined) {
+    parts.push(`Subtotal ${money(cart.subtotal.amount, cart.subtotal.currency)}.`);
+  }
+  for (const m of messages ?? []) if (m.text !== '') parts.push(m.text);
+  return parts.join(' ');
+}
+
+/** The currency a set of products is priced in, if they agree on one. */
+function currencyOf(products: readonly unknown[]): string | undefined {
+  for (const p of products) {
+    const variants = (p as { variants?: unknown }).variants;
+    if (!Array.isArray(variants)) continue;
+    for (const v of variants) {
+      const code = (v as { price?: { currency?: unknown } }).price?.currency;
+      if (typeof code === 'string' && code !== '') return code;
+    }
+  }
+  return undefined;
 }
 
 /** A search-ish string for variant image selection, from a filter. */

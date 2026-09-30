@@ -347,3 +347,154 @@ export function applyFilter(products: readonly unknown[], filter: ProductFilter)
 
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Suggesting the next narrowing
+// ---------------------------------------------------------------------------
+
+/**
+ * A next step to offer the shopper, derived from what is on screen.
+ *
+ * `message` is what gets sent when they tap it, and it is written to be
+ * something `classifyIntent` recognises — so tapping a chip is answered
+ * deterministically, in milliseconds, for no tokens. The chips are the visible
+ * half of the deterministic lane.
+ */
+export interface Chip {
+  /**
+   * `colour`, `cheaper` and `under` narrow what is on screen and are answered
+   * with no model call. `similar` is a fresh search and is not — it is offered
+   * only where there is nothing left to narrow.
+   */
+  readonly kind: 'colour' | 'cheaper' | 'under' | 'similar';
+  /** What is sent as the shopper's message. */
+  readonly message: string;
+  readonly colour?: string;
+  readonly maxMinor?: number;
+  /** The product a `similar` chip is asking for more of. */
+  readonly title?: string;
+}
+
+/** Prices present in a set, ascending, deduplicated. */
+function pricesOf(products: readonly unknown[]): number[] {
+  const seen = new Set<number>();
+  for (const p of products) {
+    const price = priceMinorOf(p);
+    if (price !== undefined) seen.add(price);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+/**
+ * What to offer next, from the products the shopper can actually see.
+ *
+ * ## Every chip is verified before it is offered
+ *
+ * A generated chip is run through the real classifier and the real filter, and
+ * dropped unless it produces a **non-empty proper subset**. That rules out the
+ * two ways a suggestion insults the shopper: offering "the blue ones" when
+ * nothing is blue, and offering it when everything is — the first is a dead end
+ * and the second does nothing, and both say plainly that the thing suggesting it
+ * has not looked.
+ *
+ * It also means the guarantee is real rather than asserted: the chip cannot
+ * disagree with the filter, because the filter is what approved it.
+ *
+ * Model-invented chips were the alternative and are worse for the same reason
+ * the catalog is not summarised into the prompt — the model would be inventing
+ * categories from memory while the answer sits in the data.
+ */
+export function suggestChips(products: readonly unknown[], max = 3): Chip[] {
+  /**
+   * One product cannot be narrowed — so offer to widen instead.
+   *
+   * This is where the chip row was empty, which is the worst place for it to be:
+   * a shopper looking at a single result is the shopper most in need of a next
+   * step. "More like this" is a fresh search and therefore a model turn, unlike
+   * every other chip here, and it is offered only in the case where there is
+   * genuinely nothing cheaper to do.
+   */
+  if (products.length === 1) {
+    const title = (products[0] as { title?: unknown })?.title;
+    if (typeof title !== 'string' || title.trim() === '') return [];
+    return [{ kind: 'similar', title: title.trim(), message: `something like the ${title.trim()}` }];
+  }
+  if (products.length === 0) return [];
+
+  const candidates: Chip[] = [];
+
+  /**
+   * ONE colour, and the one that splits the set most evenly.
+   *
+   * Offering "blue / red / navy" is the same axis three times, and it crowds out
+   * the price options entirely — which is exactly what happened when this
+   * iterated every colour first. A split near half is also the most informative
+   * one: a colour that matches a single product out of twelve barely narrows
+   * anything, and the shopper can already see it.
+   *
+   * Ties break on COLOURS order, so the choice is deterministic.
+   */
+  let bestColour: string | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const colour of COLOURS) {
+    // 'gray' and 'grey' are the same offer; keep the one the filter normalises to.
+    if (colour === 'gray') continue;
+    const matches = products.filter((p) => mentionsColour(p, colour)).length;
+    if (matches === 0 || matches === products.length) continue;
+    const distance = Math.abs(matches - products.length / 2);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestColour = colour;
+    }
+  }
+  if (bestColour !== undefined) {
+    candidates.push({ kind: 'colour', colour: bestColour, message: `just the ${bestColour} ones` });
+  }
+
+  const prices = pricesOf(products);
+  if (prices.length >= 2) {
+    candidates.push({ kind: 'cheaper', message: 'cheaper ones' });
+    /**
+     * A threshold that actually splits this set.
+     *
+     * Taken from the data — the price below the dearest — rather than from a
+     * round number like 50 or 100, which for a shop selling £900 coats offers a
+     * filter that matches nothing. Sent as bare digits because that is what
+     * `parseAmountMinor` reads most reliably; the caller formats the label with
+     * the shop's own currency.
+     */
+    const split = prices[prices.length - 2]!;
+    candidates.push({
+      kind: 'under',
+      maxMinor: split,
+      message: `only the ones under ${Math.ceil(split / 100)}`,
+    });
+  }
+
+  const chips: Chip[] = [];
+  for (const chip of candidates) {
+    if (chips.length >= max) break;
+    const intent = classifyIntent(chip.message, {
+      visibleProducts: products.length,
+      hasCart: false,
+    });
+    // The chip has to survive our own classifier, or tapping it would go to the
+    // model and cost a turn for something we could have answered.
+    if (intent.kind !== 'filter') continue;
+    const kept = applyFilter(products, intent.filter);
+
+    if (intent.filter.cheaper === true || intent.filter.dearer === true) {
+      /**
+       * A relative ask RANKS rather than cuts, so it keeps every product — and
+       * judging it by subset size would reject it every time. What makes it
+       * worth offering is that the order changes; on an already-sorted set it is
+       * a chip that visibly does nothing.
+       */
+      if (!kept.some((p, i) => p !== products[i])) continue;
+    } else if (kept.length === 0 || kept.length === products.length) {
+      continue;
+    }
+    chips.push(chip);
+  }
+  return chips;
+}

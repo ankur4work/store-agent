@@ -5,6 +5,7 @@ import {
   mentionsColour,
   parseAmountMinor,
   priceMinorOf,
+  suggestChips,
 } from '../src/intents.js';
 
 /**
@@ -253,5 +254,117 @@ describe('applyFilter', () => {
     const input = [dearBlue, cheapBlue];
     applyFilter(input, { cheaper: true });
     expect(input).toEqual([dearBlue, cheapBlue]);
+  });
+});
+
+/**
+ * Chips are the visible half of the deterministic lane.
+ *
+ * Each one is written to be a phrase the classifier recognises, so tapping it is
+ * answered in milliseconds for no tokens. And each is VERIFIED before it is
+ * offered — run through the real classifier and the real filter — which rules
+ * out the two ways a suggestion insults the shopper: offering "the blue ones"
+ * when nothing is blue, and offering it when everything is.
+ */
+describe('suggestChips', () => {
+  const blue = { title: 'Blue Tee', variants: [{ price: 1500 }] };
+  const red = { title: 'Red Tee', variants: [{ price: 1200 }] };
+  const navy = { title: 'Navy Coat', variants: [{ price: 18000 }] };
+
+  it('offers one colour, and one that splits the set', () => {
+    // One, not three: "blue / red / navy" is the same axis three times and
+    // crowds out the price options. Which one is a deterministic tie-break on
+    // COLOURS order, so this asserts the property rather than the winner.
+    const chips = suggestChips([blue, red, navy]);
+    const colours = chips.filter((c) => c.kind === 'colour');
+    expect(colours).toHaveLength(1);
+    expect(['blue', 'red', 'navy']).toContain(colours[0]!.colour);
+  });
+
+  it('prefers the colour that splits most evenly', () => {
+    // A colour matching one product in twelve barely narrows anything, and the
+    // shopper can already see it.
+    const blues = Array.from({ length: 4 }, (_, i) => ({
+      title: `Blue ${i}`,
+      variants: [{ price: 1000 + i }],
+    }));
+    const chips = suggestChips([...blues, red, { title: 'Green Hat', variants: [{ price: 900 }] }]);
+    expect(chips.find((c) => c.kind === 'colour')?.colour).toBe('blue');
+  });
+
+  it('never offers a colour nothing has', () => {
+    // A dead end, and it says plainly that nothing looked at the products.
+    const chips = suggestChips([blue, red]);
+    expect(chips.some((c) => c.colour === 'green')).toBe(false);
+  });
+
+  it('never offers a colour everything has', () => {
+    // Tapping it would change nothing on screen.
+    const chips = suggestChips([blue, { title: 'Blue Coat', variants: [{ price: 9000 }] }]);
+    expect(chips.some((c) => c.colour === 'blue')).toBe(false);
+  });
+
+  it('offers a price threshold taken from the data, not a round number', () => {
+    // A shop selling £180 coats needs a threshold that splits ITS prices; "under
+    // 50" would match nothing.
+    const chips = suggestChips([navy, red, blue]);
+    const under = chips.find((c) => c.kind === 'under');
+    expect(under).toBeDefined();
+    expect(under!.maxMinor).toBe(1500);
+  });
+
+  it('offers cheaper only when the order would actually change', () => {
+    const chips = suggestChips([navy, blue, red]);
+    expect(chips.some((c) => c.kind === 'cheaper')).toBe(true);
+    // Already cheapest-first: the chip would visibly do nothing.
+    const sorted = suggestChips([red, blue, navy]);
+    expect(sorted.some((c) => c.kind === 'cheaper')).toBe(false);
+  });
+
+  it('offers nothing when prices are identical', () => {
+    const a = { title: 'A Tee', variants: [{ price: 1000 }] };
+    const b = { title: 'B Tee', variants: [{ price: 1000 }] };
+    const chips = suggestChips([a, b]);
+    expect(chips.some((c) => c.kind === 'cheaper' || c.kind === 'under')).toBe(false);
+  });
+
+  it('offers to widen when there is nothing left to narrow', () => {
+    /**
+     * One product cannot be narrowed, and an empty chip row is worst exactly
+     * there: a shopper looking at a single result is the one most in need of a
+     * next step. This chip IS a model turn, unlike the others, and it is offered
+     * only where there is genuinely nothing cheaper to do.
+     */
+    const chips = suggestChips([blue]);
+    expect(chips).toHaveLength(1);
+    expect(chips[0]!.kind).toBe('similar');
+    expect(chips[0]!.message).toBe('something like the Blue Tee');
+  });
+
+  it('offers nothing for an empty set, or a product with no name', () => {
+    expect(suggestChips([])).toEqual([]);
+    expect(suggestChips([{ variants: [{ price: 100 }] }])).toEqual([]);
+  });
+
+  it('every chip it offers is answerable without a model', () => {
+    // The contract that makes chips free. If one of these stopped classifying,
+    // tapping it would silently start costing a turn.
+    const products = [navy, red, blue, { title: 'Green Hat', variants: [{ price: 2000 }] }];
+    const chips = suggestChips(products, 5);
+    expect(chips.length).toBeGreaterThan(0);
+    // 'similar' is deliberately a model turn and only appears for a single
+    // product; every narrowing chip must classify.
+    for (const chip of chips.filter((c) => c.kind !== 'similar')) {
+      const intent = classifyIntent(chip.message, {
+        visibleProducts: products.length,
+        hasCart: false,
+      });
+      expect(intent.kind, chip.message).toBe('filter');
+    }
+  });
+
+  it('respects the maximum, because a wall of chips is not a suggestion', () => {
+    const many = [navy, red, blue, { title: 'Green Hat', variants: [{ price: 2000 }] }];
+    expect(suggestChips(many, 2).length).toBeLessThanOrEqual(2);
   });
 });

@@ -210,3 +210,97 @@ describe('money', () => {
     expect(money(1234)).toBe('$12.34');
   });
 });
+
+/**
+ * Chips, which are the visible half of the deterministic lane.
+ *
+ * They are derived from the products actually on screen and written so that
+ * tapping one is answered without a model. That makes them the one part of the
+ * interface where "what should I ask next" and "what can be answered for free"
+ * are the same question.
+ */
+describe('the next narrowing it offers', () => {
+  let server: Server;
+  let base: string;
+  let telemetry: Telemetry;
+  let sessions: MemorySessionStore;
+
+  beforeEach(async () => {
+    telemetry = new Telemetry();
+    sessions = new MemorySessionStore();
+    server = createGateway({
+      config: loadConfig({ OPENAI_API_KEY: 'sk-would-fail-if-used', PORT: '0' }),
+      telemetry,
+      sessions,
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  async function chipsFor(products: unknown[], message: string) {
+    const s = newSession('chips-1', 'demo.local');
+    s.products = products;
+    await sessions.put(s);
+    const res = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message, sessionId: 'chips-1' }),
+    });
+    const text = await res.text();
+    const events = [...text.matchAll(/event: (\w+)\ndata: (.*)/g)].map((m) => ({
+      event: m[1]!,
+      data: JSON.parse(m[2]!) as Record<string, unknown>,
+    }));
+    const chips = events.find((e) => e.event === 'chips');
+    return (chips?.data['chips'] ?? []) as { label: string; message: string }[];
+  }
+
+  it('offers narrowing derived from what is on screen', async () => {
+    const chips = await chipsFor([blueCoat, redTee, blueTee], 'cheaper ones');
+    expect(chips.length).toBeGreaterThan(0);
+    // Every label is readable; every message is what gets sent back.
+    for (const c of chips) {
+      expect(c.label.length).toBeGreaterThan(0);
+      expect(c.message.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('labels a price threshold in the shop’s own currency, unrounded', async () => {
+    const priced = [
+      { title: 'A', variants: [{ price: { amount: 1250, currency: 'GBP' } }] },
+      { title: 'B', variants: [{ price: { amount: 9900, currency: 'GBP' } }] },
+    ];
+    const chips = await chipsFor(priced, 'cheaper ones');
+    const under = chips.find((c) => c.label.startsWith('Under'));
+    expect(under?.label).toBe('Under £12.50');
+  });
+
+  it('every chip it offers can be answered without a model', async () => {
+    // The contract that makes them free. A chip that stopped classifying would
+    // silently start costing a turn.
+    const chips = await chipsFor([blueCoat, redTee, blueTee], 'cheaper ones');
+    const before = telemetry.fastLane.total();
+    // 'More like this' is deliberately a search, and only appears for a single
+    // product; this set has three, so every chip here narrows.
+    for (const chip of chips) {
+      const res = await fetch(`${base}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: chip.message, sessionId: 'chips-1' }),
+      });
+      await res.text();
+    }
+    expect(telemetry.fastLane.total()).toBe(before + chips.length);
+    expect(telemetry.tokens.total()).toBe(0);
+  });
+
+  it('offers to widen when a single product leaves nothing to narrow', async () => {
+    // The chip row was empty exactly where a shopper most needs a next step.
+    const chips = await chipsFor([blueTee], 'cheaper ones');
+    expect(chips).toEqual([{ label: 'More like this', message: 'something like the Blue Tee' }]);
+  });
+});

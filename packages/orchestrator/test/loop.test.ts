@@ -317,3 +317,55 @@ describe('reachedHuman', () => {
     expect(reachedHuman({ escalated: false, handedOff: false })).toBe(false);
   });
 });
+
+/**
+ * "Something like this but black", said on the page of the thing being pointed at.
+ *
+ * This is the request the whole multimodal idea rests on: the shopper is looking
+ * at a product, and the interesting half of what they mean is on the page rather
+ * than in the sentence. Keywords alone gave "something like black" — not a
+ * product anyone sells — so the speculative search found nothing, the cards
+ * stayed empty, and the shopper waited for the model to work out what the page
+ * already said.
+ */
+describe('speculating on a refinement of the product being viewed', () => {
+  const page = { type: 'product', title: 'Merino Wool Overcoat' };
+
+  it('folds the product in and keeps the attribute', () => {
+    expect(planSpeculation('something like this but black', page).query).toBe(
+      'black Merino Wool Overcoat',
+    );
+    expect(planSpeculation('do you have this in navy', page).query).toBe('navy Merino Wool Overcoat');
+  });
+
+  it('drops the comparison word, which is not a thing to search for', () => {
+    // "like this but cheaper" wants the product family, ranked differently.
+    expect(planSpeculation('like this but cheaper', page).query).toBe('Merino Wool Overcoat');
+  });
+
+  it('drops the grammar of a variant question', () => {
+    expect(planSpeculation('does this come in blue', page).query).toBe('blue Merino Wool Overcoat');
+  });
+
+  it('says why, so a miss is diagnosable', () => {
+    expect(planSpeculation('something like this but black', page).reason).toMatch(/refinement/);
+  });
+
+  it('leaves a self-contained search alone', () => {
+    // Nothing was pointed at, so there is nothing to fold in.
+    expect(planSpeculation('show me boots', page).query).toBe('boots');
+  });
+
+  it('does not fold a collection title into a product search', () => {
+    // On a collection page "this" refers to the collection, and the title is
+    // not a product — "black Outerwear" is a worse search than the words given.
+    const collection = { type: 'collection', title: 'Outerwear' };
+    expect(planSpeculation('something like this but black', collection).query).not.toContain(
+      'Outerwear',
+    );
+  });
+
+  it('still accepts a bare title, so older callers keep working', () => {
+    expect(planSpeculation('show me boots', 'Merino Wool Overcoat').query).toBe('boots');
+  });
+});

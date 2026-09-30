@@ -468,6 +468,58 @@ occasion only — never a name, never anything inferred from behaviour.
 
 ## 4. Level 4 — The multimodal surface
 
+### Status — built 2026-09-30
+
+1,359 tests pass; both budgets green (`widget.js` 10.66 KB of 15 KB);
+check-launch passes.
+
+**Chips now come from the products that are actually on screen**, and each one is
+**verified against the real filter before being offered** — so it cannot suggest
+a colour nothing has, or one that everything has and would therefore do nothing.
+That verification is what makes the guarantee real rather than asserted: the chip
+cannot disagree with the filter, because the filter is what approved it.
+
+Because the phrases are written to classify, **tapping a chip is answered with no
+model call**. A test asserts exactly that for every chip the generator produces,
+so a chip that stopped classifying would fail rather than silently start costing
+a turn. One colour is offered rather than three — "blue / red / navy" is the same
+axis three times and crowded the price options out entirely on the first attempt.
+
+`More like this` is the exception and is deliberately a model turn: it appears
+only when a single product leaves nothing to narrow, which is precisely where the
+chip row used to be empty and where a shopper most needs a next step.
+
+**Cards can add to the cart**, via `POST /api/cart/add`, and only where a tap can
+mean one thing. With two sizes in stock there is no way to know which the shopper
+wants and a wrong variant is discovered at checkout — so the button is not
+offered and the card stays a link to the product page, where the choice belongs.
+That is the same rule the lane applies to "add this" in text; a tap simply does
+not carry the ambiguity a sentence does. The confirmation is the server's reading
+of the cart, never a total the widget assembled from its own copy of a price.
+
+A **variant picker in the card was declined** rather than built: the product page
+already has Shopify's own, which handles per-option inventory correctly, and
+reimplementing it in a 156px card would be a worse version of something one tap
+away.
+
+**"Something like this but black" now speculates on the right thing.** It used to
+search for `something like black` — not a product anyone sells — so the cards
+stayed empty and the shopper waited for the model to work out what the page they
+were standing on already said. With the product folded in it searches
+`black Merino Wool Overcoat`. Only on a product page, and only when they actually
+pointed: on a collection page "this" means the collection, and the title is not a
+product.
+
+**Barge-in and modality parity were already correct and are now tested** — they
+were not before. Speaking over the assistant cancels the audio *and* aborts the
+generation behind it (stopping the audio alone leaves the model writing and the
+tokens spent), needs more than a cough to trigger, and invalidates speech already
+requested so a retracted sentence cannot arrive late. The composer is never
+removed in the compact voice box: the rail, chips and intro are hidden there
+because they are invitations, but the keyboard is a capability.
+
+
+
 The UI you sketched is largely the UI that exists — cards above the prose,
 chips, a listening box rather than a chat window. What is missing is that the
 cards are currently **read-only**, and the chips come from the page rather than

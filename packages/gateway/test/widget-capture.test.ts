@@ -453,3 +453,37 @@ describe('the device census', () => {
     expect(SRC).toMatch(/voiceDiag\('caps', \{ caps: caps \}\)/);
   });
 });
+
+/**
+ * Barge-in, and the parity that makes voice an option rather than a mode.
+ *
+ * A voice agent that talks over you is unusable regardless of its latency
+ * numbers, and one that takes the keyboard away while it listens has turned an
+ * enhancement into a trap. Neither was tested.
+ */
+describe('speaking over the assistant', () => {
+  it('cancels the audio AND the generation behind it', () => {
+    /**
+     * Stopping the audio alone is not barge-in: the model keeps writing, the
+     * tokens are still spent, and the next sentence arrives to be spoken over
+     * the shopper who interrupted.
+     */
+    const tick = SRC.slice(SRC.indexOf('if (speaking) {'), SRC.indexOf('var recording'));
+    expect(tick).toMatch(/stopPlayback\(\)/);
+    expect(tick).toMatch(/host\.abortInflight\(\)/);
+  });
+
+  it('needs more than a cough to trigger', () => {
+    // A door, a sneeze or a throat-clear must not cancel an answer the shopper
+    // is waiting for.
+    expect(SRC).toMatch(/voice\.playing && voice\.spokeMs > 1\d\d/);
+  });
+
+  it('invalidates speech already requested, so a retraction cannot arrive late', () => {
+    // The grounding tripwire discards a partial answer; audio already in flight
+    // would otherwise arrive afterwards and say the retracted sentence.
+    const fn = SRC.slice(SRC.indexOf('function stopPlayback'), SRC.indexOf('function stopPlayback') + 600);
+    expect(fn).toMatch(/voice\.gen\+\+/);
+    expect(fn).toMatch(/voice\.queue\.length = 0/);
+  });
+});

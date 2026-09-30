@@ -351,6 +351,17 @@ header .x:hover{background:var(--sunk);color:var(--ink)}
   padding:3px 7px;border-radius:999px;background:rgba(255,255,255,.94);color:#14161a;
   box-shadow:0 1px 3px rgba(0,0,0,.18)}
 .pill.out{background:rgba(28,28,30,.9);color:#fff}
+/* The Add button, over the image rather than below the price.
+   Below would push every card taller for a control that only some cards have,
+   and a rail of uneven cards reads as broken. Always visible — revealing it on
+   hover hides it entirely on the phones most shoppers are using. */
+.card .add{position:absolute;bottom:7px;right:7px;z-index:1;
+  border:0;border-radius:999px;padding:5px 11px;font:inherit;font-size:11.5px;font-weight:600;
+  background:var(--accent);color:#fff;cursor:pointer;
+  box-shadow:0 1px 3px rgba(0,0,0,.28);transition:transform .12s ease,opacity .12s ease}
+.card .add:hover{transform:translateY(-1px)}
+.card .add:focus-visible{outline:2px solid #fff;outline-offset:1px}
+.card .add[disabled]{opacity:.85;cursor:default;transform:none}
 .card .meta{padding:9px 10px 11px}
 .card .t{font-size:12.5px;font-weight:600;line-height:1.35;letter-spacing:-.01em;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -669,6 +680,13 @@ textarea::placeholder{color:var(--muted)}
     else els.intro.hidden = true;
   }
 
+  /**
+   * The opening suggestions, before there is anything on screen to narrow.
+   *
+   * Page-shaped guesses, which is all they can be: nothing has been searched
+   * yet. Once an answer arrives the server replaces these with chips derived
+   * from the products actually found — see `showChips`.
+   */
   function chips(page) {
     var sets = {
       product: ['Will this fit me?', 'When would it arrive?', 'Show me similar'],
@@ -676,15 +694,37 @@ textarea::placeholder{color:var(--muted)}
       cart: ['Shipping cost?', 'Return policy', 'Anything I’m missing?'],
       other: ['What do you sell?', 'Shipping & returns', 'Help me choose'],
     };
+    showChips(
+      (sets[page.type] || sets.other).map(function (label) {
+        return { label: label, message: label };
+      }),
+    );
+  }
+
+  /**
+   * Render a chip row. `[]` clears it, which is a real instruction.
+   *
+   * A row left over from the previous answer suggests narrowing products that
+   * are no longer on screen — the same mistake the early product cards made,
+   * where the pictures contradicted the words, and the pictures are what people
+   * believe.
+   *
+   * `label` is what the shopper reads; `message` is what gets sent, and the
+   * server writes it so that the deterministic lane recognises it. That is why
+   * tapping "Cheaper" costs nothing: it never reaches the model.
+   */
+  function showChips(list) {
+    if (!els.chips) return;
     els.chips.innerHTML = '';
-    (sets[page.type] || sets.other).forEach(function (label, i) {
+    (list || []).forEach(function (chip, i) {
+      if (!chip || !chip.label) return;
       var b = document.createElement('button');
       b.className = 'chip';
       b.type = 'button';
-      b.textContent = label;
+      b.textContent = chip.label;
       b.style.animationDelay = 60 + i * 55 + 'ms';
       b.addEventListener('click', function () {
-        els.input.value = label;
+        els.input.value = chip.message || chip.label;
         submit();
       });
       els.chips.appendChild(b);
@@ -853,6 +893,57 @@ textarea::placeholder{color:var(--muted)}
    * sale outright; the opposite is corrected at the cart, where the
    * authoritative message comes from.
    */
+  /**
+   * The one variant a card may add, or null when there is a choice to make.
+   *
+   * A tap must mean exactly one thing. With two sizes in stock there is no way
+   * to know which the shopper wants, and a wrong variant is discovered at
+   * checkout — so the button simply is not offered and the card stays a link to
+   * the product page, where the choice belongs.
+   *
+   * This is the same reasoning that keeps "add this" out of the deterministic
+   * lane server-side: act only where the input is unambiguous.
+   */
+  function soleVariant(p) {
+    var vs = (p && p.variants) || [];
+    var open = vs.filter(variantAvailable);
+    return open.length === 1 && open[0] && open[0].id ? open[0] : null;
+  }
+
+  /**
+   * Add a variant to the cart and report what the cart says afterwards.
+   *
+   * The confirmation comes from the server's reading of the cart, never from
+   * here: a widget that wrote "Added — £189.00" from its own copy of the price
+   * would be stating a total nobody had checked.
+   */
+  async function addVariant(variant, title) {
+    try {
+      var r = await fetch(API + '/api/cart/add', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: state.sessionId,
+          shop: SHOP,
+          variantId: variant.id,
+          quantity: 1,
+        }),
+      });
+      var d = await r.json().catch(function () { return {}; });
+      if (!r.ok || !d.ok) throw new Error(d.error || 'add failed');
+      if (d.sessionId && !state.sessionId) state.sessionId = d.sessionId;
+      addMsg('bot', d.reply || 'Added to your cart.');
+      state.messages.push({ role: 'bot', text: d.reply || 'Added to your cart.' });
+      persist();
+      return true;
+    } catch (e) {
+      // Never a silent failure on a button the shopper pressed. Naming the
+      // product matters: "that didn't work" beside four cards says nothing.
+      addMsg('bot', 'I couldn’t add the ' + (title || 'item') + ' — you can add it from its page.');
+      return false;
+    }
+  }
+
   function variantAvailable(v) {
     if (!v) return true;
     if (v.availability && typeof v.availability.available === 'boolean') return v.availability.available;
@@ -898,6 +989,37 @@ textarea::placeholder{color:var(--muted)}
         '</div><div class="meta"><div class="t"></div><div class="p"></div></div>';
       c.querySelector('.t').textContent = p.title || '';
       c.querySelector('.p').textContent = money(min);
+
+      /**
+       * An Add button, only where a tap can mean one thing.
+       *
+       * Appended rather than built into the innerHTML above because the card may
+       * be an anchor: a button inside a link is not a valid nesting and a click
+       * on it would navigate as well as add. Positioned over the image by CSS,
+       * and it stops the event so the card's own navigation does not fire.
+       */
+      var only = soleVariant(p);
+      if (only && !allOut) {
+        var add = document.createElement('button');
+        add.className = 'add';
+        add.type = 'button';
+        add.textContent = 'Add';
+        add.setAttribute('aria-label', 'Add ' + (p.title || 'item') + ' to cart');
+        add.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (add.disabled) return;
+          add.disabled = true;
+          add.textContent = '…';
+          addVariant(only, p.title).then(function (ok) {
+            add.textContent = ok ? 'Added' : 'Add';
+            // Left disabled on success: tapping again would add a second one,
+            // which is almost never what the shopper meant by a tap.
+            add.disabled = ok;
+          });
+        });
+        c.querySelector('.ph').appendChild(add);
+      }
       if (href) {
         // Plain navigation in the same tab. The session lives in
         // sessionStorage, so the conversation is still there when the panel
@@ -1322,6 +1444,11 @@ textarea::placeholder{color:var(--muted)}
              */
             if (d.final && d.products.length === 0) dropRail();
             else renderCards(d.products, d.products.length === 1 ? 'The match' : 'What I found');
+          } else if (ev === 'chips') {
+            // Derived server-side from the products actually found, and written
+            // so the deterministic lane can answer them — so tapping one is
+            // typically instant and free.
+            showChips(d.chips);
           } else if (ev === 'delta') {
             pending += d.text;
             schedule();

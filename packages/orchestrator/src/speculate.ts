@@ -49,7 +49,59 @@ export interface Speculation {
  * Decide whether to speculatively search, and with what query.
  * Pure and synchronous — this must not add measurable latency.
  */
-export function planSpeculation(message: string, pageTitle?: string): Speculation {
+/**
+ * Words that point at the product the shopper is already looking at.
+ *
+ * "Something like this but black" is the request this exists for. The words that
+ * carry meaning are "black" and whatever the shopper is standing in front of —
+ * and the page knows the second part, so the deictic is a signal to go and get it
+ * rather than a word to search for.
+ */
+const DEICTIC = /\b(?:this|these|those|it|that one|the same|same)\b/i;
+
+/**
+ * Words that describe the RELATION or the asking, not the product.
+ *
+ * Dropped from the query because "like this but cheaper" should speculate on the
+ * product family, not on the word "cheaper" — left in, the search for "like
+ * cheaper" finds nothing and the shopper waits for a second round trip to learn
+ * what the first could have told them. The verbs are here for the same reason:
+ * "does this come in blue" is a question about a colour, and "come" is grammar.
+ */
+const COMPARISON_FILLER = new Set([
+  'come',
+  'comes',
+  'available',
+  'stock',
+  'something',
+  'anything',
+  'like',
+  'similar',
+  'alternative',
+  'alternatives',
+  'instead',
+  'version',
+  'one',
+  'ones',
+  'same',
+  'cheaper',
+  'cheapest',
+  'dearer',
+  'pricier',
+  'bigger',
+  'smaller',
+  'better',
+  'else',
+]);
+
+export function planSpeculation(
+  message: string,
+  page?: { readonly title?: string; readonly type?: string } | string,
+): Speculation {
+  // Accepts a bare title as well as a page, so older callers keep working.
+  const pageTitle = typeof page === 'string' ? page : page?.title;
+  const pageType = typeof page === 'string' ? undefined : page?.type;
+
   const text = message.trim();
   if (text.length < 3) return { shouldSearch: false, query: '', reason: 'too short' };
 
@@ -63,6 +115,32 @@ export function planSpeculation(message: string, pageTitle?: string): Speculatio
   // A bare question with no nouns ("what do you think?") isn't worth a call.
   if (!hasIntentPhrase && keywords.length < 2) {
     return { shouldSearch: false, query: '', reason: 'no product signal' };
+  }
+
+  /**
+   * "Something like this but black", on the page of the thing being pointed at.
+   *
+   * Keywords alone give "something like black", which is not a product anyone
+   * sells — so the speculative search finds nothing, the cards stay empty, and
+   * the shopper waits for the model to work out what was obvious from the page
+   * they are standing on. Folding the title in gives "black Merino Wool
+   * Overcoat", which is the search they meant.
+   *
+   * Only on a product page, and only when they actually pointed: on a collection
+   * page "this" refers to the collection, and the title is not a product.
+   */
+  if (
+    pageType === 'product' &&
+    pageTitle !== undefined &&
+    pageTitle !== '' &&
+    DEICTIC.test(text)
+  ) {
+    const attributes = keywords.filter((w) => !COMPARISON_FILLER.has(w) && !DEICTIC.test(w));
+    return {
+      shouldSearch: true,
+      query: [...attributes, pageTitle].join(' ').trim(),
+      reason: 'refinement of the product being viewed',
+    };
   }
 
   // On a product page, fold the product title in — "does this come in blue?"
