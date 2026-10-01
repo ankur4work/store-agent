@@ -306,6 +306,30 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
    * authoritative data, and `search_catalog` returns whole products with their
    * variants — which is all `get_product` was being asked for.
    */
+  /**
+   * Two spellings of the same product.
+   *
+   * The catalog speaks in gids — `gid://shopify/Product/8944748757044` — and a
+   * storefront page reports `ShopifyAnalytics.meta.page.resourceId`, which is the
+   * bare number. They are the same product and a string compare says they are
+   * not, so the id the page is certain about resolved to nothing and every
+   * page-grounded answer silently fell back to the model.
+   *
+   * Compared on the trailing segment, and only when that segment is all digits:
+   * an opaque id that merely happens to contain a slash must still be matched
+   * exactly.
+   */
+  function sameProductId(a: string, b: string): boolean {
+    if (a === b) return true;
+    const tail = (s: string): string => {
+      const last = s.slice(s.lastIndexOf('/') + 1);
+      return /^\d+$/.test(last) ? last : s;
+    };
+    const ta = tail(a);
+    const tb = tail(b);
+    return ta === tb && /^\d+$/.test(ta);
+  }
+
   async function getProductResilient(id: string, signal?: AbortSignal): Promise<unknown> {
     try {
       return await ucp!.getProduct({ id }, signal);
@@ -324,7 +348,7 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
       )) as unknown as { products?: readonly unknown[] };
       const found = (browse.products ?? []).find((p) => {
         const pid = (p as { id?: unknown }).id;
-        return pid !== undefined && String(pid) === id;
+        return pid !== undefined && sameProductId(String(pid), id);
       });
       if (found === undefined) {
         // Honest, and specific enough to be actionable: the model should search

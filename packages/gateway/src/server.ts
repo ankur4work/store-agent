@@ -8,7 +8,9 @@ import {
   OpenAIModelClient,
   applyFilter,
   buildCachedPrefix,
+  answerPageFact,
   classifyIntent,
+  classifyPageFact,
   extractPreferences,
   suggestChips,
   mergePreferences,
@@ -17,6 +19,7 @@ import {
   type Chip,
   type FastIntent,
   type MerchantPack,
+  type PageFactRequest,
   type ProductFilter,
 } from '@storeagent/orchestrator';
 import { UcpClient } from '@storeagent/ucp-client';
@@ -1290,6 +1293,107 @@ export function createGateway(deps: GatewayDeps): Server {
   }
 
   /**
+   * Answer a price, a stock question or an option list about the product the
+   * shopper is standing on, from the catalog, with no model in the loop.
+   *
+   * Returns false — and says why in the log — the moment anything is missing.
+   * The product cannot be read, the variants carry no price, nobody set
+   * `available`: all of those are the model's turn. This lane may be fast and it
+   * may be silent, but it may never be wrong, because a deterministic wrong
+   * answer arrives in 300 ms sounding completely certain.
+   */
+  async function answerPageFactWithoutModel(
+    request: PageFactRequest,
+    ctx: {
+      session: Session;
+      page: { productId?: string; variantName?: string; title?: string };
+      send: (event: string, data: unknown) => void;
+      speakIfVoice: (text: string) => void;
+      startedAt: number;
+    },
+  ): Promise<boolean> {
+    const { session, page, send, speakIfVoice, startedAt } = ctx;
+    const id = page.productId;
+    if (id === undefined || id === '') return false;
+
+    const ucp = ucpFor(session.shopDomain);
+    if (ucp === undefined) return false; // demo mode: let the model answer
+
+    /**
+     * Through the executor, not the client, so this inherits the `get_product`
+     * repair — the dev store advertises that tool and answers "Tool not found",
+     * and resolving the id out of the catalog is what keeps it answerable.
+     */
+    const executor = createToolExecutor({
+      session,
+      ucp,
+      ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
+      log,
+    });
+
+    let product: unknown;
+    try {
+      const result = (await executor.execute('get_product', { id })) as {
+        product?: unknown;
+        error?: unknown;
+      };
+      if (result.error !== undefined || result.product === undefined) {
+        // Logged, because a lane that declines silently is a lane nobody can
+        // tell is broken — which is exactly how an id-format mismatch between
+        // the page and the catalog hid behind a working model answer.
+        log.info('page_fact_declined', {
+          shop: session.shopDomain,
+          kind: request.kind,
+          why: 'product not resolved',
+          id,
+        });
+        return false;
+      }
+      product = result.product;
+    } catch (err) {
+      log.warn('page_fact_lookup_failed', {
+        shop: session.shopDomain,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+
+    const reply = answerPageFact(
+      request,
+      product as Parameters<typeof answerPageFact>[1],
+      page.variantName,
+      money,
+    );
+    if (reply === undefined) {
+      // The data would not carry the sentence. Counted by the caller.
+      log.info('page_fact_declined', { shop: session.shopDomain, kind: request.kind });
+      return false;
+    }
+
+    /**
+     * The card goes with it. The shopper asked about this product, so showing it
+     * is not decoration — it is where every price they can check against lives,
+     * and the widget formats those from the same variant data this sentence came
+     * from.
+     */
+    send('products', { products: [product], final: true });
+    send('delta', { text: reply });
+    speakIfVoice(reply);
+    send('done', {
+      reply,
+      escalated: false,
+      handedOff: false,
+      // Grounded by construction: every figure in `reply` was copied out of the
+      // catalog result above, and no model saw it.
+      grounded: true,
+      attempts: 0,
+      ms: Date.now() - startedAt,
+      fast: `page_${request.kind}`,
+    });
+    return true;
+  }
+
+  /**
    * Answer a turn with no model call, or decline it.
    *
    * Returns true only if the shopper has been completely answered. Declining is
@@ -1641,7 +1745,23 @@ export function createGateway(deps: GatewayDeps): Server {
       connection: 'keep-alive',
       'x-accel-buffering': 'no', // defeat nginx proxy buffering
     });
+    /**
+     * Emit one SSE frame, or drop it if the stream is already finished.
+     *
+     * The guard is not defensive tidiness — without it an ordinary failed turn
+     * can take the process down. The speculative catalog search runs in parallel
+     * with the model (see loop.ts), and when the model fails fast — a network
+     * error, a 429 that outlives its retries — the turn's `finally` ends the
+     * response while that search is still outstanding. It then resolves, tries to
+     * send its `products` frame, and `res.write` throws ERR_STREAM_WRITE_AFTER_END
+     * from a continuation no `await` is watching: an uncaught exception, which on
+     * a single-instance deployment is every shopper's session, not just this one.
+     *
+     * Dropping is the right behaviour on its own terms, too. There is no client
+     * left to receive the frame.
+     */
     const send = (event: string, data: unknown): void => {
+      if (res.writableEnded) return;
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
@@ -1711,6 +1831,39 @@ export function createGateway(deps: GatewayDeps): Server {
         // The keys, never the values: a size is about a person.
         fields: Object.keys(heard),
       });
+    }
+
+    /**
+     * The three questions about the product in front of them.
+     *
+     * Measured: the model owns 62% of the wait before a voice answer is audible,
+     * and for a price, a stock boolean or an option list it spends it
+     * re-deriving what one catalog read already holds exactly. Tried first
+     * because it is the most specific lane — it needs the page to have named a
+     * product, and the classifier refuses anything with a word it does not
+     * recognise. See page-facts.ts for why that allowlist is the safety property.
+     */
+    const pageFact = body.page === undefined ? undefined : classifyPageFact(body.message, body.page);
+    if (pageFact !== undefined) {
+      const answered = await answerPageFactWithoutModel(pageFact, {
+        session,
+        page: body.page!,
+        send,
+        speakIfVoice,
+        startedAt: Date.now(),
+      });
+      if (answered) {
+        metrics.fastLane.inc({ shop: session.shopDomain, intent: `page_${pageFact.kind}` });
+        log.info('fast_lane', {
+          shop: session.shopDomain,
+          intent: `page_${pageFact.kind}`,
+          why: pageFact.reason,
+        });
+        await sessions.put(session);
+        res.end();
+        return;
+      }
+      metrics.fastLane.inc({ shop: session.shopDomain, intent: `page_${pageFact.kind}_declined` });
     }
 
     const fast = classifyIntent(body.message, {
@@ -2110,7 +2263,21 @@ interface ChatRequest {
   sessionId?: unknown;
   /** The storefront the widget is embedded in — `shop.permanent_domain`. */
   shop?: unknown;
-  page?: { type: 'product' | 'collection' | 'cart' | 'other'; title?: string; productId?: string };
+  /**
+   * What the widget read off the storefront. Identity only — no price and no
+   * availability, because this arrives from the shopper's browser and a modified
+   * page must not be able to put a figure in the assistant's mouth.
+   */
+  page?: {
+    type: 'product' | 'collection' | 'cart' | 'other';
+    title?: string;
+    productId?: string;
+    /** The variant `?variant=` names, and its option value ("Ice"). */
+    variantId?: string;
+    variantName?: string;
+    handle?: string;
+    collectionId?: string;
+  };
   justNavigated?: unknown;
   /** Emit `speak` events with whole utterances alongside the text deltas. */
   voice?: unknown;

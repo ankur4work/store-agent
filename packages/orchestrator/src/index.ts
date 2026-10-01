@@ -23,6 +23,22 @@ export {
 export type { Chip, FastIntent, IntentContext, ProductFilter } from './intents.js';
 export { extractPreferences, mergePreferences, renderPreferences } from './preferences.js';
 export type { Preferences } from './preferences.js';
+export {
+  answerOptions,
+  answerPageFact,
+  answerPrice,
+  answerStock,
+  classifyPageFact,
+  refersToPage,
+} from './page-facts.js';
+export type {
+  FactPage,
+  FactProduct,
+  FactVariant,
+  FormatMoney,
+  PageFactKind,
+  PageFactRequest,
+} from './page-facts.js';
 export { planSpeculation, speculationMatches } from './speculate.js';
 export type { Speculation } from './speculate.js';
 export { DEFAULT_TOOLS, SEARCH_CATALOG, GET_PRODUCT, GET_POLICY, ADD_TO_CART, ESCALATE } from './tools.js';
