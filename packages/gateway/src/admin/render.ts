@@ -678,8 +678,11 @@ function renderHomeSections(vm: AdminViewModel): string {
           <label for="policyNotes">Shipping and returns <span class="sub">optional</span></label>
           <textarea id="policyNotes" name="policyNotes" rows="3" maxlength="${POLICY_NOTES_MAX}"
             placeholder="Free delivery over £75. Returns within 30 days, unworn.">${esc(s.policyNotes)}</textarea>
-          <span class="sub">A short summary it can answer from directly. It still checks your policy
-            pages for anything detailed, and it will never invent a delivery time.</span>
+          <span class="sub">Leave this blank. Your shipping, refund and privacy pages are read
+            straight from your storefront, so there is nothing to copy out by hand and nothing to keep
+            in step when you change them. Fill it in only to put something shorter in front of the
+            full page. Either way it never invents a policy: where it cannot read yours, it says so
+            and offers the customer your team.</span>
         </div>
 
         <div class="field">
