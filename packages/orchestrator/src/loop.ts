@@ -211,10 +211,11 @@ export class Orchestrator {
 
     // --- 1. Speculative prefetch, in parallel with everything below --------
     const plan = planSpeculation(input.message, input.context.page);
+    // Whichever tool the plan chose — on a product page that is `get_product`
+    // with the page's own id, which is authoritative where a name search is a
+    // guess. See Speculation.tool.
     const speculation = plan.shouldSearch
-      ? this.deps.tools
-          .execute('search_catalog', { query: plan.query, limit: 6 }, signal)
-          .catch(() => undefined)
+      ? this.deps.tools.execute(plan.tool, plan.input, signal).catch(() => undefined)
       : undefined;
 
     const ctxBlock = renderTurnContext(input.context);
@@ -248,6 +249,8 @@ export class Orchestrator {
         route: chosenRoute,
         speculation,
         speculatedQuery: plan.query,
+        speculatedTool: plan.tool,
+        speculatedInput: plan.input,
         toolResults,
         usage,
         emit,
@@ -356,6 +359,8 @@ export class Orchestrator {
     route: Route;
     speculation: Promise<unknown> | undefined;
     speculatedQuery: string;
+    speculatedTool: 'search_catalog' | 'get_product';
+    speculatedInput: Record<string, unknown>;
     toolResults: ToolResultRecord[];
     usage: { input: number; output: number; cacheRead: number };
     emit: (e: TurnEvent) => void;
@@ -415,10 +420,20 @@ export class Orchestrator {
 
         let payload: unknown;
         const specQuery = typeof call.input['query'] === 'string' ? call.input['query'] : '';
+        /**
+         * Does the model's call match what was prefetched?
+         *
+         * For a search, loosely — the model rephrases and a near miss still beats
+         * a round trip. For `get_product` it must be the SAME id: handing back
+         * another product's detail would be worse than waiting, because the
+         * answer would be confidently about the wrong thing.
+         */
         const canUseSpeculation =
-          call.name === 'search_catalog' &&
           args.speculation !== undefined &&
-          speculationMatches(args.speculatedQuery, specQuery);
+          call.name === args.speculatedTool &&
+          (call.name === 'get_product'
+            ? String(call.input['id'] ?? '') === String(args.speculatedInput['id'] ?? '')
+            : speculationMatches(args.speculatedQuery, specQuery));
 
         if (canUseSpeculation) {
           payload = await args.speculation;
@@ -429,8 +444,8 @@ export class Orchestrator {
             args.emit({ type: 'speculation_hit', detail: specQuery });
           }
         } else {
-          if (call.name === 'search_catalog' && args.speculation !== undefined) {
-            args.emit({ type: 'speculation_miss', detail: specQuery });
+          if (call.name === args.speculatedTool && args.speculation !== undefined) {
+            args.emit({ type: 'speculation_miss', detail: specQuery || call.name });
           }
           payload = await this.safeExecute(call.name, call.input, args.signal, args.emit);
         }

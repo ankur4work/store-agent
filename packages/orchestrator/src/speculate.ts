@@ -43,6 +43,18 @@ export interface Speculation {
   readonly shouldSearch: boolean;
   readonly query: string;
   readonly reason: string;
+  /**
+   * Which tool to fire ahead of the model.
+   *
+   * `get_product` on a product page is the better guess by a wide margin: the
+   * page already told us WHICH product, so there is nothing to guess at and the
+   * answer is authoritative rather than a name match. "Is this in my size" then
+   * resolves in one pass, from the real variant list, instead of a search for a
+   * title that may match three things.
+   */
+  readonly tool: 'search_catalog' | 'get_product';
+  /** The arguments for that tool, ready to execute. */
+  readonly input: Record<string, unknown>;
 }
 
 /**
@@ -96,17 +108,18 @@ const COMPARISON_FILLER = new Set([
 
 export function planSpeculation(
   message: string,
-  page?: { readonly title?: string; readonly type?: string } | string,
+  page?: { readonly title?: string; readonly type?: string; readonly productId?: string } | string,
 ): Speculation {
   // Accepts a bare title as well as a page, so older callers keep working.
   const pageTitle = typeof page === 'string' ? page : page?.title;
   const pageType = typeof page === 'string' ? undefined : page?.type;
+  const productId = typeof page === 'string' ? undefined : page?.productId;
 
   const text = message.trim();
-  if (text.length < 3) return { shouldSearch: false, query: '', reason: 'too short' };
+  if (text.length < 3) return NOTHING('too short');
 
   for (const p of NON_PRODUCT_INTENT) {
-    if (p.test(text)) return { shouldSearch: false, query: '', reason: 'support intent, not discovery' };
+    if (p.test(text)) return NOTHING('support intent, not discovery');
   }
 
   const hasIntentPhrase = PRODUCT_INTENT.some((p) => p.test(text));
@@ -114,7 +127,7 @@ export function planSpeculation(
 
   // A bare question with no nouns ("what do you think?") isn't worth a call.
   if (!hasIntentPhrase && keywords.length < 2) {
-    return { shouldSearch: false, query: '', reason: 'no product signal' };
+    return NOTHING('no product signal');
   }
 
   /**
@@ -129,30 +142,59 @@ export function planSpeculation(
    * Only on a product page, and only when they actually pointed: on a collection
    * page "this" refers to the collection, and the title is not a product.
    */
-  if (
-    pageType === 'product' &&
-    pageTitle !== undefined &&
-    pageTitle !== '' &&
-    DEICTIC.test(text)
-  ) {
-    const attributes = keywords.filter((w) => !COMPARISON_FILLER.has(w) && !DEICTIC.test(w));
-    return {
-      shouldSearch: true,
-      query: [...attributes, pageTitle].join(' ').trim(),
-      reason: 'refinement of the product being viewed',
-    };
+  if (pageType === 'product' && DEICTIC.test(text)) {
+    /**
+     * They pointed at the product they are standing on.
+     *
+     * With its id, fetch THAT product rather than searching for its name: the
+     * page has already answered "which one", so a search can only reintroduce
+     * ambiguity a title match cannot resolve. This is what lets "does this come
+     * in my size" be answered from the real variant list in a single pass.
+     */
+    /**
+     * By NAME, not by id — measured, against a real store.
+     *
+     * Fetching by id is the better guess in principle: the page already answered
+     * "which one". In practice `get_product` is advertised by `tools/list` and
+     * then answers "Tool not found" on `tools/call`, so speculating on it buys a
+     * guaranteed miss and a wasted round trip. `search_catalog` is the one
+     * catalog tool that is callable everywhere, and it returns whole products
+     * with their variants, which is what the question needs.
+     *
+     * The id still reaches the model through the turn context, and the executor
+     * repairs `get_product` with its own fallback if the model reaches for it.
+     * See getProductResilient in tool-executor.ts.
+     */
+    if (pageTitle !== undefined && pageTitle !== '') {
+      const attributes = keywords.filter((w) => !COMPARISON_FILLER.has(w) && !DEICTIC.test(w));
+      const refined = [...attributes, pageTitle].join(' ').trim();
+      return {
+        shouldSearch: true,
+        query: refined,
+        reason: 'refinement of the product being viewed, searched by name',
+        tool: 'search_catalog',
+        input: { query: refined, limit: 6 },
+      };
+    }
   }
 
   // On a product page, fold the product title in — "does this come in blue?"
   // has almost no standalone keywords but plenty of context.
   const query = keywords.length > 0 ? keywords.join(' ') : (pageTitle ?? '');
-  if (query === '') return { shouldSearch: false, query: '', reason: 'nothing to search for' };
+  if (query === '') return NOTHING('nothing to search for');
 
   return {
     shouldSearch: true,
     query,
     reason: hasIntentPhrase ? 'explicit product intent' : 'keyword density',
+    tool: 'search_catalog',
+    input: { query, limit: 6 },
   };
+}
+
+/** Nothing worth prefetching. */
+function NOTHING(reason: string): Speculation {
+  return { shouldSearch: false, query: '', reason, tool: 'search_catalog', input: {} };
 }
 
 function extractKeywords(text: string): string[] {

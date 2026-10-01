@@ -280,6 +280,64 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
     });
   }
 
+  /**
+   * Fetch one product by id, on a storefront that may not implement it.
+   *
+   * ## Measured against a real store
+   *
+   * `tools/list` advertises `get_product` and `lookup_catalog` with exactly the
+   * schema we send. `tools/call` then answers **"Tool not found: get_product"**
+   * for both. Only `search_catalog` is actually callable.
+   *
+   * That makes the model's `get_product` tool a trap rather than a capability:
+   * its own description tells the model when to reach for it, and every time it
+   * did, the tool errored. Observed live — a shopper on a product page asked what
+   * sizes it came in, `get_product` failed, and the turn escalated to a human for
+   * a question the catalog could answer.
+   *
+   * ## Why a fallback rather than removing the tool
+   *
+   * Removing it would edit the cached prompt prefix on every merchant, and would
+   * give up a capability on the stores where it does work. UCP is also mid-rollout,
+   * so "not found today" is not "never". A fallback is correct on both kinds of
+   * store and needs no per-shop configuration.
+   *
+   * The fallback browses the catalog and picks the matching id. One extra call,
+   * authoritative data, and `search_catalog` returns whole products with their
+   * variants — which is all `get_product` was being asked for.
+   */
+  async function getProductResilient(id: string, signal?: AbortSignal): Promise<unknown> {
+    try {
+      return await ucp!.getProduct({ id }, signal);
+    } catch (err) {
+      deps.log?.warn('get_product_unavailable', {
+        shop: session.shopDomain,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+
+      // Browse and resolve locally. Bounded at the same 100 the index build uses:
+      // a catalog larger than that would have been truncated there too, and this
+      // is the cheaper of the two failures.
+      const browse = (await ucp!.searchCatalog(
+        { query: '', pagination: { limit: 100 } },
+        signal,
+      )) as unknown as { products?: readonly unknown[] };
+      const found = (browse.products ?? []).find((p) => {
+        const pid = (p as { id?: unknown }).id;
+        return pid !== undefined && String(pid) === id;
+      });
+      if (found === undefined) {
+        // Honest, and specific enough to be actionable: the model should search
+        // by name rather than retry an id that cannot be resolved.
+        return {
+          error: true,
+          message: `Could not resolve product ${id}. Use search_catalog by name instead.`,
+        };
+      }
+      return { product: found };
+    }
+  }
+
   async function rebuildIndex(): Promise<void> {
     // Shared with the webhook worker in search/refresh.ts. Two copies of "fetch
     // 100 products and build" drift, and the limit in particular is a decision
@@ -476,7 +534,7 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
 
         case 'get_product': {
           const id = String(input['id'] ?? '');
-          if (ucp) return withDisplayPrices(await ucp.getProduct({ id }, signal));
+          if (ucp) return withDisplayPrices(await getProductResilient(id, signal));
           const found = searchDemoCatalog('', 100).products.find((p) => p.id === id);
           if (found === undefined) return { error: true, message: `No product with id ${id}` };
           return withDisplayPrices({ product: found });

@@ -242,7 +242,27 @@ export function prefixFingerprint(blocks: readonly SystemBlock[]): string {
 export interface TurnContext {
   readonly sessionId: string;
   /** Where the shopper is right now. */
-  readonly page?: { readonly type: 'product' | 'collection' | 'cart' | 'other'; readonly title?: string; readonly productId?: string };
+  /**
+   * What the shopper is looking at, read from Shopify's own page metadata.
+   *
+   * Identity only — no price and no stock. This arrives from the shopper's
+   * browser, so treating it as fact would let a modified page put a figure in the
+   * assistant's mouth. The ids are what matter: with them the catalog can be
+   * asked authoritatively, which is where every number comes from.
+   */
+  readonly page?: {
+    readonly type: 'product' | 'collection' | 'cart' | 'other';
+    /** The product or collection's own name, NOT the browser tab caption. */
+    readonly title?: string;
+    readonly productId?: string;
+    /** The variant the shopper has actually selected, from `?variant=`. */
+    readonly variantId?: string;
+    /** How that variant reads, e.g. "Large / Blue". */
+    readonly variantName?: string;
+    /** URL handle, which survives translation and markets prefixes. */
+    readonly handle?: string;
+    readonly collectionId?: string;
+  };
   /** Current cart summary, so the agent never has to ask. */
   readonly cart?: { readonly itemCount: number; readonly subtotalMinor?: number };
   /** True when the shopper just navigated — lets the agent acknowledge it. */
@@ -264,11 +284,46 @@ export interface TurnContext {
 export function renderTurnContext(ctx: TurnContext): string {
   const parts: string[] = [];
   if (ctx.page) {
-    parts.push(
-      ctx.page.type === 'product' && ctx.page.title
-        ? `Shopper is viewing the product "${ctx.page.title}".`
-        : `Shopper is on a ${ctx.page.type} page${ctx.page.title ? ` ("${ctx.page.title}")` : ''}.`,
-    );
+    /**
+     * Say precisely what is on screen, and say what "this" refers to.
+     *
+     * The previous version of this line could only manage "Shopper is viewing
+     * the product X", where X was a browser tab caption. A shopper asking "does
+     * this come in my size" was therefore answered from a guess at the product's
+     * name — while Shopify had published the id, the variant list and the
+     * selected variant on the page the whole time.
+     *
+     * Naming the deictic explicitly matters more than it looks: without it the
+     * model has to infer that "this", "it" and "these" mean the product in the
+     * context block, and it does not reliably do so when the shopper's sentence
+     * mentions anything else.
+     */
+    const p = ctx.page;
+    if (p.type === 'product' && (p.title !== undefined || p.productId !== undefined)) {
+      const named = p.title === undefined ? 'a product' : `"${p.title}"`;
+      const selected = p.variantName === undefined ? '' : `, with ${p.variantName} selected`;
+      parts.push(
+        `Shopper is on the product page for ${named}${selected}. ` +
+          `"this", "it" and "these" mean THAT product unless they say otherwise.`,
+      );
+      // The id is for tools, not for the shopper, and is never spoken.
+      if (p.productId !== undefined) {
+        parts.push(
+          `Its product id is ${p.productId}${
+            p.variantId === undefined ? '' : ` and the selected variant id is ${p.variantId}`
+          } — use get_product with that id rather than searching by name, and never read an id aloud.`,
+        );
+      }
+    } else if (p.type === 'collection') {
+      parts.push(
+        `Shopper is browsing the ${p.title === undefined ? 'a' : `"${p.title}"`} collection. ` +
+          `"these" means things in it.`,
+      );
+    } else if (p.type === 'cart') {
+      parts.push('Shopper is looking at their cart.');
+    } else if (p.title !== undefined) {
+      parts.push(`Shopper is on the page "${p.title}".`);
+    }
   }
   if (ctx.cart) {
     parts.push(

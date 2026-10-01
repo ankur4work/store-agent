@@ -273,3 +273,79 @@ describe('device capability census', () => {
     });
   });
 });
+
+/**
+ * `get_product` on a storefront that advertises it and will not call it.
+ *
+ * Measured against a real store: `tools/list` returns `get_product` and
+ * `lookup_catalog` with exactly the schema we send, and `tools/call` answers
+ * "Tool not found" for both. Only `search_catalog` is callable.
+ *
+ * That made the model's own `get_product` tool a trap — its description tells the
+ * model when to use it, and every use errored. Observed live: a shopper on a
+ * product page asked what sizes it came in, the tool failed, and the turn
+ * escalated to a human for a question the catalog could answer.
+ */
+describe('get_product on a store that does not implement it', () => {
+  const PRODUCT = { id: 'gid://shopify/Product/1', title: 'The Complete Snowboard', variants: [{ id: 'v1' }] };
+
+  function ucpDouble(opts: { getProductWorks: boolean; catalog?: unknown[] }) {
+    const calls: string[] = [];
+    return {
+      calls,
+      client: {
+        async getProduct() {
+          calls.push('get_product');
+          if (!opts.getProductWorks) throw new Error('UCP get_product → Invalid params');
+          return { product: PRODUCT };
+        },
+        async searchCatalog() {
+          calls.push('search_catalog');
+          return { products: opts.catalog ?? [PRODUCT] };
+        },
+      },
+    };
+  }
+
+  async function run(ucp: unknown, id: string) {
+    const { createToolExecutor } = await import('../src/tool-executor.js');
+    const exec = createToolExecutor({
+      session: { id: 's', shopDomain: 'acme.myshopify.com', history: [], updatedAt: 0 },
+      ucp: ucp as never,
+      log: { warn: () => {} },
+    });
+    return exec.execute('get_product', { id });
+  }
+
+  it('uses the real tool when the store implements it', async () => {
+    const { client, calls } = ucpDouble({ getProductWorks: true });
+    const out = (await run(client, 'gid://shopify/Product/1')) as { product?: { title?: string } };
+    expect(out.product?.title).toBe('The Complete Snowboard');
+    // No fallback needed, so no extra call was spent.
+    expect(calls).toEqual(['get_product']);
+  });
+
+  it('resolves through the catalog when the store does not', async () => {
+    const { client, calls } = ucpDouble({ getProductWorks: false });
+    const out = (await run(client, 'gid://shopify/Product/1')) as { product?: { title?: string } };
+    expect(out.product?.title).toBe('The Complete Snowboard');
+    expect(calls).toEqual(['get_product', 'search_catalog']);
+  });
+
+  it('answers rather than erroring, which is what stopped the escalation', async () => {
+    // The failure mode being fixed: an errored tool, and a shopper handed to a
+    // human for a question the catalog could answer.
+    const { client } = ucpDouble({ getProductWorks: false });
+    const out = (await run(client, 'gid://shopify/Product/1')) as { error?: unknown };
+    expect(out.error).toBeUndefined();
+  });
+
+  it('is honest, and actionable, when the id cannot be resolved at all', async () => {
+    // Telling the model to search by name is the useful instruction here; a bare
+    // failure invites it to retry the same id.
+    const { client } = ucpDouble({ getProductWorks: false, catalog: [{ id: 'other' }] });
+    const out = (await run(client, 'gid://shopify/Product/1')) as { error?: boolean; message?: string };
+    expect(out.error).toBe(true);
+    expect(out.message).toMatch(/search_catalog by name/);
+  });
+});

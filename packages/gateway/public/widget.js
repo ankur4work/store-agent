@@ -795,12 +795,149 @@ textarea::placeholder{color:var(--muted)}
     persist();
   }
 
+  /**
+   * What the shopper is actually looking at.
+   *
+   * ## What this replaces
+   *
+   * A URL pattern and `document.title`. That is a page TYPE and a browser tab
+   * caption — and on Shopify the caption is "The Complete Snowboard – test
+   * ankur", so the shop's own name was being fed into product searches as though
+   * it were part of what the shopper wanted. The `productId` field the server
+   * has always accepted was never once populated.
+   *
+   * So the assistant knew it was "on a product page" and could not name the
+   * product, identify it, or tell which variant was selected. Asked "is this in
+   * my size?" it had to guess from a tab title.
+   *
+   * ## Where the truth already was
+   *
+   * Shopify publishes it on every Online Store page. `ShopifyAnalytics.meta`
+   * carries the page type, the resource id, the product and its variants;
+   * `?variant=` names the one the shopper has actually chosen; themes emit
+   * JSON-LD and Open Graph tags. None of it was being read.
+   *
+   * Sources are tried in order of authority and each is optional — themes differ
+   * wildly, merchants edit them, and a missing object must degrade to the old
+   * behaviour rather than throw on a storefront we do not control.
+   *
+   * ## What is deliberately NOT sent
+   *
+   * Price and availability. They are on the page and it would be easy — and it
+   * would be wrong: this object comes from the shopper's browser, so treating it
+   * as fact would let a modified page put a price in the assistant's mouth. That
+   * is exactly what the grounding layer exists to prevent.
+   *
+   * What IS sent is identity — which product, which variant. The server uses it
+   * to look the product up through the catalog, authoritatively, and answers from
+   * that. The page tells us what they are looking at; Shopify tells us what is
+   * true about it.
+   */
   function detectPage() {
+    var out = { type: 'other' };
+    try {
+      var meta = (window.ShopifyAnalytics && window.ShopifyAnalytics.meta) || window.meta || {};
+      var mp = meta.page || {};
+
+      // Shopify's own page type is more reliable than a path regex: it is correct
+      // on translated storefronts, custom routes and markets-prefixed paths
+      // (/en-gb/products/...), where the pattern below is not.
+      out.type = normalisePageType(mp.pageType) || pageTypeFromPath();
+
+      var product = meta.product || {};
+      var id = product.id || (mp.resourceType === 'product' ? mp.resourceId : undefined);
+      if (id) out.productId = String(id);
+
+      // The variant the shopper has actually selected, which is the whole
+      // question behind "does this come in my size" and "how much is it".
+      var variantId = urlParam('variant') || meta.selectedVariantId;
+      if (variantId) out.variantId = String(variantId);
+      var variants = product.variants;
+      if (variantId && variants && variants.length) {
+        for (var i = 0; i < variants.length; i++) {
+          if (String(variants[i].id) === String(variantId)) {
+            if (variants[i].name) out.variantName = String(variants[i].name);
+            break;
+          }
+        }
+      }
+      if (!out.variantName && variants && variants.length === 1 && variants[0].name) {
+        out.variantName = String(variants[0].name);
+      }
+
+      if (out.type === 'collection' && mp.resourceType === 'collection' && mp.resourceId) {
+        out.collectionId = String(mp.resourceId);
+      }
+      var handle = handleFromPath();
+      if (handle) out.handle = handle;
+
+      out.title = cleanTitle(product) || document.title;
+    } catch (e) {
+      // A storefront we do not control. Fall back to exactly what this did
+      // before rather than cost the shopper a turn over page metadata.
+      out = { type: pageTypeFromPath(), title: document.title };
+    }
+    return out;
+  }
+
+  function normalisePageType(t) {
+    if (!t) return '';
+    var s = String(t).toLowerCase();
+    if (s === 'product') return 'product';
+    if (s === 'collection' || s === 'list-collections') return 'collection';
+    if (s === 'cart') return 'cart';
+    return 'other';
+  }
+
+  function pageTypeFromPath() {
     var p = location.pathname;
-    if (/\/products\//.test(p)) return { type: 'product', title: document.title };
-    if (/\/collections\//.test(p)) return { type: 'collection', title: document.title };
-    if (/\/cart/.test(p)) return { type: 'cart' };
-    return { type: 'other', title: document.title };
+    if (/\/products\//.test(p)) return 'product';
+    if (/\/collections\//.test(p)) return 'collection';
+    if (/\/cart/.test(p)) return 'cart';
+    return 'other';
+  }
+
+  /** The handle, which survives translation and markets prefixes. */
+  function handleFromPath() {
+    var m = /\/(?:products|collections)\/([^/?#]+)/.exec(location.pathname);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  function urlParam(name) {
+    try {
+      return new URLSearchParams(location.search).get(name) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * The product's own name, not the tab caption.
+   *
+   * `document.title` carries the shop name and a separator, and that noise ended
+   * up inside search queries. Shopify's analytics object has no title, so the
+   * name comes from JSON-LD or Open Graph — both of which themes emit and both of
+   * which hold the product name alone.
+   */
+  function cleanTitle(product) {
+    if (product && product.name) return String(product.name);
+    try {
+      var og = document.querySelector('meta[property="og:title"]');
+      if (og && og.content) return String(og.content).trim();
+      var blocks = document.querySelectorAll('script[type="application/ld+json"]');
+      for (var i = 0; i < blocks.length; i++) {
+        var data = JSON.parse(blocks[i].textContent || '{}');
+        var nodes = [].concat(data['@graph'] || data);
+        for (var j = 0; j < nodes.length; j++) {
+          if (nodes[j] && nodes[j]['@type'] === 'Product' && nodes[j].name) {
+            return String(nodes[j].name).trim();
+          }
+        }
+      }
+    } catch (e) {
+      /* a theme with malformed JSON-LD is not a reason to fail a turn */
+    }
+    return '';
   }
 
   function addMsg(role, text, instant) {
