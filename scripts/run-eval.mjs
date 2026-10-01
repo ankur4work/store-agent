@@ -24,7 +24,17 @@ if (!env.OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const MODEL = process.env.EVAL_MODEL ?? 'gpt-5.6-terra';
+/**
+ * The model production actually runs, not the one this script used to default to.
+ *
+ * It defaulted to `gpt-5.6-terra` while the deployed gateway answers on
+ * `gpt-5.6-luna` (`/healthz` reports it). So the gate that is supposed to decide
+ * whether answers are safe to ship was grading a model that does not serve
+ * shoppers — and grounding behaviour is exactly the thing that differs between
+ * model tiers. Reads `MODEL_WORKHORSE` so it follows the deployment's own setting,
+ * with `EVAL_MODEL` still overriding for a deliberate comparison.
+ */
+const MODEL = process.env.EVAL_MODEL ?? env.MODEL_WORKHORSE ?? 'gpt-5.6-luna';
 const models = { classify: MODEL, workhorse: MODEL, escalation: MODEL };
 const selector = process.argv[2];
 

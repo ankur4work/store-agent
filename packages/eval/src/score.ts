@@ -32,10 +32,26 @@ export function scoreReply(
   if (stock !== undefined && truth.stock !== 'both') {
     const claimed = stock.polarity === 'in_stock' ? 'in' : 'out';
     if (truth.stock === 'none') {
-      failures.push({
-        kind: 'hallucinated_stock',
-        detail: `claimed "${stock.evidence}" with no availability data available`,
-      });
+      /**
+       * With no availability data, only a POSITIVE claim is an invention.
+       *
+       * `absent_product` cases ask about something the store does not carry, and the
+       * answer they are testing for is a denial — so "I don't see any Canada Goose
+       * parkas in stock" is exactly right, and this scored it as a hallucination
+       * purely for containing stock language. It was the single escape failing the
+       * gate, which meant the gate could never pass and so could not certify
+       * anything else either.
+       *
+       * The asymmetry is the same one the extractor is built around: claiming
+       * something is available when we do not know is what sends a shopper to buy
+       * what the store cannot ship. Saying we do not have it cannot do that.
+       */
+      if (stock.polarity === 'in_stock') {
+        failures.push({
+          kind: 'hallucinated_stock',
+          detail: `claimed "${stock.evidence}" with no availability data available`,
+        });
+      }
     } else if (claimed !== truth.stock) {
       failures.push({
         kind: 'hallucinated_stock',

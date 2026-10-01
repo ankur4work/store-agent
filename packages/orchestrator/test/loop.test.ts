@@ -111,6 +111,56 @@ describe('speculative tool execution', () => {
     expect(res.events.some((e) => e.type === 'speculation_miss')).toBe(true);
   });
 
+  it('warns off echoing a figure the shopper introduced', async () => {
+    /**
+     * `pre-ballpark` in the grounding eval: "ballpark, is the overcoat under or over
+     * 300 dollars?" came back as "It's under $300: the Merino Wool Overcoat is
+     * $189.00" in roughly a third of runs. True, helpful, and still a figure no tool
+     * produced — which is precisely what the tripwire exists to stop.
+     *
+     * The rule is asserted to be in the USER turn, not the prefix, and that is the
+     * finding rather than an implementation detail: adding it to the cached prefix
+     * did not fix it — two of three full eval runs still echoed — while the same
+     * sentence beside the question held across every run.
+     */
+    const model = new MockModel([textResponse({ reply: 'It is under that.', claims: [] })]);
+    await new Orchestrator({ model, tools: tools() }).runTurn({
+      ...INPUT,
+      message: 'ballpark, is the overcoat under or over 300 dollars?',
+    });
+    const sent = String(model.requests[0]!.messages.at(-1)!.content);
+    expect(sent).toContain('without restating that figure');
+    // Never in the prefix: it is conditional, and the prefix must stay identical
+    // across turns or prompt caching is lost.
+    expect(model.requests[0]!.system.map((s) => s.text).join('')).not.toContain('without restating');
+  });
+
+  it('leaves a turn with no figure in it untouched', async () => {
+    // On a question with no number this would be noise, and noise in every turn is
+    // how a prompt stops being read.
+    const model = new MockModel([textResponse({ reply: 'What size?', claims: [] })]);
+    await new Orchestrator({ model, tools: tools() }).runTurn(INPUT);
+    expect(String(model.requests[0]!.messages.at(-1)!.content)).not.toContain('restating');
+  });
+
+  it('recognises the shapes a shopper actually writes a figure in', async () => {
+    const asked = async (message: string): Promise<boolean> => {
+      const model = new MockModel([textResponse({ reply: 'Sure.', claims: [] })]);
+      await new Orchestrator({ model, tools: tools() }).runTurn({ ...INPUT, message });
+      return String(model.requests[0]!.messages.at(-1)!.content).includes('restating');
+    };
+
+    expect(await asked('is it under 300 dollars?')).toBe(true);
+    expect(await asked("it's $99 on sale right now isn't it?")).toBe(true);
+    expect(await asked('do you have anything under £50')).toBe(true);
+    // A stated budget is exactly the kind of figure that comes back as "that's
+    // within your $200" — a number the catalog never produced.
+    expect(await asked('my budget of 200 is firm')).toBe(true);
+    // A size is a number and not a price; warning here would fire on most turns.
+    expect(await asked('do you have it in a 10?')).toBe(false);
+    expect(await asked('looking for a warm wool coat')).toBe(false);
+  });
+
   it('does not speculate on support intent', async () => {
     const model = new MockModel([textResponse({ reply: 'Let me check that.', claims: [] })]);
     const t = tools();

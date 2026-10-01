@@ -108,6 +108,43 @@ describe('detectStock', () => {
     expect(detectStock("It isn't currently in stock.")?.polarity).toBe('out_of_stock');
   });
 
+  /**
+   * Saying what the store does NOT have, and naming it.
+   *
+   * Found by `abs-competitor-product` in the grounding eval. The negation rule only
+   * looked for a negation sitting directly against the stock phrase, so once the
+   * thing being refused was named — "we don't have a Canada Goose parka in stock" —
+   * the negation was several words away, "in stock" matched on its own, and the
+   * reply was recorded as claiming the parka WAS available. The exact opposite of
+   * what it says, and the production tripwire shares this function: a correct
+   * refusal was treated as an unsupported availability claim, throwing the
+   * generation away and pushing a good turn towards a retry and a handoff.
+   */
+  it.each([
+    ['We don’t have a Canada Goose parka in stock.', 'out_of_stock'],
+    ['We do not have that in stock.', 'out_of_stock'],
+    ['I can’t find a Canada Goose parka in stock.', 'out_of_stock'],
+    ['We don’t carry that size in stock.', 'out_of_stock'],
+    ['We haven’t got it in stock.', 'out_of_stock'],
+  ])('%s → %s', (text, polarity) => {
+    expect(detectStock(text)?.polarity).toBe(polarity);
+  });
+
+  /**
+   * A negation must not swallow a positive claim that follows it.
+   *
+   * Missing an in-stock claim is the dangerous direction — it is the one that tells
+   * a shopper to buy something the store does not have — so a contrastive clause or
+   * a sentence end ends the negation's reach.
+   */
+  it.each([
+    ['We don’t carry Canada Goose, but this parka is in stock.', 'in_stock'],
+    ['We don’t have that; the Ice is in stock.', 'in_stock'],
+    ['We don’t have that. The Ice is in stock.', 'in_stock'],
+  ])('%s → %s', (text, polarity) => {
+    expect(detectStock(text)?.polarity).toBe(polarity);
+  });
+
   it('returns undefined when no stock language is present', () => {
     expect(detectStock('What size do you need?')).toBeUndefined();
   });

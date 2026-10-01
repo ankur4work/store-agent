@@ -117,6 +117,38 @@ export function detectStock(
     return { polarity: 'out_of_stock', evidence: negated[0] };
   }
 
+  /**
+   * "We don't have a Canada Goose parka in stock."
+   *
+   * The rule above only sees a negation sitting directly against the stock
+   * phrase. Say what is *not* held and name it, and the negation is several words
+   * away — so this sentence fell through to the IN_STOCK patterns, matched
+   * "in stock", and was reported as a claim that the parka WAS in stock.
+   *
+   * It is the exact opposite of what the sentence says, and it is not only an eval
+   * artefact: the production tripwire shares this function, so a correct "we don't
+   * stock that" was recorded as an unsupported availability claim, throwing the
+   * generation away and pushing a turn that had answered perfectly well towards a
+   * retry and a handoff. Found by `abs-competitor-product` in the grounding eval.
+   *
+   * Bounded to the same sentence, because "We don't have that. The Ice is in
+   * stock." is two claims and only the first is negative.
+   *
+   * Bounded again at a contrastive clause, which is the direction that must not be
+   * got wrong. "We don't carry Canada Goose, but this parka is in stock" makes two
+   * claims, and the second is a real positive one — reading the whole sentence as
+   * negative would hand it to the out-of-stock check and leave the availability
+   * claim unvalidated. Missing an in-stock claim is the dangerous failure: it is
+   * the one that tells a shopper to buy something the store does not have.
+   */
+  const negatedHolding =
+    /\b(?:do(?:es)?n[’']?t|do(?:es)? not|did(?:n[’']?t)? |cannot|can[’']?t|won[’']?t|have(?:n[’']?t)? not|haven[’']?t)\s+(?:\w+\s+){0,2}?(?:have|got|carry|stock|see|find|offer|sell)\b(?:(?!\b(?:but|however|though|although|whereas)\b)[^.!?;]){0,60}?\b(?:in stock|available(?:\s+now)?)\b/i.exec(
+      text,
+    );
+  if (negatedHolding && !aboutSystems(text, negatedHolding.index) && !isName(negatedHolding)) {
+    return { polarity: 'out_of_stock', evidence: negatedHolding[0] };
+  }
+
   for (const p of OUT_OF_STOCK) {
     // Every occurrence, not just the first: with one product named after a
     // stock phrase, stopping at the first match would let a real out-of-stock

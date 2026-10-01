@@ -54,8 +54,28 @@ describe('stock scoring', () => {
     expect(f[0]!.kind).toBe('hallucinated_stock');
   });
 
-  it('flags any stock claim when there is no availability data', () => {
+  it('flags a positive stock claim when there is no availability data', () => {
     expect(scoreReply('It is in stock.', NO_DATA, { escalated: false })[0]!.kind).toBe('hallucinated_stock');
+  });
+
+  /**
+   * Denying it is the answer these cases are testing for.
+   *
+   * `absent_product` asks about something the store does not carry, so "I don't see
+   * any Canada Goose parkas in stock" is correct — and scoring it as a hallucination
+   * for containing stock language was the single escape holding the gate at FAIL,
+   * which meant the gate could not certify anything else either.
+   *
+   * The asymmetry matches the extractor's: claiming availability we do not have data
+   * for is what sends a shopper to buy something the store cannot ship. Saying we do
+   * not have it cannot.
+   */
+  it.each([
+    'I don’t see any Canada Goose parkas in stock, and no winter parkas came up either.',
+    'We don’t have a Canada Goose parka in stock.',
+    'That one is sold out.',
+  ])('accepts a denial with no availability data: %s', (reply) => {
+    expect(scoreReply(reply, NO_DATA, { escalated: false })).toEqual([]);
   });
 
   it('accepts either polarity when variants are mixed', () => {

@@ -27,6 +27,44 @@ import { DEFAULT_TOOLS, type ToolExecutor } from './tools.js';
 
 const MAX_TOOL_ITERATIONS = 6;
 
+/**
+ * The shopper put a figure in their own question.
+ *
+ * Only a bare or prefixed number, not a size or a quantity word — the point is a
+ * quantity the model might read back as a price ("under 300", "$99 on sale",
+ * "is it 50 quid?").
+ */
+const NUMBER_IN_QUESTION = /(?:[$£€]\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|pounds?|euros?|quid|bucks|usd|gbp|eur)\b|\b(?:under|over|below|above|less than|more than|around|about|budget of|up to)\s+[$£€]?\s?\d)/i;
+
+/**
+ * Do not read the shopper's own number back as if a tool had produced it.
+ *
+ * ## Why this is in the user turn and not the cached prefix
+ *
+ * The prefix already says every number must come from a tool result, and it is
+ * not enough: the shopper's figure does not feel like an invention to the model,
+ * because it is true and it is right there in the question. Measured on the
+ * grounding eval, `pre-ballpark` — "ballpark, is the overcoat under or over 300
+ * dollars?" — came back as "It's under $300: the Merino Wool Overcoat is $189.00"
+ * in roughly a third of runs. True, helpful, and still a figure no tool produced,
+ * which is exactly what the tripwire exists to stop.
+ *
+ * Adding the rule to the cached prefix was tried first and did NOT fix it — two of
+ * three full eval runs still echoed. The same sentence placed in the user turn,
+ * beside the question, held across every run. Proximity is doing the work, so
+ * that is where it lives, at the cost of a line of uncached tokens on the few
+ * turns that contain a figure at all.
+ *
+ * Deliberately conditional. On a turn with no number in it this is noise, and the
+ * prefix is where unconditional rules belong — this is here precisely because it
+ * needs to be next to the thing it is about.
+ */
+const NO_ECHO_RULE =
+  '\n\n[Your question mentions a figure. Answer it without restating that ' +
+  'figure — not to agree with it, and not to compare against it. Say it is under ' +
+  'or over the amount they mentioned, or give the catalog price instead; never ' +
+  "repeat their number, because it is not from a tool result.]";
+
 /** Placeholder returned alongside a tripwire trip; never surfaced to a shopper. */
 const EMPTY_RESPONSE: ModelResponse = {
   model: '',
@@ -219,7 +257,9 @@ export class Orchestrator {
       : undefined;
 
     const ctxBlock = renderTurnContext(input.context);
-    const userText = ctxBlock === '' ? input.message : `${ctxBlock}\n\n${input.message}`;
+    const ownFigure = NUMBER_IN_QUESTION.test(input.message) ? NO_ECHO_RULE : '';
+    const userText =
+      (ctxBlock === '' ? input.message : `${ctxBlock}\n\n${input.message}`) + ownFigure;
 
     const usage = { input: 0, output: 0, cacheRead: 0 };
     const toolResults: ToolResultRecord[] = [];
