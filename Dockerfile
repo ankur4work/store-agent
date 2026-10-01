@@ -55,9 +55,18 @@ RUN npm run build
 # its absence here means the budget check was skipped, not that a file is
 # missing. Serving the un-minified source to every shopper is a silent 2.5x
 # regression on the one asset §12 gates.
+#
+# widget-voice.min.js is checked for the same reason and one more. It is fetched
+# at runtime by the host on the first mic press, so its absence is not a build
+# error and not a startup error — it is a 404 the first time a shopper reaches
+# for the microphone, on a path that cannot report it back to us. The budget
+# check that produces it is also what keeps the two bundles honest about which
+# one every page view pays for.
 RUN test -f packages/gateway/dist/src/main.js \
  && test -f packages/gateway/public/widget.js \
- && test -f packages/gateway/public/widget.min.js
+ && test -f packages/gateway/public/widget.min.js \
+ && test -f packages/gateway/public/widget-voice.js \
+ && test -f packages/gateway/public/widget-voice.min.js
 
 # --- runtime ---------------------------------------------------------------
 FROM node:24-slim AS runtime
