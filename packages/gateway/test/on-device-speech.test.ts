@@ -98,8 +98,18 @@ describe('the setting', () => {
     }
     // A merchant deciding this needs to know it costs their customer a download.
     expect(html).toMatch(/one-time download/);
-    // And that it is about the caption, not the answer.
-    expect(html).toMatch(/answer itself is unaffected/i);
+    /**
+     * And that it is about the caption, not the answer.
+     *
+     * This used to assert "answer itself is unaffected", which was true but let a
+     * stronger falsehood sit beside it: the same paragraph claimed "no audio is
+     * sent to a speech service". The recording is uploaded for transcription on
+     * every path, in every mode, so the copy now says so outright — and this
+     * assertion follows it, because a merchant may repeat either sentence to their
+     * own customers.
+     */
+    expect(html).toMatch(/does not change where the answer comes from/i);
+    expect(html).not.toMatch(/no audio is sent/i);
   });
 });
 
