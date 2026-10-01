@@ -39,6 +39,28 @@ export function esc(s: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Has this merchant actually overridden any of the optional fields?
+ *
+ * The overrides are collapsed because none of them needs filling in — the
+ * assistant has a working default for every one, and presenting five empty boxes
+ * made a store that was ready to go look like a form to complete. But a merchant
+ * who HAS written a brand voice must not open settings and find it gone: hiding
+ * their own words reads as having lost them. So the section starts open whenever
+ * there is something of theirs in it.
+ */
+export function hasExtras(s: {
+  brandVoice: string;
+  policyNotes: string;
+  promoteProducts: string;
+  neverRecommend: string;
+  greeting: string;
+}): boolean {
+  return [s.brandVoice, s.policyNotes, s.promoteProducts, s.neverRecommend, s.greeting].some(
+    (v) => v.trim() !== '',
+  );
+}
+
 export interface AdminViewModel {
   readonly shop: string;
   readonly apiKey: string;
@@ -366,6 +388,15 @@ export function renderAdmin(vm: AdminViewModel): string {
 
   form{display:flex;flex-direction:column;gap:16px}
   .field{display:flex;flex-direction:column;gap:6px}
+  /* The optional overrides, closed by default. See the summary's own wording for
+     why they are not presented as setup: every one of them works left blank. */
+  details.extras{border-top:1px solid var(--line);padding-top:14px;margin-top:4px}
+  details.extras>summary{cursor:pointer;font-weight:600;font-size:14px;list-style:none}
+  details.extras>summary::-webkit-details-marker{display:none}
+  details.extras>summary::before{content:'▸ ';color:var(--sub)}
+  details.extras[open]>summary::before{content:'▾ '}
+  details.extras>summary .sub{display:block;font-weight:400;margin-top:4px}
+  details.extras .field{margin-top:16px}
   label{font-size:13.5px;font-weight:550}
   .sub{font-size:12.5px;color:var(--sub);font-weight:400}
   input[type=text],select,input[type=number],textarea{
@@ -665,6 +696,14 @@ function renderHomeSections(vm: AdminViewModel): string {
             on the default uses it only where it is already there.</span>
         </div>
 
+        <details class="extras"${hasExtras(s) ? ' open' : ''}>
+          <summary>Put it in your own words
+            <span class="sub">Nothing in here needs filling in. Left alone it sounds like a
+              knowledgeable shop assistant, greets customers based on the page they are on, and
+              answers about shipping and returns from your own policy pages. Open this only to
+              override one of those.</span>
+          </summary>
+
         <div class="field">
           <label for="brandVoice">How it should sound <span class="sub">optional</span></label>
           <textarea id="brandVoice" name="brandVoice" rows="3" maxlength="${BRAND_VOICE_MAX}"
@@ -707,6 +746,7 @@ function renderHomeSections(vm: AdminViewModel): string {
             placeholder="Leave blank to use a line chosen from the page type"
             value="${esc(s.greeting)}">
         </div>
+        </details>
 
         <div class="toggle">
           <input type="checkbox" id="enabled" name="enabled" value="1"${s.enabled ? ' checked' : ''}>

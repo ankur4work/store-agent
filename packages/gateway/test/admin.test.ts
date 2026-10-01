@@ -835,3 +835,57 @@ describe('plan chooser', () => {
     expect(renderAdmin(vm())).toContain('Test billing is on');
   });
 });
+
+/**
+ * What a merchant is asked to do before the assistant works.
+ *
+ * The answer should be: tick one box. Every field below the fold has a working
+ * default — the greeting is chosen from the page type, the voice is a neutral shop
+ * assistant, and shipping and returns are read from the merchant's own policy
+ * pages. Presented as five empty boxes, a store that was ready to go looked like a
+ * form to complete, which is exactly how it read to the first person who opened it.
+ */
+describe('settings ask for nothing by default', () => {
+  it('collapses every optional field on a fresh install', () => {
+    const out = renderAdmin(viewModel());
+    expect(out).toContain('<details class="extras"');
+    // Closed: no `open` attribute on that element.
+    expect(out).not.toMatch(/<details class="extras" open/);
+    // The one thing that IS a decision stays in front of them.
+    expect(out).toContain('Show the assistant on my storefront');
+  });
+
+  it('still ships every field, so nothing is lost by collapsing it', () => {
+    // Collapsed, not removed — `details` keeps them in the DOM and in the POST.
+    const out = renderAdmin(viewModel());
+    for (const name of ['brandVoice', 'policyNotes', 'promoteProducts', 'neverRecommend', 'greeting']) {
+      expect(out).toContain(`name="${name}"`);
+    }
+  });
+
+  it('opens the section when the merchant has written something of their own', () => {
+    /**
+     * Hiding a merchant's own words reads as having lost them. Any one of the five
+     * being set is enough to start the section open.
+     */
+    for (const over of [
+      { brandVoice: 'Playful, never twee.' },
+      { policyNotes: 'Free returns for 60 days.' },
+      { promoteProducts: 'The Complete Snowboard' },
+      { neverRecommend: 'Discontinued Boot' },
+      { greeting: 'Need a hand picking a board?' },
+    ]) {
+      expect(renderAdmin(viewModel(over))).toMatch(/<details class="extras" open/);
+    }
+  });
+
+  it('does not bury the two settings that cannot be derived', () => {
+    // Voice language genuinely cannot be read from a storefront — a shop selling in
+    // English often serves customers who speak something else — and on-device
+    // speech is a privacy choice. Both stay above the fold.
+    const out = renderAdmin(viewModel());
+    const extrasAt = out.indexOf('<details class="extras"');
+    expect(out.indexOf('name="voiceLanguage"')).toBeLessThan(extrasAt);
+    expect(out.indexOf('name="onDeviceSpeech"')).toBeLessThan(extrasAt);
+  });
+});
