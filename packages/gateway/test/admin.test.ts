@@ -889,3 +889,35 @@ describe('settings ask for nothing by default', () => {
     expect(out.indexOf('name="onDeviceSpeech"')).toBeLessThan(extrasAt);
   });
 });
+
+/**
+ * A privacy claim in merchant-facing copy has to be true.
+ *
+ * The on-device help text said the shopper's words are "recognised by their own
+ * browser and no audio is sent to a speech service". The first half is right; the
+ * second is not, and `transcribeAndSend` in the voice chunk has no branch that
+ * skips the upload — the recording goes to transcription on every path, in every
+ * mode. On-device changes where the live CAPTION comes from, not where the answer
+ * comes from.
+ *
+ * A merchant can repeat this to their own customers, or lean on it writing a
+ * privacy notice, so it must not overstate what the setting does.
+ */
+describe('the on-device speech explanation', () => {
+  const out = renderAdmin(viewModel());
+
+  it('does not claim audio stays on the device', () => {
+    expect(out).not.toMatch(/no audio is sent/i);
+  });
+
+  it('says plainly that the recording is still transcribed by us', () => {
+    expect(out).toMatch(/sent to our speech service/i);
+    expect(out).toMatch(/does not change where the answer comes from/i);
+  });
+
+  it('still explains what the setting is actually for', () => {
+    // The real benefits: the caption, and knowing a pause from the end of a turn.
+    expect(out).toMatch(/live caption/i);
+    expect(out).toMatch(/cutting people off/i);
+  });
+});

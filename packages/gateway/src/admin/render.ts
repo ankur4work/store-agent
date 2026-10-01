@@ -688,12 +688,14 @@ function renderHomeSections(vm: AdminViewModel): string {
                 `<option value="${esc(code)}"${s.onDeviceSpeech === code ? ' selected' : ''}>${esc(label)}</option>`,
             ).join('\n            ')}
           </select>
-          <span class="sub">Where the live caption comes from while a customer is still speaking.
-            On-device means their words are recognised by their own browser and no audio is sent to a
-            speech service — and it lets the assistant tell a pause mid-sentence from the end of a
-            question, so it stops cutting people off. The answer itself is unaffected. Installing the
-            language pack costs the customer a one-time download their browser manages; leaving this
-            on the default uses it only where it is already there.</span>
+          <span class="sub">Where the live caption comes from while a customer is still speaking —
+            the words that appear as they talk. On-device means their browser recognises those words
+            itself; off means the browser sends that audio to its own maker's service instead. It
+            also lets the assistant tell a pause mid-sentence from the end of a question, so it stops
+            cutting people off. <strong>This does not change where the answer comes from:</strong> the
+            recording is sent to our speech service to be transcribed either way. Installing the
+            language pack costs the customer a one-time download their browser manages, skipped on
+            slow or data-saver connections; the default uses it only where it is already there.</span>
         </div>
 
         <details class="extras"${hasExtras(s) ? ' open' : ''}>
