@@ -281,6 +281,28 @@ describe('speculation planning', () => {
   it('rejects an unrelated query', () => {
     expect(speculationMatches('warm wool coat', 'silk evening gown')).toBe(false);
   });
+
+  it('is not defeated by the punctuation the model writes', () => {
+    /**
+     * The live miss this was measured on. We prefetched "recommend beginner
+     * snowboarder"; the model asked for "snowboard for a beginner snowboarder,
+     * forgiving and easy to ride". Only the comma on `snowboarder,` separated
+     * those two words, and it dropped the overlap from 2/3 to 1/3 — so a prefetch
+     * that had already landed at 713 ms was discarded and the same search ran again.
+     *
+     * `extractKeywords` strips punctuation when building the speculated side, so
+     * one side was normalised and the other was not.
+     */
+    expect(
+      speculationMatches(
+        'recommend beginner snowboarder',
+        'snowboard for a beginner snowboarder, forgiving and easy to ride',
+      ),
+    ).toBe(true);
+    expect(speculationMatches('warm wool coat', 'wool coat, warm — for winter!')).toBe(true);
+    // Normalising must not turn unrelated queries into matches.
+    expect(speculationMatches('warm wool coat', 'silk evening gown, elegant.')).toBe(false);
+  });
 });
 
 describe('parseGrounded', () => {

@@ -211,8 +211,31 @@ function extractKeywords(text: string): string[] {
  * Loose on purpose — the model rephrases, and a near-miss still beats a hop.
  */
 export function speculationMatches(speculated: string, actual: string): boolean {
-  const a = new Set(speculated.toLowerCase().split(/\s+/).filter(Boolean));
-  const b = new Set(actual.toLowerCase().split(/\s+/).filter(Boolean));
+  /**
+   * Normalised the same way the keywords were, which it previously was not.
+   *
+   * Both sides were merely lowercased and split on whitespace, so every token
+   * carrying punctuation failed to match its own twin. Measured on a live turn:
+   * we prefetched "recommend beginner snowboarder", the model asked for
+   * "snowboard for a beginner snowboarder, forgiving and easy to ride", and the
+   * trailing comma on `snowboarder,` dropped the overlap from 2/3 to 1/3 — under
+   * the threshold. The prefetch landed at 713 ms, was thrown away, and an
+   * identical search was issued again.
+   *
+   * `extractKeywords` strips punctuation before building the speculated query, so
+   * one side was normalised and the other was not. Comparing like with like is
+   * the whole fix.
+   */
+  const words = (s: string): Set<string> =>
+    new Set(
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9\s'-]/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+  const a = words(speculated);
+  const b = words(actual);
   if (a.size === 0 || b.size === 0) return false;
   let overlap = 0;
   for (const w of b) if (a.has(w)) overlap++;
