@@ -77,6 +77,7 @@ import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
 import type { CatalogIndex } from './search/catalog-index.js';
 import { CatalogSnapshot } from './search/catalog-snapshot.js';
+import { StorePolicies } from './shopify/policies.js';
 import {
   CatalogRefreshQueue,
   refreshCatalogIndex,
@@ -208,6 +209,13 @@ export function createGateway(deps: GatewayDeps): Server {
    * store offers no way to fetch one by id.
    */
   const catalogSnapshot = new CatalogSnapshot({ log });
+
+  /**
+   * The merchant's own policy pages, so `get_policy` stops answering for them.
+   * See shopify/policies.ts — this replaced a fixture that was being quoted as
+   * every live merchant's returns policy.
+   */
+  const storePolicies = new StorePolicies({ log });
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -1246,6 +1254,8 @@ export function createGateway(deps: GatewayDeps): Server {
       ucp: ucpFor(shopDomain),
       productLookup: productLookupBreaker,
       catalogSnapshot,
+
+      policies: storePolicies,
       log,
       onCartChange: (cartId) => {
         // The deterministic join for attribution. A card tap creates carts just
@@ -1382,6 +1392,8 @@ export function createGateway(deps: GatewayDeps): Server {
       ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
       productLookup: productLookupBreaker,
       catalogSnapshot,
+
+      policies: storePolicies,
       log,
     });
 
@@ -2058,6 +2070,8 @@ export function createGateway(deps: GatewayDeps): Server {
       ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
       productLookup: productLookupBreaker,
       catalogSnapshot,
+
+      policies: storePolicies,
       log,
       onCartChange: (cartId) => {
         send('cart', { cartId });

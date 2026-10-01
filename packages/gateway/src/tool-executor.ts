@@ -42,6 +42,17 @@ export interface ToolExecutorDeps {
   readonly catalogSnapshot?: {
     products(shop: string, browse: () => Promise<readonly unknown[]>): Promise<readonly unknown[]>;
   };
+  /**
+   * The merchant's own policy pages. Absent means a live shop can quote none,
+   * which is the safe direction — see the `get_policy` case.
+   */
+  readonly policies?: {
+    get(
+      shop: string,
+      topic: string,
+      signal?: AbortSignal,
+    ): Promise<{ topic: string; text: string; sourceUrl: string } | undefined>;
+  };
   readonly log?: { warn(event: string, fields?: Record<string, unknown>): void };
 }
 
@@ -623,9 +634,38 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
 
         case 'get_policy': {
           const topic = String(input['topic'] ?? 'faq');
-          // The owned side of the grounding split (ARCHITECTURE.md §5.1). Small,
-          // changes rarely — a per-merchant corpus, not a vector index over the
-          // catalog. pgvector retrieval replaces this lookup in Phase 2.
+
+          /**
+           * A real shop is answered from ITS OWN policy pages, or not at all.
+           *
+           * This used to read `DEMO_POLICIES` unconditionally. Verified against the
+           * live dev store, a shopper asking about returns was told "within 30 days
+           * … return shipping is free, refunds within 5 business days" — the
+           * fixture, quoted as this merchant's policy, sourced to `example.test`,
+           * and reported `grounded: true` because a tool result did back it. The
+           * tripwire checks that a claim has a source; it cannot check that the
+           * source was telling the truth.
+           *
+           * So in live mode there is no fallback. If the merchant's page cannot be
+           * read — password-protected storefront, or a policy they never wrote —
+           * the model is told so plainly and takes the honest route it already has
+           * for missing data. A plausible answer standing in for an absent one is
+           * the entire failure being fixed here.
+           */
+          if (ucp) {
+            const found = await deps.policies?.get(session.shopDomain, topic, signal);
+            if (found === undefined) {
+              return {
+                error: true,
+                message:
+                  `This store's ${topic} policy is not available to quote. Say you ` +
+                  `cannot confirm it and offer to put the shopper in touch with the team.`,
+              };
+            }
+            return { topic: found.topic, text: found.text, source_url: found.sourceUrl };
+          }
+
+          // Demo mode only: no merchant exists, so the fixture misrepresents nobody.
           const text = DEMO_POLICIES[topic];
           if (text === undefined) return { error: true, message: `No policy for topic ${topic}` };
           return { topic, text, source_url: `https://example.test/policies/${topic}` };
