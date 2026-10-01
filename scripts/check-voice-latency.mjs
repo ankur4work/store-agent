@@ -11,16 +11,18 @@
  *
  * So every stage is timed separately, against the real API and a real store:
  *
- *   speak        TTS for one short sentence, cold
- *   transcribe   a WAV upload through the real STT model
+ *   speak        TTS for one short sentence, whole file, cold
  *   ttft         chat SSE: first `delta` — the panel stops being blank
  *   first_speak  chat SSE: first `speak` — the first WHOLE utterance exists
- *   audible      first_speak + the TTS call the widget then has to make
+ *   audible      first_speak + time to the first audio BYTE for it
+ *   complete     the same, but waiting for the last byte
  *
- * `audible` is the number the shopper actually experiences on a voice turn, and
- * it is the one no existing check measured: the widget cannot speak the first
- * utterance until it has fetched audio for it, so time-to-audio is a sum across
- * two round trips, not the `ttft` the chat path already reports.
+ * `audible` is the number the shopper actually experiences, and it is the one no
+ * existing check measured. It is deliberately first-byte rather than whole-file:
+ * the widget points a media element at the audio URL, so playback begins at the
+ * first frames. `complete` is kept alongside it because the gap between the two is
+ * exactly what the streaming work bought — they used to be the same number, and
+ * the whole 1819 ms was paid before a sound was made.
  */
 const BASE = process.env.GATEWAY ?? 'http://localhost:8787';
 const SHOP = process.env.SHOP ?? 'test-ankur-grxxuhm3.myshopify.com';
@@ -48,6 +50,31 @@ async function timeSpeak(text) {
   });
   const buf = await res.arrayBuffer();
   return { ms: performance.now() - t0, status: res.status, bytes: buf.byteLength };
+}
+
+/**
+ * When the first audio BYTE arrives for an announced utterance.
+ *
+ * This is the number that replaced "how long the whole file took", and the
+ * distinction is the entire point of the streaming work: the widget points a
+ * media element at this URL, so it starts playing at the first frames rather
+ * than at the last. Measuring the complete download here would report a wait
+ * nobody experiences any more.
+ */
+async function timeFirstAudioByte(audioId) {
+  const t0 = performance.now();
+  const res = await fetch(`${BASE}/api/voice/speak?id=${encodeURIComponent(audioId)}`);
+  if (!res.ok) return { error: `${res.status}` };
+  const reader = res.body.getReader();
+  let first;
+  let bytes = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (first === undefined) first = performance.now() - t0;
+    bytes += value.length;
+  }
+  return { first, total: performance.now() - t0, bytes };
 }
 
 /**
@@ -94,7 +121,7 @@ async function timeTurn(message, sessionId) {
       } catch {
         data = {};
       }
-      if (ev === 'speak' && typeof data.text === 'string') utterances.push(data.text);
+      if (ev === 'speak' && typeof data.text === 'string') utterances.push(data);
       if (ev === 'done') done = data;
     }
   }
@@ -125,16 +152,35 @@ for (const [i, q] of QUESTIONS.entries()) {
     continue;
   }
   const first = turn.utterances[0];
-  // What the widget pays before the shopper hears anything.
-  const audio = first === undefined ? undefined : await timeSpeak(first);
-  const audible = first === undefined ? undefined : turn.marks['speak'] + audio.ms;
+  /**
+   * What the widget pays before the shopper hears anything.
+   *
+   * Streamed off the announced id where the gateway offers one — that is what the
+   * widget does, so it is what this has to measure. Falling back to the buffered
+   * POST keeps the script honest against an older deployment rather than
+   * reporting a number the running code cannot produce.
+   */
+  const audio =
+    first === undefined
+      ? undefined
+      : first.audioId
+        ? await timeFirstAudioByte(first.audioId)
+        : await timeSpeak(first.text).then((r) => ({ first: r.ms, total: r.ms, bytes: r.bytes }));
+  const audible =
+    first === undefined || audio?.first === undefined ? undefined : turn.marks['speak'] + audio.first;
 
   rows.push({ q, marks: turn.marks, audible, total: turn.total, done: turn.done });
 
   console.log(`  "${q}"`);
   console.log(`    ttft         ${ms(turn.marks['delta'] ?? NaN)}`);
-  console.log(`    first speak  ${ms(turn.marks['speak'] ?? NaN)}   "${(first ?? '').slice(0, 60)}"`);
-  if (audible !== undefined) console.log(`    AUDIBLE      ${ms(audible)}   (+${ms(audio.ms).trim()} of TTS)`);
+  console.log(`    first speak  ${ms(turn.marks['speak'] ?? NaN)}   "${(first?.text ?? '').slice(0, 60)}"`);
+  if (audible !== undefined) {
+    console.log(
+      `    AUDIBLE      ${ms(audible)}   (+${ms(audio.first).trim()} to first audio byte` +
+        `${first.audioId ? ', streamed' : ', buffered'})`,
+    );
+    console.log(`    complete     ${ms(turn.marks['speak'] + audio.total)}   ${audio.bytes} bytes`);
+  }
   console.log(`    done         ${ms(turn.total)}   grounded=${turn.done?.grounded} handedOff=${turn.done?.handedOff}`);
   console.log(`    utterances   ${turn.utterances.length}\n`);
 }
@@ -148,14 +194,14 @@ if (rows.length > 0) {
   console.log('  --- average, and what each stage owns ---');
   console.log(`    model to first token      ${ms(aTtft)}`);
   console.log(`    + rest of first utterance ${ms(aSpeak - aTtft)}`);
-  console.log(`    + TTS for it              ${ms(aAudible - aSpeak)}`);
+  console.log(`    + first audio byte        ${ms(aAudible - aSpeak)}`);
   console.log(`    = heard by the shopper    ${ms(aAudible)}\n`);
 
   // Name the dominant term rather than leaving it to be eyeballed.
   const stages = [
     ['the model reaching its first token', aTtft],
     ['finishing the first sentence', aSpeak - aTtft],
-    ['turning that sentence into audio', aAudible - aSpeak],
+    ['reaching the first audio byte', aAudible - aSpeak],
   ].sort((a, b) => b[1] - a[1]);
   console.log(`  dominant: ${stages[0][0]} — ${ms(stages[0][1]).trim()}, ${((stages[0][1] / aAudible) * 100).toFixed(0)}% of the wait\n`);
 }

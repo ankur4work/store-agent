@@ -648,11 +648,86 @@ export function extensionFor(contentType: string): string {
   return 'webm'; // what MediaRecorder produces by default in the browser
 }
 
-export async function synthesize(
+/**
+ * Raw PCM, as the speech endpoint emits it: 24 kHz, 16-bit signed, mono, LE.
+ *
+ * Not configurable, because it is a property of the upstream format rather than
+ * a choice of ours — and a WAV header that disagrees with the samples produces
+ * audio that plays at the wrong pitch rather than an error.
+ */
+const PCM_SAMPLE_RATE = 24_000;
+const PCM_BITS = 16;
+const PCM_CHANNELS = 1;
+
+/** `audio/wav`, the container we wrap the upstream PCM in. */
+export const SPEECH_CONTENT_TYPE = 'audio/wav';
+
+/**
+ * A 44-byte WAV header for a stream of unknown length.
+ *
+ * The two size fields are the maximum a uint32 can hold, which is the
+ * conventional way to say "play until the connection closes" — we are forwarding
+ * samples as they are generated, so the real length is not known until the last
+ * one has already been sent, and a header cannot be rewritten after the fact.
+ * Browsers treat these as an open-ended stream and begin playing at the first
+ * frames; the element's reported duration is meaningless until `ended`, which
+ * costs nothing because nothing seeks within a spoken sentence.
+ */
+export function wavHeader(): Uint8Array {
+  const bytesPerSample = PCM_BITS / 8;
+  const byteRate = PCM_SAMPLE_RATE * PCM_CHANNELS * bytesPerSample;
+  const buf = new ArrayBuffer(44);
+  const view = new DataView(buf);
+  const ascii = (at: number, s: string): void => {
+    for (let i = 0; i < s.length; i++) view.setUint8(at + i, s.charCodeAt(i));
+  };
+  const UNKNOWN = 0xffffffff;
+  ascii(0, 'RIFF');
+  view.setUint32(4, UNKNOWN, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, true); // PCM fmt chunk size
+  view.setUint16(20, 1, true); // format: PCM
+  view.setUint16(22, PCM_CHANNELS, true);
+  view.setUint32(24, PCM_SAMPLE_RATE, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, PCM_CHANNELS * bytesPerSample, true); // block align
+  view.setUint16(34, PCM_BITS, true);
+  ascii(36, 'data');
+  view.setUint32(40, UNKNOWN, true);
+  return new Uint8Array(buf);
+}
+
+/**
+ * Start synthesis and return the audio as it is produced.
+ *
+ * ## Why `pcm` and not `opus`
+ *
+ * `opus` was chosen here with a comment asserting it had "the lowest
+ * time-to-first-audio of the streaming formats". Measured against the real API
+ * with one short sentence, that is backwards:
+ *
+ * | format | first byte | complete |
+ * |---|---:|---:|
+ * | opus   | 2112 ms | 2539 ms |
+ * | mp3    | 1309 ms | 1974 ms |
+ * | pcm    |  760 ms | 1819 ms |
+ *
+ * A compressed format cannot emit anything until its encoder has buffered enough
+ * to encode, so choosing one costs 1.3 s before the first sample exists. PCM is
+ * the samples themselves, available as fast as they are generated. It is about
+ * five times the bytes — 169 KB against 34 KB for a short sentence — which is the
+ * right trade for a sentence a shopper is waiting on, and is why this is not used
+ * for anything that is merely downloaded.
+ *
+ * Returns the stream rather than a buffer so nothing in the path waits for the
+ * last byte. See speech-cache.ts for why that was most of the 1866 ms.
+ */
+export async function synthesizeStream(
   text: string,
   cfg: VoiceConfig,
   doFetch: typeof globalThis.fetch = globalThis.fetch,
-): Promise<ArrayBuffer> {
+): Promise<ReadableStream<Uint8Array>> {
   const trimmed = text.trim();
   if (trimmed === '') throw new VoiceError('empty text', 400);
   if (trimmed.length > MAX_TTS_CHARS) throw new VoiceError('text too long', 413);
@@ -664,9 +739,7 @@ export async function synthesize(
       model: cfg.ttsModel,
       voice: cfg.voice,
       input: trimmed,
-      // Opus in a webm container: lowest time-to-first-audio of the streaming
-      // formats, which is the metric that matters in a conversation.
-      response_format: 'opus',
+      response_format: 'pcm',
       ...(cfg.speed === undefined ? {} : { speed: cfg.speed }),
       instructions:
         'Warm, gentle shop assistant. Friendly and brisk, never breathless. ' +
@@ -674,7 +747,80 @@ export async function synthesize(
     }),
   });
   if (!res.ok) throw new VoiceError(`speech synthesis failed (${res.status})`, 502);
-  return res.arrayBuffer();
+  const upstream = res.body;
+  if (upstream === null) throw new VoiceError('speech synthesis returned no body', 502);
+
+  /**
+   * The header goes out ahead of the first sample, in its own chunk.
+   *
+   * A listener must be able to hand what it receives straight to a media element,
+   * so the very first bytes have to be a valid WAV header — not a header that
+   * arrives once the upstream has answered.
+   */
+  const reader = upstream.getReader();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(wavHeader());
+    },
+    async pull(controller) {
+      const { value, done } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      if (value !== undefined && value.length > 0) controller.enqueue(value);
+    },
+    cancel(reason) {
+      void reader.cancel(reason);
+    },
+  });
+}
+
+/**
+ * The whole utterance as one buffer.
+ *
+ * Kept for callers that genuinely need the complete audio — the non-streaming
+ * fallback, and `check-voice.mjs`, which feeds synthesized speech back through
+ * transcription and therefore needs a finished file. Built on the streaming path
+ * so there is exactly one place that talks to the speech API.
+ */
+export async function synthesize(
+  text: string,
+  cfg: VoiceConfig,
+  doFetch: typeof globalThis.fetch = globalThis.fetch,
+): Promise<ArrayBuffer> {
+  const stream = await synthesizeStream(text, cfg, doFetch);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = stream.getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value === undefined) continue;
+    chunks.push(value);
+    total += value.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+
+  /**
+   * Replace the streaming placeholders with the real sizes.
+   *
+   * The header was written before the length was knowable; here it is known, and a
+   * complete file should say so. `decodeWav` copes with the placeholder, but other
+   * readers are not obliged to — transcription is handed one of these by
+   * `check-voice.mjs`, which is exactly a reader we do not control.
+   */
+  if (total > 44) {
+    const view = new DataView(out.buffer);
+    view.setUint32(4, total - 8, true);
+    view.setUint32(40, total - 44, true);
+  }
+  return out.buffer;
 }
 
 /**

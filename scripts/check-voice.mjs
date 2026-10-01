@@ -28,7 +28,7 @@ const tts = await fetch(`${BASE}/api/voice/speak`, {
 });
 const ttsMs = performance.now() - t0;
 check('speak returns audio', tts.status, 200);
-check('audio content type', tts.headers.get('content-type'), 'audio/ogg');
+check('audio content type', tts.headers.get('content-type'), 'audio/wav');
 const audio = Buffer.from(await tts.arrayBuffer());
 check('audio is non-trivial', audio.length > 2000, true);
 console.log(`       ${audio.length} bytes in ${ttsMs.toFixed(0)}ms`);
@@ -52,7 +52,7 @@ check('rejects over-long text', huge.status, 413);
 const t1 = performance.now();
 const stt = await fetch(`${BASE}/api/voice/transcribe`, {
   method: 'POST',
-  headers: { 'content-type': 'audio/ogg' },
+  headers: { 'content-type': 'audio/wav' },
   body: audio,
 });
 const sttMs = performance.now() - t1;

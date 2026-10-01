@@ -1181,7 +1181,9 @@ describe('the voice split', () => {
   it('does not speak for a text turn that never loaded the chunk', () => {
     // `speak` events only arrive on a voice turn, but a server that sent one
     // anyway must not throw inside the SSE reader and kill the whole answer.
-    expect(HOST_SRC).toMatch(/if \(voiceApi\) voiceApi\.enqueueSpeech\(d\.text\)/);
+    // `d.audioId` rides along so the chunk can stream the audio with a GET
+    // instead of buffering the whole file; it is absent on an older gateway.
+    expect(HOST_SRC).toMatch(/if \(voiceApi\) voiceApi\.enqueueSpeech\(d\.text, d\.audioId\)/);
     expect(HOST_SRC).toMatch(/if \(voiceApi\) voiceApi\.stopPlayback\(\)/);
   });
 });

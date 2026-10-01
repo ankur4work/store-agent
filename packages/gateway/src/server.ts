@@ -65,11 +65,13 @@ import { SpeechChunker } from '@storeagent/voice';
 import {
   DEFAULT_VOICE,
   MAX_AUDIO_BYTES,
+  SPEECH_CONTENT_TYPE,
   VoiceError,
-  synthesize,
+  synthesizeStream,
   transcribe,
   type TranscriptOutcome,
 } from './voice/service.js';
+import { SpeechCache } from './voice/speech-cache.js';
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
@@ -475,8 +477,8 @@ export function createGateway(deps: GatewayDeps): Server {
       await handleTranscribe(url, req, res);
       return;
     }
-    if (url.pathname === '/api/voice/speak' && req.method === 'POST') {
-      await handleSpeak(req, res);
+    if (url.pathname === '/api/voice/speak' && (req.method === 'POST' || req.method === 'GET')) {
+      await handleSpeak(url, req, res);
       return;
     }
 
@@ -1031,6 +1033,21 @@ export function createGateway(deps: GatewayDeps): Server {
       ? {}
       : { language: process.env['VOICE_LANGUAGE'] }),
   };
+
+  /**
+   * Speech, started as soon as the words are settled rather than when the browser
+   * asks for them.
+   *
+   * TTS was 79% of the wait before a voice answer was audible, measured in
+   * production after the page-fact lane had already cut the model to 486 ms. Most
+   * of that was structural rather than upstream: synthesis did not begin until the
+   * widget had received the text and asked, and then every stage waited for the
+   * last byte. See voice/speech-cache.ts.
+   */
+  const speech = new SpeechCache({
+    source: (text) => synthesizeStream(text, voiceConfig),
+    log,
+  });
 
   /**
    * Count what the shopper's device can do, from the widget's mic-press beacon.
@@ -1594,21 +1611,95 @@ export function createGateway(deps: GatewayDeps): Server {
     }
   }
 
-  async function handleSpeak(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const body = JSON.parse(await readBody(req, 8 * 1024)) as { text?: unknown };
-      const audio = await synthesize(String(body.text ?? ''), voiceConfig);
-      const buf = Buffer.from(audio);
-      res.writeHead(200, {
-        'content-type': 'audio/ogg',
-        'content-length': String(buf.length),
-        'cache-control': 'no-store',
-      });
-      res.end(buf);
-    } catch (err) {
-      const status = err instanceof VoiceError ? err.status : 500;
-      json(res, status, { error: 'speech_failed' });
+  /**
+   * Serve one utterance's audio, streamed.
+   *
+   * Two ways in, and the difference is latency rather than capability:
+   *
+   * - `GET ?id=…` — the id from the `speak` event. Synthesis is usually already
+   *   running, so this mostly forwards bytes that are on their way, and a media
+   *   element can be pointed straight at the URL and start playing at the first
+   *   frames.
+   * - `POST {text}` — the fallback, for a client that has no id or whose streamed
+   *   playback failed. Same path underneath; it simply starts later.
+   *
+   * No `content-length`, deliberately: it is not known when the headers go out,
+   * and withholding it is what makes the response chunked and therefore playable
+   * before it is complete. That single field was a large part of the 1866 ms.
+   */
+  async function handleSpeak(url: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let text: string;
+    if (req.method === 'GET') {
+      const id = url.searchParams.get('id') ?? '';
+      const found = id === '' ? undefined : speech.textForId(id);
+      if (found === undefined) {
+        // Expired or never announced. A 404 rather than synthesizing whatever
+        // arrived: an id is a capability to replay one sentence we chose to say,
+        // and treating an unknown one as "say this" would make it an open TTS
+        // endpoint keyed on a querystring.
+        json(res, 404, { error: 'unknown_audio' });
+        return;
+      }
+      text = found;
+    } else {
+      try {
+        const body = JSON.parse(await readBody(req, 8 * 1024)) as { text?: unknown };
+        text = String(body.text ?? '');
+      } catch {
+        json(res, 400, { error: 'invalid_json' });
+        return;
+      }
     }
+
+    if (text.trim() === '') {
+      json(res, 400, { error: 'speech_failed' });
+      return;
+    }
+
+    const startedAt = Date.now();
+    let firstByteAt: number | undefined;
+    let wroteAnything = false;
+
+    await new Promise<void>((resolve) => {
+      const cancel = speech.listen(text, {
+        onChunk: (chunk) => {
+          if (!wroteAnything) {
+            wroteAnything = true;
+            firstByteAt = Date.now();
+            metrics.upstream.observe(firstByteAt - startedAt, { target: 'speech' });
+            res.writeHead(200, {
+              'content-type': SPEECH_CONTENT_TYPE,
+              'cache-control': 'no-store',
+              // Nginx and Traefik will otherwise hold a small response until it
+              // completes, which reinstates exactly the wait this removes.
+              'x-accel-buffering': 'no',
+            });
+          }
+          if (!res.writableEnded) res.write(Buffer.from(chunk));
+        },
+        onEnd: (err) => {
+          if (err !== undefined && !wroteAnything) {
+            const status = err instanceof VoiceError ? err.status : 502;
+            json(res, status, { error: 'speech_failed' });
+          } else if (!res.writableEnded) {
+            /**
+             * A truncated utterance is still played, and that is the right call:
+             * the alternative is silence, and the shopper has the same sentence on
+             * screen either way.
+             */
+            res.end();
+          }
+          resolve();
+        },
+      });
+
+      // A shopper who closes the panel or interrupts mid-sentence leaves us
+      // writing to a dead socket; detach rather than keep buffering into it.
+      res.on('close', () => {
+        cancel();
+        resolve();
+      });
+    });
   }
 
   async function handleExposure(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1777,8 +1868,23 @@ export function createGateway(deps: GatewayDeps): Server {
      * produce a short, already-settled sentence, so there is nothing for the
      * tripwire to retract.
      */
+    /**
+     * Emit one whole utterance, and start making its audio now.
+     *
+     * The `audioId` is what lets the widget fetch the sound with a GET and play it
+     * progressively; announcing here is what lets the upstream round trip overlap
+     * the SSE delivery, the widget's own request, and anything still playing ahead
+     * of it. The text is still sent, because a client that cannot use the id — an
+     * older widget, or one whose streamed playback failed — falls back to posting
+     * it. See voice/speech-cache.ts.
+     */
+    const sendSpeak = (text: string): void => {
+      if (text === '') return;
+      send('speak', { text, audioId: speech.announce(text) });
+    };
+
     const speakIfVoice = (text: string): void => {
-      if (body.voice === true && text !== '') send('speak', { text });
+      if (body.voice === true) sendSpeak(text);
     };
 
     /**
@@ -2017,7 +2123,7 @@ export function createGateway(deps: GatewayDeps): Server {
             // the tested implementation is the one in the audio path — and so
             // the widget stays buildless.
             if (chunker !== undefined) {
-              for (const utterance of chunker.push(text)) send('speak', { text: utterance });
+              for (const utterance of chunker.push(text)) sendSpeak(utterance);
             }
           },
         },
@@ -2027,7 +2133,7 @@ export function createGateway(deps: GatewayDeps): Server {
       // with no terminal punctuation.
       if (chunker !== undefined) {
         const tail = chunker.flush();
-        if (tail !== undefined) send('speak', { text: tail });
+        if (tail !== undefined) sendSpeak(tail);
       }
 
       // The tripwire may have aborted a partial message — tell the client to

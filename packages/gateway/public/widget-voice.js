@@ -1439,8 +1439,8 @@
       maybeInstallOnDevice();
     }
 
-    function enqueueSpeech(text) {
-      voice.queue.push(text);
+    function enqueueSpeech(text, audioId) {
+      voice.queue.push({ text: text, id: audioId });
       /**
        * `voice.playing` is the WRONG thing to gate on, and it sounded like two
        * people talking over each other.
@@ -1460,8 +1460,10 @@
     async function playNext() {
       // Synchronously, before any await. This is the whole fix.
       voice.busy = true;
-      var text = voice.queue.shift();
-      if (!text) {
+      // `{text, id}` since the gateway started announcing an audio id alongside
+      // each utterance — the id is what makes progressive playback possible.
+      var utterance = voice.queue.shift();
+      if (!utterance) {
         voice.playing = null;
         voice.busy = false;
         // ONE SHOT: press, speak, get answered, done — the way every mic a
@@ -1477,11 +1479,42 @@
         return;
       }
       var gen = voice.gen;
+
+      /**
+       * Play straight off the response, without waiting for the end of it.
+       *
+       * This is the TTS fix. Pointing a media element at a URL hands the download
+       * to the browser's own media stack, which starts decoding at the first
+       * frames — measured, the first audio bytes exist 760 ms into a synthesis
+       * that takes 1819 ms to finish, and `await r.blob()` here used to pay the
+       * whole 1819 before making a sound. The server streams chunked WAV with no
+       * content-length precisely so this works.
+       *
+       * Needs a GET, which is why the gateway announces an `audioId` on the
+       * `speak` event rather than taking the text in the querystring: the reply
+       * text would otherwise end up in proxy access logs.
+       */
+      if (utterance.id) {
+        try {
+          var streamed = await playFrom(
+            API + '/api/voice/speak?id=' + encodeURIComponent(utterance.id) +
+              '&shop=' + encodeURIComponent(SHOP || ''),
+            gen,
+          );
+          if (streamed) return;
+        } catch (e) {
+          // Fall through and buffer it the old way. One slow sentence beats a
+          // silent one, and a browser that cannot stream our WAV is still a
+          // browser a shopper is standing in.
+          voiceDiag('tts_stream_failed', { error: String((e && e.message) || e) });
+        }
+      }
+
       try {
         var r = await fetch(API + '/api/voice/speak?shop=' + encodeURIComponent(SHOP || ''), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text: text }),
+          body: JSON.stringify({ text: utterance.text }),
         });
         if (!r.ok) throw new Error('tts');
         var url = URL.createObjectURL(await r.blob());
@@ -1509,6 +1542,74 @@
       } catch (e) {
         playNext(); // a failed utterance must not stall the queue
       }
+    }
+
+    /**
+     * Start playback from a streaming URL. Resolves true once it is playing.
+     *
+     * Rejects if the element cannot play it at all, so the caller can fall back to
+     * buffering. The distinction that matters is *before* playback versus during:
+     * an error before the first frame is a format the browser refused and is worth
+     * retrying another way, whereas one partway through is a truncated stream and
+     * the queue should simply move on.
+     */
+    function playFrom(url, gen) {
+      return new Promise(function (resolve, reject) {
+        if (gen !== voice.gen) {
+          voice.busy = false;
+          resolve(true);
+          return;
+        }
+        var audio = new Audio();
+        audio.preload = 'auto';
+        /**
+         * Required, and not for the fetch — for the analyser.
+         *
+         * The waveform is driven by `createMediaElementSource`, and a media
+         * element loaded cross-origin without this is *tainted*: Web Audio hands
+         * back silence rather than an error, so the shopper sees the bar move and
+         * hears nothing. The blob URLs this replaces were same-origin, which is
+         * why it never came up before. The gateway already answers CORS for the
+         * storefront origin on every route, so a failure here means the storefront
+         * is not an allowed origin — and that falls back to the buffered path.
+         */
+        audio.crossOrigin = 'anonymous';
+        audio.src = url;
+        var started = false;
+
+        audio.onerror = function () {
+          if (started) {
+            playNext();
+            resolve(true);
+          } else {
+            reject(new Error('stream'));
+          }
+        };
+        audio.onended = function () {
+          playNext();
+          resolve(true);
+        };
+
+        audio
+          .play()
+          .then(function () {
+            // The retraction may have landed while the element was buffering.
+            if (gen !== voice.gen) {
+              audio.pause();
+              voice.busy = false;
+              resolve(true);
+              return;
+            }
+            started = true;
+            voice.playing = audio;
+            setVoiceState('speaking');
+            watchPlayback(audio);
+            resolve(true);
+          })
+          .catch(function (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          });
+      });
     }
 
     function stopPlayback() {

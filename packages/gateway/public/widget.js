@@ -1623,7 +1623,10 @@ textarea::placeholder{color:var(--muted)}
             // Only reachable during a voice turn, which cannot start without
             // the chunk, so a missing voiceApi here means the turn was text and
             // the server sent speech for it. Dropping it is correct.
-            if (voiceApi) voiceApi.enqueueSpeech(d.text);
+            // `audioId` lets the chunk stream the audio instead of buffering the
+            // whole file — see playFrom in the voice chunk. Absent on an older
+            // gateway, which falls back to posting the text.
+            if (voiceApi) voiceApi.enqueueSpeech(d.text, d.audioId);
           } else if (ev === 'reset') {
             // Grounding tripwire fired — discard the partial answer entirely,
             // and drop any queued audio before it can be spoken.
