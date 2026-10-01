@@ -55,6 +55,18 @@ interface Entry {
   readonly at: number;
 }
 
+/**
+ * How many shops' catalogs may be held at once.
+ *
+ * There has to be a ceiling. Entries were only ever replaced or invalidated, never
+ * dropped for being old, so one ~170 KB catalog per shop accumulated for the life
+ * of the process — invisible on a dev store with two installs, and a leak
+ * proportional to install count on a public app. Past the TTL an entry cannot be
+ * served anyway, so sweeping is free; the cap is what bounds the pathological case
+ * of many shops all active inside one window.
+ */
+const MAX_SHOPS = 64;
+
 export class CatalogSnapshot {
   private readonly entries = new Map<string, Entry>();
   private readonly ttlMs: number;
@@ -86,6 +98,7 @@ export class CatalogSnapshot {
      * behind them each start their own 170 KB download.
      */
     this.stats.fetches++;
+    this.sweep();
     const products = browse().catch((err: unknown) => {
       // A failed browse must not be remembered as this shop's catalog; the next
       // turn should be free to try again.
@@ -105,5 +118,35 @@ export class CatalogSnapshot {
    */
   invalidate(shop: string): void {
     if (this.entries.delete(shop)) this.deps.log?.info('catalog_snapshot_cleared', { shop });
+  }
+
+  /**
+   * Drop what can no longer be served, then the oldest if still over the cap.
+   *
+   * Run before each new browse rather than on a timer: a timer would hold the
+   * process awake and there is no work to do when nobody is asking. An expired
+   * entry is already unusable, so removing it loses nothing — which is why the
+   * common case needs no cap at all.
+   */
+  private sweep(): void {
+    const now = this.now();
+    for (const [shop, entry] of this.entries) {
+      if (now - entry.at >= this.ttlMs) this.entries.delete(shop);
+    }
+    // Room is left for the entry about to be inserted — this runs before it, so
+    // stopping at the cap itself would settle one over.
+    if (this.entries.size < MAX_SHOPS) return;
+    // Still over: evict oldest-first. Insertion order is not age order once a
+    // shop has been refreshed, so sort rather than trusting the Map's order.
+    const byAge = [...this.entries].sort((a, b) => a[1].at - b[1].at);
+    for (const [shop] of byAge) {
+      if (this.entries.size < MAX_SHOPS) break;
+      this.entries.delete(shop);
+    }
+  }
+
+  /** How many shops' catalogs are currently held. For tests and `/metrics`. */
+  get size(): number {
+    return this.entries.size;
   }
 }

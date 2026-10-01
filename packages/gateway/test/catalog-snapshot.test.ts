@@ -117,6 +117,33 @@ describe('reusing one catalog browse', () => {
     expect(await snap.products('a.myshopify.com', browse)).toEqual([{ id: 'p2' }]);
   });
 
+  it('does not hold a catalog per shop forever', async () => {
+    /**
+     * Entries were only ever replaced or invalidated, never dropped for being old.
+     * One ~170 KB catalog per shop therefore accumulated for the life of the
+     * process — nothing on a dev store with two installs, and a leak proportional
+     * to install count on a public app.
+     */
+    let now = 0;
+    const snap = new CatalogSnapshot({ ttlMs: 1000, now: () => now });
+    for (let i = 0; i < 40; i++) {
+      await snap.products(`shop-${i}.myshopify.com`, () => Promise.resolve([{ id: i }]));
+      now += 100; // each arrives 100ms apart, so early ones age out
+    }
+    // Only the shops still inside the window are held.
+    expect(snap.size).toBeLessThanOrEqual(10);
+  });
+
+  it('bounds itself even when every shop is active at once', async () => {
+    // The pathological case the TTL alone does not cover: more shops busy inside
+    // one window than we are willing to hold.
+    const snap = new CatalogSnapshot({ ttlMs: 60_000, now: () => 0 });
+    for (let i = 0; i < 200; i++) {
+      await snap.products(`shop-${i}.myshopify.com`, () => Promise.resolve([{ id: i }]));
+    }
+    expect(snap.size).toBeLessThanOrEqual(64);
+  });
+
   it('shrugs off invalidating a shop it has never seen', () => {
     // Webhooks arrive for shops this process has not served a turn for.
     const snap = new CatalogSnapshot();
