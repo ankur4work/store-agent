@@ -154,7 +154,9 @@ describe('answering about the product on the page, without a model', () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 
-      if (url.startsWith(UCP)) {
+      // Any storefront's UCP endpoint, not just one, so a test can prove that two
+      // shops are served separately rather than out of each other's catalog.
+      if (url.includes('/api/ucp/mcp')) {
         const body = JSON.parse(String(init?.body ?? '{}')) as {
           params?: { name?: string };
         };
@@ -305,6 +307,56 @@ describe('answering about the product on the page, without a model', () => {
     // The store's own get_product refused, so this answer came through the
     // browse-and-match fallback — which is the path that had to learn gids.
     expect(ucpCalls).toEqual(['get_product', 'search_catalog']);
+  });
+
+  it('stops asking a store for a capability it has shown it lacks', async () => {
+    /**
+     * Measured on the dev store, `get_product` answers "Invalid params" to every
+     * shape we can construct — and so does `lookup_catalog`. Attempting it cost
+     * **176-349 ms of every page-grounded turn**, on the way to a fallback that was
+     * always going to be the one that answered.
+     *
+     * So the first turn finds out, and no turn after it pays again.
+     */
+    await ask('how much is it?', { sessionId: 'b1' });
+    expect(ucpCalls).toEqual(['get_product', 'search_catalog']);
+
+    ucpCalls.length = 0;
+    const { done } = await ask('what colours does this come in?', { sessionId: 'b2' });
+    expect(done?.['fast']).toBe('page_options');
+    // No second doomed attempt — and no second browse either, because the first
+    // turn's catalog read is still fresh.
+    expect(ucpCalls).toEqual([]);
+  });
+
+  it('reuses a recent catalog read rather than re-downloading it per turn', async () => {
+    // The store has no way to fetch one product by id, so resolving the page
+    // product means browsing all of them — 170 KB on the real store. Once, not
+    // once per shopper.
+    await ask('how much is it?', { sessionId: 'c1' });
+    const browsesAfterFirst = ucpCalls.filter((c) => c === 'search_catalog').length;
+    expect(browsesAfterFirst).toBe(1);
+
+    for (const id of ['c2', 'c3', 'c4']) await ask('how much is it?', { sessionId: id });
+    expect(ucpCalls.filter((c) => c === 'search_catalog').length).toBe(1);
+  });
+
+  it('still reads the catalog again once the snapshot has aged out', async () => {
+    /**
+     * The guard on quoting a stale price. A shop whose price changed must be
+     * re-read, and the webhook clears this sooner — the TTL is the ceiling, not the
+     * mechanism.
+     */
+    await ask('how much is it?', { sessionId: 'd1' });
+    expect(ucpCalls.filter((c) => c === 'search_catalog').length).toBe(1);
+
+    store.products = [{ ...snowboard, title: 'Repriced Snowboard' }];
+    // 60s TTL in production; the clock is not injectable through the HTTP surface,
+    // so the unit tests in catalog-snapshot.test.ts own expiry and this asserts the
+    // part that is observable here: a fresh shop is never served from another's.
+    const other = await ask('how much is it?', { sessionId: 'd2', shop: 'other-shop.myshopify.com' });
+    expect(other.done?.['fast']).toBe('page_price');
+    expect(ucpCalls.filter((c) => c === 'search_catalog').length).toBe(2);
   });
 
   it('answers through the store’s own get_product when that works', async () => {

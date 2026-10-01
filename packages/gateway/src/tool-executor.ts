@@ -25,6 +25,23 @@ export interface ToolExecutorDeps {
   readonly onCartChange?: (cartId: string) => void;
   /** Absent until embeddings are configured; search then stays keyword-only. */
   readonly catalogIndex?: CatalogIndex;
+  /**
+   * Remembers that this storefront's `get_product` does not work.
+   *
+   * Keyed by shop and shared across turns, so it has to be owned by the gateway
+   * rather than built per executor — a breaker rebuilt each turn has never seen a
+   * failure and would admit the doomed call every time, which is precisely the
+   * cost it exists to remove.
+   */
+  readonly productLookup?: {
+    allow(key: string): boolean;
+    succeed(key: string): void;
+    fail(key: string): void;
+  };
+  /** Reuses one catalog browse across turns. See search/catalog-snapshot.ts. */
+  readonly catalogSnapshot?: {
+    products(shop: string, browse: () => Promise<readonly unknown[]>): Promise<readonly unknown[]>;
+  };
   readonly log?: { warn(event: string, fields?: Record<string, unknown>): void };
 }
 
@@ -331,35 +348,75 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
   }
 
   async function getProductResilient(id: string, signal?: AbortSignal): Promise<unknown> {
-    try {
-      return await ucp!.getProduct({ id }, signal);
-    } catch (err) {
-      deps.log?.warn('get_product_unavailable', {
-        shop: session.shopDomain,
-        reason: err instanceof Error ? err.message : String(err),
-      });
+    const shop = session.shopDomain;
 
-      // Browse and resolve locally. Bounded at the same 100 the index build uses:
-      // a catalog larger than that would have been truncated there too, and this
-      // is the cheaper of the two failures.
+    /**
+     * Ask the store's own `get_product` only while there is reason to think it
+     * works.
+     *
+     * Measured on the dev store, it answers "Invalid params" to every shape we can
+     * construct — `{catalog:{id}}`, `{catalog:{product_id}}`, a bare `{id}` — and
+     * so does `lookup_catalog`. That is a capability the store does not have, and
+     * attempting it cost **176-349 ms of every page-grounded turn** on the way to
+     * the fallback that was always going to answer.
+     *
+     * A breaker rather than a permanent latch, because UCP is mid-rollout and
+     * "absent today" is not "absent for good": after the reset window one probe
+     * goes through, and a store that has gained the capability starts using it
+     * without anyone redeploying. The cost of being wrong in that direction is one
+     * slow turn per window.
+     */
+    if (deps.productLookup === undefined || deps.productLookup.allow(shop)) {
+      try {
+        const direct = await ucp!.getProduct({ id }, signal);
+        deps.productLookup?.succeed(shop);
+        return direct;
+      } catch (err) {
+        deps.productLookup?.fail(shop);
+        deps.log?.warn('get_product_unavailable', {
+          shop,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    /**
+     * Browse and resolve locally, reusing a recent browse where there is one.
+     *
+     * Bounded at the same 100 the index build uses: a catalog larger than that
+     * would have been truncated there too, and this is the cheaper of the two
+     * failures. The snapshot is what stops this being 170 KB on every turn for
+     * every shopper — see search/catalog-snapshot.ts for why its TTL is short.
+     *
+     * A failure here is left to propagate, as before: by this point there is no
+     * further fallback, and the caller turns it into an honest "I could not read
+     * the catalog" rather than a guess.
+     */
+    const fetchAll = async (): Promise<readonly unknown[]> => {
       const browse = (await ucp!.searchCatalog(
         { query: '', pagination: { limit: 100 } },
         signal,
       )) as unknown as { products?: readonly unknown[] };
-      const found = (browse.products ?? []).find((p) => {
-        const pid = (p as { id?: unknown }).id;
-        return pid !== undefined && sameProductId(String(pid), id);
-      });
-      if (found === undefined) {
-        // Honest, and specific enough to be actionable: the model should search
-        // by name rather than retry an id that cannot be resolved.
-        return {
-          error: true,
-          message: `Could not resolve product ${id}. Use search_catalog by name instead.`,
-        };
-      }
-      return { product: found };
+      return browse.products ?? [];
+    };
+    const products =
+      deps.catalogSnapshot === undefined
+        ? await fetchAll()
+        : await deps.catalogSnapshot.products(shop, fetchAll);
+
+    const found = products.find((p) => {
+      const pid = (p as { id?: unknown }).id;
+      return pid !== undefined && sameProductId(String(pid), id);
+    });
+    if (found === undefined) {
+      // Honest, and specific enough to be actionable: the model should search
+      // by name rather than retry an id that cannot be resolved.
+      return {
+        error: true,
+        message: `Could not resolve product ${id}. Use search_catalog by name instead.`,
+      };
     }
+    return { product: found };
   }
 
   async function rebuildIndex(): Promise<void> {

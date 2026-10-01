@@ -76,6 +76,7 @@ import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
 import type { CatalogIndex } from './search/catalog-index.js';
+import { CatalogSnapshot } from './search/catalog-snapshot.js';
 import {
   CatalogRefreshQueue,
   refreshCatalogIndex,
@@ -178,6 +179,35 @@ export function createGateway(deps: GatewayDeps): Server {
   // Per merchant: a storefront that keeps failing must not hold connections
   // and starve every other merchant's turns. See resilience/breaker.ts.
   const catalogBreaker = new CircuitBreaker();
+
+  /**
+   * Whether a storefront's own `get_product` is worth attempting.
+   *
+   * A separate breaker from `catalogBreaker` because it guards a *capability*, not
+   * a failing upstream, and the two want opposite policies. One failure is enough
+   * to stop asking — a store that answers "Invalid params" will answer it again —
+   * and the window is long, because this is not a blip that clears in half a
+   * minute, it is a tool the store does not implement. Measured on the dev store,
+   * attempting it cost 176-349 ms of every page-grounded turn.
+   *
+   * Still a breaker rather than a latch: UCP is mid-rollout, so after the window
+   * one probe decides again, and a store that gains the capability starts using it
+   * with nothing to redeploy.
+   */
+  const productLookupBreaker = new CircuitBreaker({
+    threshold: 1,
+    resetAfterMs: 30 * 60_000,
+    successesToClose: 1,
+  });
+
+  /**
+   * One catalog browse, reused across turns and shoppers.
+   *
+   * The other half of that 450 ms: resolving the product a shopper is standing on
+   * meant downloading all 23 products — 170 KB — on every single turn, because the
+   * store offers no way to fetch one by id.
+   */
+  const catalogSnapshot = new CatalogSnapshot({ log });
 
   const model = new OpenAIModelClient({
     apiKey: config.openaiApiKey,
@@ -591,6 +621,9 @@ export function createGateway(deps: GatewayDeps): Server {
           onCatalogChange: (shopDomain, topic) => {
             log.info('catalog_changed', { shop: shopDomain, topic });
             catalogQueue.touch(shopDomain);
+            // Immediately, not on the index's debounce: this one can be quoted
+            // from, so a corrected price must not wait out even a short TTL.
+            catalogSnapshot.invalidate(shopDomain);
           },
           // Shopify is the authority on subscription state. Without this,
           // local state drifts: we would keep serving a cancelled shop, or
@@ -1211,6 +1244,8 @@ export function createGateway(deps: GatewayDeps): Server {
     const executor = createToolExecutor({
       session,
       ucp: ucpFor(shopDomain),
+      productLookup: productLookupBreaker,
+      catalogSnapshot,
       log,
       onCartChange: (cartId) => {
         // The deterministic join for attribution. A card tap creates carts just
@@ -1345,6 +1380,8 @@ export function createGateway(deps: GatewayDeps): Server {
       session,
       ucp,
       ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
+      productLookup: productLookupBreaker,
+      catalogSnapshot,
       log,
     });
 
@@ -2019,6 +2056,8 @@ export function createGateway(deps: GatewayDeps): Server {
       session,
       ucp: ucpFor(session.shopDomain),
       ...(deps.catalogIndex === undefined ? {} : { catalogIndex: deps.catalogIndex }),
+      productLookup: productLookupBreaker,
+      catalogSnapshot,
       log,
       onCartChange: (cartId) => {
         send('cart', { cartId });
