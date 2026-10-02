@@ -78,6 +78,10 @@ export interface ToolExecutorDeps {
  * consistent with what the tripwire already accepts.
  */
 function withDisplayPrices<T>(payload: T): T {
+  // Both passes, always together: a display string per amount, and one
+  // ready-to-quote line per product. See withPriceSummary for why the second
+  // exists even though the first already removed the division.
+  withPriceSummary(payload);
   const seen = new WeakSet<object>();
   const walk = (node: unknown): void => {
     if (node === null || typeof node !== 'object') return;
@@ -94,6 +98,96 @@ function withDisplayPrices<T>(payload: T): T {
     }
     for (const key of Object.keys(obj)) walk(obj[key]);
   };
+  walk(payload);
+  return payload;
+}
+
+/**
+ * Give every product ONE ready-to-quote price line.
+ *
+ * ## Why
+ *
+ * `withDisplayPrices` removed the division. This removes the comparison, which is
+ * the arithmetic that was actually reaching shoppers.
+ *
+ * Reproduced against the live store: "how much is the swimsuit" was aborted by the
+ * tripwire with `uncited_price: 52.00` — the model had written $52.00 for a $52.99
+ * costume — then retried and recovered. When the retry slips too, the turn ends as
+ * "I can't confirm the price", which is what a merchant reported seeing.
+ *
+ * It is not a careless model. A three-product answer on that store hands it a
+ * `price_range` plus eight to ten variants per product: **about thirty-six
+ * separate figures**, from which it is expected to pick a lowest and a highest and
+ * write them exactly. One slip in thirty-six is a good hit rate and still a wrong
+ * price.
+ *
+ * So the range is computed here, once, and attached as a string to copy.
+ *
+ * ## Why the variants and not the store's own price_range
+ *
+ * They disagree. One product on that store reports a `price_range` minimum of
+ * 3399 while its cheapest variant is 4699 — a list price against a selling price.
+ * The variants are what a shopper can actually buy, so they win; `price_range` is
+ * only used when there are no priced variants to read.
+ *
+ * Mixed currencies produce nothing at all: a range whose ends are in different
+ * money is not a range, and silence sends the model back to the per-variant
+ * prices, which are still right.
+ */
+/** Exported for tests; always applied through `withDisplayPrices`. */
+export function withPriceSummary<T>(payload: T): T {
+  const seen = new WeakSet<object>();
+
+  const summarise = (product: Record<string, unknown>): void => {
+    const variants = Array.isArray(product['variants']) ? product['variants'] : [];
+    const money: { amount: number; currency: string }[] = [];
+    for (const v of variants) {
+      const price = (v as { price?: unknown }).price as
+        | { amount?: unknown; currency?: unknown }
+        | undefined;
+      if (typeof price?.amount === 'number' && typeof price.currency === 'string') {
+        money.push({ amount: price.amount, currency: price.currency });
+      }
+    }
+    if (money.length === 0) {
+      const range = product['price_range'] as
+        | { min?: { amount?: unknown; currency?: unknown }; max?: { amount?: unknown; currency?: unknown } }
+        | undefined;
+      for (const end of [range?.min, range?.max]) {
+        if (typeof end?.amount === 'number' && typeof end.currency === 'string') {
+          money.push({ amount: end.amount, currency: end.currency });
+        }
+      }
+    }
+    if (money.length === 0) return;
+
+    const currency = money[0]!.currency;
+    if (money.some((m) => m.currency !== currency)) return;
+
+    const symbol = CURRENCY_SYMBOL[currency] ?? '';
+    const low = Math.min(...money.map((m) => m.amount));
+    const high = Math.max(...money.map((m) => m.amount));
+    const at = (n: number): string => `${symbol}${formatMinor(Math.round(n))}`;
+    // An en dash, not a hyphen: it is read aloud as a range rather than a minus.
+    product['price_display'] = low === high ? at(low) : `${at(low)} – ${at(high)}`;
+  };
+
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== 'object') return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    // A product is the thing with a title and variants or a price range.
+    if (typeof obj['title'] === 'string' && (obj['variants'] !== undefined || obj['price_range'] !== undefined)) {
+      summarise(obj);
+    }
+    for (const key of Object.keys(obj)) walk(obj[key]);
+  };
+
   walk(payload);
   return payload;
 }
