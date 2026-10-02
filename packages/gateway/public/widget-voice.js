@@ -564,6 +564,28 @@
       return null;
     }
 
+    /**
+     * Drop the AudioContext and everything hanging off it.
+     *
+     * Called when a capture came back as digital zeros. The next turn rebuilds the
+     * whole graph — context, analyser, microphone source — from scratch, which is
+     * the only reliable way back from a context that has stopped producing
+     * samples. `wiredTo` is cleared too, or the rebuild would believe the new
+     * stream is already connected and reconnect nothing.
+     */
+    function discardAudioGraph() {
+      try {
+        if (voice.source) voice.source.disconnect();
+      } catch (e) {}
+      try {
+        if (voice.ctx && voice.ctx.state !== 'closed' && voice.ctx.close) voice.ctx.close();
+      } catch (e) {}
+      voice.ctx = null;
+      voice.analyser = null;
+      voice.source = null;
+      voice.wiredTo = null;
+    }
+
     /** Concatenate, resample to 16 kHz, and write a WAV. */
     function pcmToWav() {
       if (!voice.pcmFrames) return null;
@@ -574,6 +596,34 @@
         all.set(voice.pcm[i], at);
         at += voice.pcm[i].length;
       }
+
+      /**
+       * Refuse to upload digital silence.
+       *
+       * Seen live: 247 KB — nearly eight seconds — of exact zeros uploaded, and
+       * the server answered `voice_no_speech`. A real microphone never returns
+       * exact zeros, so this is the capture graph being dead rather than a quiet
+       * room, and the shopper had spoken: they watched it "listen", wait, and
+       * come back with nothing.
+       *
+       * It reached the upload because the local silence check is skipped when the
+       * level meter reads zero — and when the graph is dead BOTH the meter and the
+       * worklet read zero, so the one guard that would have caught it was the one
+       * being disabled. Checked on the samples themselves, which cannot be fooled
+       * that way.
+       */
+      var silent = true;
+      for (var s = 0; s < all.length; s++) {
+        if (all[s] !== 0) {
+          silent = false;
+          break;
+        }
+      }
+      if (silent) {
+        voiceDiag('capture_dead', { frames: voice.pcmFrames, state: voice.ctx && voice.ctx.state });
+        return null;
+      }
+
       return wavBlob(resampleTo(all, rate, UPLOAD_RATE), UPLOAD_RATE);
     }
 
@@ -648,6 +698,24 @@
       // tap hangs off that same graph, so it has to exist first — and the tick it
       // starts will not endpoint while `voice.capture` is still null.
       monitorSilence();
+
+      /**
+       * Wait for the context to actually be running before tapping it.
+       *
+       * `resume()` returns a promise and was being called without one. On iOS the
+       * context starts suspended, so the worklet was connected to a context that
+       * had not resumed yet and produced exact zeros — the shopper spoke, the
+       * meter read nothing, and eight seconds of silence went up to be
+       * transcribed. Awaiting it is the difference between a graph that is alive
+       * when we start recording and one that is merely about to be.
+       */
+      if (voice.ctx && voice.ctx.state === 'suspended' && voice.ctx.resume) {
+        try {
+          await voice.ctx.resume();
+        } catch (e) {
+          voiceDiag('resume_failed', { error: String((e && e.name) || e) });
+        }
+      }
 
       var kind = await startPcmCapture();
       if (kind === null) kind = startRecorderCapture();
@@ -760,6 +828,15 @@
        */
       if (blob === null) {
         voiceDiag('capture_empty', { capture: kind, spokeMs: spoke });
+        /**
+         * Throw the audio graph away so the next attempt builds a fresh one.
+         *
+         * A context that produced nothing will go on producing nothing — the
+         * shopper would tap, speak, and be told "I didn't catch that" for the rest
+         * of their visit. Dropping it costs one rebuild on the next tap, and
+         * `monitorSilence` already creates everything it needs from scratch.
+         */
+        discardAudioGraph();
         if (els.live) els.live.textContent = "I didn't catch that — tap to try again.";
         endVoiceTurn();
         return;

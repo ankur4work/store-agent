@@ -1280,3 +1280,64 @@ describe('the shopper can resize the panel', () => {
     expect(mobileBlock).toMatch(/\.grab\{display:block/);
   });
 });
+
+/**
+ * The two defects a real phone found in the first version of the drag handle.
+ */
+describe('the resize handle holds up on a phone', () => {
+  it('writes to storage once per gesture, not once per frame', () => {
+    /**
+     * The first version called `localStorage.setItem` inside `applyHeight`, which
+     * runs on every pointermove — a synchronous disk write up to a hundred times a
+     * second while a finger is down. That is what made the drag feel like treacle.
+     */
+    const apply = HOST_SRC.slice(HOST_SRC.indexOf('function applyHeight'), HOST_SRC.indexOf('function rememberHeight'));
+    expect(apply).not.toMatch(/localStorage/);
+    expect(HOST_SRC).toMatch(/function rememberHeight/);
+    // Once the finger is up, and on a deliberate key press.
+    expect(HOST_SRC).toMatch(/rememberHeight\(lastVh\)/);
+  });
+
+  it('coalesces moves to one layout per frame', () => {
+    // A phone delivers pointer events faster than it paints; applying each one
+    // does layout work that is discarded before anything is seen.
+    expect(HOST_SRC).toMatch(/requestAnimationFrame\(flush\)/);
+    expect(HOST_SRC).toMatch(/cancelAnimationFrame\(frame\)/);
+  });
+
+  it('gives the handle a fingertip-sized target', () => {
+    // The visible bar is 4px. At that height the drag missed more than it caught.
+    const mobileBlock = HOST_SRC.slice(HOST_SRC.indexOf('@media (max-width:540px)'));
+    expect(mobileBlock).toMatch(/\.grab\{display:block;flex:0 0 auto;height:28px/);
+  });
+});
+
+/**
+ * Never upload silence that the microphone did not actually produce.
+ */
+describe('a dead capture is caught before it is sent', () => {
+  it('checks the samples rather than trusting the level meter', () => {
+    /**
+     * Seen live: 247 KB of exact zeros uploaded, answered `voice_no_speech`. It got
+     * through because the local silence check is skipped when the meter reads zero
+     * — and when the graph is dead both the meter and the worklet read zero, so the
+     * guard that would have caught it was the one being disabled.
+     */
+    expect(VOICE_SRC).toMatch(/capture_dead/);
+    expect(VOICE_SRC).toMatch(/if \(all\[s\] !== 0\)/);
+  });
+
+  it('rebuilds the audio graph instead of failing forever', () => {
+    // A context that produced nothing goes on producing nothing: without this the
+    // shopper is told "I didn't catch that" for the rest of their visit.
+    expect(VOICE_SRC).toMatch(/function discardAudioGraph/);
+    expect(VOICE_SRC).toMatch(/discardAudioGraph\(\);/);
+    expect(VOICE_SRC).toMatch(/voice\.wiredTo = null;/);
+  });
+
+  it('waits for the audio context before tapping it', () => {
+    // resume() returns a promise and was not awaited. On iOS the worklet was
+    // connected to a context that had not resumed and emitted exact zeros.
+    expect(VOICE_SRC).toMatch(/await voice\.ctx\.resume\(\)/);
+  });
+});

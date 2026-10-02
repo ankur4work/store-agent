@@ -520,9 +520,16 @@ textarea::placeholder{color:var(--muted)}
      pinned to the bottom edge, so there is no dimension a shopper wants to drag.
      touch-action:none is required: without it the browser claims the vertical
      gesture for page scrolling and the sheet never moves. */
-  .grab{display:block;flex:0 0 auto;padding:8px 0 4px;touch-action:none;cursor:grab}
-  .grab::before{content:'';display:block;width:38px;height:4px;margin:0 auto;
-    border-radius:2px;background:color-mix(in srgb,var(--ink) 18%,transparent)}
+  /* 28px of grabbable height for a 4px bar. The visible line is a marker, not
+     the target — at its own size it is a fifth of a fingertip and the drag
+     missed more often than it caught. */
+  .grab{display:block;flex:0 0 auto;height:28px;position:relative;
+    touch-action:none;cursor:grab;-webkit-tap-highlight-color:transparent}
+  .grab::before{content:'';position:absolute;left:50%;top:50%;
+    width:40px;height:4px;margin:-2px 0 0 -20px;border-radius:2px;
+    background:color-mix(in srgb,var(--ink) 20%,transparent);transition:background .15s}
+  .grab:active::before,.grab:focus-visible::before{background:var(--accent)}
+  .grab:focus-visible{outline:none}
   .grab:active{cursor:grabbing}
   /* The open/close animation must not fight a finger. */
   .panel.sizing{transition:none}
@@ -606,16 +613,27 @@ textarea::placeholder{color:var(--muted)}
   var MIN_VH = 24;
   var MAX_VH = 88;
 
+  /**
+   * Apply a height. Writing to disk is deliberately NOT done here.
+   *
+   * This runs on every pointermove — up to a hundred times a second while a
+   * finger is down — and the first version called `localStorage.setItem` each
+   * time. A synchronous storage write per frame is exactly how a drag turns to
+   * treacle on a phone, which is what it did. Persisting happens once, on release.
+   */
   function applyHeight(vh) {
     var clamped = Math.max(MIN_VH, Math.min(MAX_VH, vh));
     host.style.setProperty('--sa-h', clamped.toFixed(1) + 'dvh');
+    return clamped;
+  }
+
+  function rememberHeight(vh) {
     try {
-      localStorage.setItem(SIZE_KEY, String(Math.round(clamped)));
+      localStorage.setItem(SIZE_KEY, String(Math.round(vh)));
     } catch (e) {
       // Private mode, or storage disabled. The size still applies for this
       // visit; only remembering it is lost, which is not worth an error.
     }
-    return clamped;
   }
 
   function wireResize(p) {
@@ -632,6 +650,7 @@ textarea::placeholder{color:var(--muted)}
 
     var startY = 0;
     var startVh = 0;
+    var lastVh = 0;
     var dragging = false;
 
     function current() {
@@ -642,6 +661,7 @@ textarea::placeholder{color:var(--muted)}
       dragging = true;
       startY = e.clientY;
       startVh = current();
+      lastVh = startVh;
       p.classList.add('sizing');
       // Keeps the gesture even when the finger leaves the 38px handle, which it
       // always does — a drag of any length ends up over the page behind.
@@ -651,17 +671,41 @@ textarea::placeholder{color:var(--muted)}
       e.preventDefault();
     });
 
+    /**
+     * Coalesce moves to one write per frame.
+     *
+     * A phone can deliver pointer events faster than it paints, so applying every
+     * one of them does layout work that is thrown away before anything is seen.
+     * Holding the latest position and applying it in `requestAnimationFrame` is
+     * what makes the drag track the finger instead of lagging behind it.
+     */
+    var pendingVh = null;
+    var frame = 0;
+    function flush() {
+      frame = 0;
+      if (pendingVh === null) return;
+      lastVh = applyHeight(pendingVh);
+      pendingVh = null;
+    }
+
     grab.addEventListener('pointermove', function (e) {
       if (!dragging) return;
       // Upward is negative in client coordinates and taller to a person.
       var delta = ((startY - e.clientY) / Math.max(1, window.innerHeight)) * 100;
-      applyHeight(startVh + delta);
+      pendingVh = startVh + delta;
+      if (!frame) frame = requestAnimationFrame(flush);
       e.preventDefault();
     });
 
     function end(e) {
       if (!dragging) return;
       dragging = false;
+      if (frame) {
+        cancelAnimationFrame(frame);
+        flush();
+      }
+      // Once, now that the finger is up.
+      rememberHeight(lastVh);
       p.classList.remove('sizing');
       try {
         grab.releasePointerCapture(e.pointerId);
@@ -680,7 +724,8 @@ textarea::placeholder{color:var(--muted)}
     grab.addEventListener('keydown', function (e) {
       var step = e.key === 'ArrowUp' ? 6 : e.key === 'ArrowDown' ? -6 : 0;
       if (step === 0) return;
-      applyHeight(current() + step);
+      // One key press is one deliberate change, so it is worth remembering.
+      rememberHeight(applyHeight(current() + step));
       e.preventDefault();
     });
   }
