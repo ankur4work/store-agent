@@ -76,7 +76,7 @@ describe('the setting', () => {
     expect(normaliseOnDeviceSpeech('on')).toBe('on');
   });
 
-  it('is offered in the admin with the download cost stated', () => {
+  it('is not put to the merchant as a question', () => {
     const html = renderAdmin({
       shop: 'acme.myshopify.com',
       apiKey: 'k',
@@ -92,24 +92,27 @@ describe('the setting', () => {
       unmatchedOrders: 0,
     });
 
-    expect(html).toContain('name="onDeviceSpeech"');
-    for (const [code] of ON_DEVICE_SPEECH_OPTIONS) {
-      expect(html).toContain(`value="${code}"`);
-    }
-    // A merchant deciding this needs to know it costs their customer a download.
-    expect(html).toMatch(/one-time download/);
     /**
-     * And that it is about the caption, not the answer.
+     * This used to assert the three options were offered, with the download cost
+     * explained. Both the control and that explanation are gone.
      *
-     * This used to assert "answer itself is unaffected", which was true but let a
-     * stronger falsehood sit beside it: the same paragraph claimed "no audio is
-     * sent to a speech service". The recording is uploaded for transcription on
-     * every path, in every mode, so the copy now says so outright — and this
-     * assertion follows it, because a merchant may repeat either sentence to their
-     * own customers.
+     * A merchant has no basis to choose where a live caption is recognised, and
+     * the default needs no help: it uses an on-device pack the browser already
+     * has, never downloads one, retries once on the cloud if the pack was evicted
+     * mid-session, and drops the caption where there is no recogniser at all — in
+     * every case without changing the answer, because the recording is transcribed
+     * by us regardless. The remaining two choices only let a merchant spend their
+     * shopper's bandwidth or hand the caption to the browser maker for nothing.
+     *
+     * It survives as a stored setting, carried hidden so a save cannot reset a
+     * value set out of band.
      */
-    expect(html).toMatch(/does not change where the answer comes from/i);
+    expect(html).not.toContain('<select id="onDeviceSpeech"');
+    expect(html).toContain('<input type="hidden" name="onDeviceSpeech"');
+    expect(html).not.toMatch(/one-time download/);
     expect(html).not.toMatch(/no audio is sent/i);
+    // Still a real setting underneath, with every value the widget may be sent.
+    expect(ON_DEVICE_SPEECH_OPTIONS.map(([code]) => code)).toEqual(['auto', 'on', 'off']);
   });
 });
 

@@ -879,14 +879,22 @@ describe('settings ask for nothing by default', () => {
     }
   });
 
-  it('does not bury the two settings that cannot be derived', () => {
-    // Voice language genuinely cannot be read from a storefront — a shop selling in
-    // English often serves customers who speak something else — and on-device
-    // speech is a privacy choice. Both stay above the fold.
+  it('keeps the one setting that genuinely cannot be derived in front of them', () => {
+    /**
+     * Voice language stays. A storefront selling in English is often serving
+     * customers who speak something else, so it cannot be read off the page, and
+     * getting it wrong is what makes the microphone mishear — a consequence a
+     * merchant can see and reason about.
+     *
+     * On-device speech used to sit beside it on the argument that it was a privacy
+     * choice. It is not one a merchant can make: it governs where the live caption
+     * is recognised, the recording is transcribed by us regardless, and the default
+     * already degrades correctly on its own. It is no longer asked.
+     */
     const out = renderAdmin(viewModel());
     const extrasAt = out.indexOf('<details class="extras"');
     expect(out.indexOf('name="voiceLanguage"')).toBeLessThan(extrasAt);
-    expect(out.indexOf('name="onDeviceSpeech"')).toBeLessThan(extrasAt);
+    expect(out).not.toContain('<label for="onDeviceSpeech"');
   });
 });
 
@@ -907,17 +915,35 @@ describe('the on-device speech explanation', () => {
   const out = renderAdmin(viewModel());
 
   it('does not claim audio stays on the device', () => {
+    /**
+     * The copy this replaced told merchants that on-device speech means "no audio
+     * is sent to a speech service". `transcribeAndSend` has no branch that skips
+     * the upload — the recording is transcribed on every path, in every mode — so
+     * the claim was false, and a merchant could have repeated it to their own
+     * customers or leaned on it writing a privacy notice.
+     *
+     * The control is gone now, but the sentence must not come back with it.
+     */
     expect(out).not.toMatch(/no audio is sent/i);
   });
 
-  it('says plainly that the recording is still transcribed by us', () => {
-    expect(out).toMatch(/sent to our speech service/i);
-    expect(out).toMatch(/does not change where the answer comes from/i);
+  it('does not ask the merchant where speech is recognised', () => {
+    /**
+     * No shop owner has a basis to answer it, and the default needs no help: it
+     * uses a pack the browser already has, never downloads, falls back to the
+     * cloud once if the pack was evicted, and drops the caption where there is no
+     * recogniser — without the answer changing. The remaining choices only let a
+     * merchant spend their shopper's bandwidth or make the caption less private.
+     */
+    expect(out).not.toContain('<select id="onDeviceSpeech"');
+    expect(out).not.toMatch(/cloud recogniser/i);
   });
 
-  it('still explains what the setting is actually for', () => {
-    // The real benefits: the caption, and knowing a pause from the end of a turn.
-    expect(out).toMatch(/live caption/i);
-    expect(out).toMatch(/cutting people off/i);
+  it('still carries the stored value, so a save cannot reset it', () => {
+    // Dropped from the form entirely, an out-of-band value would be normalised
+    // back to the default by the next save a merchant made.
+    expect(renderAdmin(viewModel({ onDeviceSpeech: 'on' }))).toContain(
+      '<input type="hidden" name="onDeviceSpeech" value="on">',
+    );
   });
 });

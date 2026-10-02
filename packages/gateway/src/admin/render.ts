@@ -680,23 +680,24 @@ function renderHomeSections(vm: AdminViewModel): string {
             else. Picking the right one is what stops the microphone guessing wrong.</span>
         </div>
 
-        <div class="field">
-          <label for="onDeviceSpeech">On-device speech</label>
-          <select id="onDeviceSpeech" name="onDeviceSpeech">
-            ${ON_DEVICE_SPEECH_OPTIONS.map(
-              ([code, label]) =>
-                `<option value="${esc(code)}"${s.onDeviceSpeech === code ? ' selected' : ''}>${esc(label)}</option>`,
-            ).join('\n            ')}
-          </select>
-          <span class="sub">Where the live caption comes from while a customer is still speaking —
-            the words that appear as they talk. On-device means their browser recognises those words
-            itself; off means the browser sends that audio to its own maker's service instead. It
-            also lets the assistant tell a pause mid-sentence from the end of a question, so it stops
-            cutting people off. <strong>This does not change where the answer comes from:</strong> the
-            recording is sent to our speech service to be transcribed either way. Installing the
-            language pack costs the customer a one-time download their browser manages, skipped on
-            slow or data-saver connections; the default uses it only where it is already there.</span>
-        </div>
+        ${/**
+         * On-device speech is not a question for a merchant.
+         *
+         * It asked where the live caption is recognised, and no shop owner has a
+         * basis to answer it. The default already handles every case on its own:
+         * it uses an on-device language pack where the browser already has one,
+         * never downloads, retries once on the cloud if the pack was evicted
+         * mid-session, and drops the caption entirely where there is no recogniser
+         * — all without the answer changing. Of the other two choices, one spends
+         * the SHOPPER's bandwidth on a download the merchant cannot reason about,
+         * and the other is strictly worse: it hands the caption audio to the
+         * browser maker for no gain.
+         *
+         * Kept as a stored setting, carried here hidden, so a value set out of band
+         * survives a save instead of being reset to the default by a form that no
+         * longer shows it.
+         */ ''}
+        <input type="hidden" name="onDeviceSpeech" value="${esc(s.onDeviceSpeech)}">
 
         <details class="extras"${hasExtras(s) ? ' open' : ''}>
           <summary>Put it in your own words
