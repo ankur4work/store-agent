@@ -136,6 +136,25 @@ describe('choosing the speech model per shop', () => {
     expect(asked[0]).toBe('gpt-4o-transcribe');
   });
 
+  it('switches on an INTERMITTENT mismatch, not just a consecutive one', async () => {
+    /**
+     * The reason this is not a circuit breaker. Live, the pattern was Arabic, then
+     * a clean turn, then Devanagari — and a breaker counting consecutive failures
+     * had its counter reset by the good turn every time, so it never fired while
+     * two turns in five kept coming back in the wrong script.
+     */
+    primaryInventsArabic();
+    await speak();                                    // mismatch
+    replies.set('gpt-4o-transcribe', 'do you ship to delhi');
+    await speak();                                    // clean
+    primaryInventsArabic();
+    await speak();                                    // mismatch
+
+    asked.length = 0;
+    await speak();
+    expect(asked).toEqual(['whisper-1']);
+  });
+
   it('keeps the demoted model as the fallback, so it can still rescue a turn', async () => {
     primaryInventsArabic();
     await speak();

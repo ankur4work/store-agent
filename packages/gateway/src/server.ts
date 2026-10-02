@@ -72,6 +72,7 @@ import {
   type TranscriptOutcome,
 } from './voice/service.js';
 import { SpeechCache } from './voice/speech-cache.js';
+import { SttPreference } from './voice/stt-preference.js';
 import { bearerToken, verifySessionToken } from './admin/session-token.js';
 import { renderAdmin, renderUnauthenticated } from './admin/render.js';
 import { pricingPlansUrl } from './billing/managed.js';
@@ -229,15 +230,15 @@ export function createGateway(deps: GatewayDeps): Server {
    * If the acoustic model is what ends up being believed here, it should go first
    * here. Per shop and reversible, because the choice is about who is talking —
    * an accent, a room, a microphone — not about the model being wrong everywhere.
-   * The primary is better on shop vocabulary where it works, so a store it suits
-   * keeps it, and a store it does not gets probed again after the window.
+   *
+   * Judged over a WINDOW, not on consecutive failures. This was first built on
+   * `CircuitBreaker` and never fired once in live use: the mismatches are
+   * intermittent — Arabic, then a clean turn, then Devanagari — and the good turn
+   * in the middle reset the counter every time. A speaker the primary half
+   * understands is precisely the case worth switching, and consecutive-failure
+   * counting is structurally blind to it. See voice/stt-preference.ts.
    */
-  const sttBreaker = new CircuitBreaker({
-    // Two, not one: a single mismatch is a bad second of audio, not a pattern.
-    threshold: 2,
-    resetAfterMs: 30 * 60_000,
-    successesToClose: 2,
-  });
+  const sttPreference = new SttPreference();
 
   /**
    * The merchant's own policy pages, so `get_policy` stops answering for them.
@@ -1634,7 +1635,7 @@ export function createGateway(deps: GatewayDeps): Server {
        * Swapped rather than replaced, so the one that was failing becomes the
        * fallback and still gets to rescue a turn the other cannot read.
        */
-      const primaryTrusted = sttBreaker.allow(shop);
+      const primaryTrusted = sttPreference.primaryFirst(shop);
       const cfg = {
         ...voiceConfig,
         ...(primaryTrusted || voiceConfig.fallbackSttModel === undefined
@@ -1650,8 +1651,8 @@ export function createGateway(deps: GatewayDeps): Server {
            * nobody asked for — silence, a failed upload or an unpaid account say
            * nothing about which model suits this shop's speakers.
            */
-          if (outcome === 'language_mismatch') sttBreaker.fail(shop);
-          else if (outcome === 'heard') sttBreaker.succeed(shop);
+          if (outcome === 'language_mismatch') sttPreference.record(shop, 'mismatch');
+          else if (outcome === 'heard') sttPreference.record(shop, 'ok');
         },
         // VOICE_LANGUAGE, if set, still overrides everything — it is the
         // operator's lever for a single-shop deployment.
@@ -1673,6 +1674,8 @@ export function createGateway(deps: GatewayDeps): Server {
         // Which model actually went first. Without this, a shop quietly running on
         // the acoustic model looks identical in the log to one that never needed to.
         stt: cfg.sttModel,
+        // How this shop looks over the recent window, so a swap is explainable.
+        sttRecent: sttPreference.stateOf(shop),
       });
       // Measured around the whole thing, including the ogg relabel retry and
       // the acoustic-model fallback. The shopper waits for all of it, so
