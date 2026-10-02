@@ -650,7 +650,13 @@ describe('widget mobile sheet', () => {
   const mobile = SRC.slice(SRC.indexOf('@media (max-width:540px)'), SRC.indexOf('@media (prefers-color-scheme'));
 
   it('takes a third of the viewport, not the whole phone', () => {
-    expect(mobile).toMatch(/height:\s*33dvh/);
+    /**
+     * Still a third — it is now the fallback of the custom property the drag
+     * handle writes, so that is where the default lives. What matters is
+     * unchanged: a sheet the shopper consults while still seeing the product,
+     * rather than something that covers the page the moment it opens.
+     */
+    expect(mobile).toMatch(/height:var\(--sa-h,\s*33dvh\)/);
     expect(mobile).not.toMatch(/height:\s*88dvh/);
   });
 
@@ -1214,5 +1220,63 @@ describe('voice never takes the keyboard away', () => {
     const fn = HOST_SRC.slice(HOST_SRC.indexOf('function showChips'), HOST_SRC.indexOf('function grow'));
     expect(fn).toMatch(/els\.input\.value = chip\.message \|\| chip\.label/);
     expect(fn).toMatch(/submit\(\)/);
+  });
+});
+
+/**
+ * Sizing the sheet on a phone, without a reload.
+ *
+ * It opens at a third of the viewport so it does not cover the product being
+ * asked about — right for "it's $699.95", far too small for six product cards.
+ * Only the shopper knows which they are looking at.
+ */
+describe('the shopper can resize the panel', () => {
+  it('ships a drag handle inside the panel', () => {
+    expect(HOST_SRC).toMatch(/class="grab"/);
+    expect(HOST_SRC).toMatch(/wireResize\(p\)/);
+  });
+
+  it('drives the height through a custom property, not an inline height', () => {
+    /**
+     * `--sa-h` keeps the default in the stylesheet and the sheet shape inside the
+     * media query. Writing `height` on the element would override the desktop rule
+     * too, so a phone-sized sheet would follow the shopper onto a wide screen.
+     */
+    expect(HOST_SRC).toMatch(/setProperty\('--sa-h'/);
+    expect(HOST_SRC).toMatch(/height:var\(--sa-h,33dvh\)/);
+    expect(HOST_SRC).not.toMatch(/panel\.style\.height\s*=/);
+  });
+
+  it('remembers the size across pages', () => {
+    expect(HOST_SRC).toMatch(/storeagent:panelHeight/);
+    // Stored as a percentage: a phone that rotates, or a URL bar that collapses,
+    // must not leave the sheet sized against a viewport that is gone.
+    expect(HOST_SRC).toMatch(/dvh'/);
+  });
+
+  it('keeps the gesture when the finger leaves the handle', () => {
+    // A drag of any useful length ends up over the page behind the 38px bar.
+    expect(HOST_SRC).toMatch(/setPointerCapture/);
+    expect(HOST_SRC).toMatch(/touch-action:none/);
+  });
+
+  it('bounds the size so the sheet cannot be lost or swallow the page', () => {
+    expect(HOST_SRC).toMatch(/MIN_VH = 24/);
+    expect(HOST_SRC).toMatch(/MAX_VH = 88/);
+  });
+
+  it('offers the same control to a keyboard', () => {
+    // Otherwise the handle only exists for people who can drag, and it is the
+    // only way to reach the rest of a long answer on a small sheet.
+    expect(HOST_SRC).toMatch(/role="separator"/);
+    expect(HOST_SRC).toMatch(/ArrowUp/);
+    expect(HOST_SRC).toMatch(/ArrowDown/);
+  });
+
+  it('shows the handle only where the panel is a sheet', () => {
+    // On desktop it is a card beside the page, pinned to no edge a shopper would
+    // drag. The rule lives inside the phone media query.
+    const mobileBlock = HOST_SRC.slice(HOST_SRC.indexOf('@media (max-width:540px)'));
+    expect(mobileBlock).toMatch(/\.grab\{display:block/);
   });
 });

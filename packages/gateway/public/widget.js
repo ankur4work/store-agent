@@ -510,8 +510,22 @@ textarea::placeholder{color:var(--muted)}
      shopper consults while still seeing the product they were looking at —
      covering the page is what makes an assistant feel like an interruption.
      dvh, not vh, so the mobile URL bar collapsing does not resize it. */
-  .panel{right:0;left:0;bottom:0;width:100%;height:33dvh;border-radius:20px 20px 0 0;
+  /* The --sa-h variable is set by the drag handle and remembered per shopper; a
+     the viewport is only where it starts. See the grabber below. */
+  .panel{right:0;left:0;bottom:0;width:100%;height:var(--sa-h,33dvh);border-radius:20px 20px 0 0;
     transform-origin:50% 100%}
+
+  /* The handle that makes the sheet resizable.
+     Phone only: on desktop the panel is a card beside the page, not a sheet
+     pinned to the bottom edge, so there is no dimension a shopper wants to drag.
+     touch-action:none is required: without it the browser claims the vertical
+     gesture for page scrolling and the sheet never moves. */
+  .grab{display:block;flex:0 0 auto;padding:8px 0 4px;touch-action:none;cursor:grab}
+  .grab::before{content:'';display:block;width:38px;height:4px;margin:0 auto;
+    border-radius:2px;background:color-mix(in srgb,var(--ink) 18%,transparent)}
+  .grab:active{cursor:grabbing}
+  /* The open/close animation must not fight a finger. */
+  .panel.sizing{transition:none}
   .launcher{right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px))}
 
   /* At a third of the viewport the chrome is the constraint, not the content:
@@ -566,6 +580,111 @@ textarea::placeholder{color:var(--muted)}
     { passive: true }
   );
 
+  /**
+   * Let the shopper size the sheet, and remember what they chose.
+   *
+   * ## Why this exists
+   *
+   * The sheet opens at a third of the viewport, deliberately: covering the page
+   * is what makes an assistant feel like an interruption. But a third is right
+   * for "it's $699.95" and far too small for six product cards, and only the
+   * person reading knows which they have. They were stuck with the compromise.
+   *
+   * ## Why a CSS variable and not a style on the element
+   *
+   * The height lives in `--sa-h`, so the stylesheet keeps the default, the media
+   * query keeps ownership of when the sheet shape applies at all, and this only
+   * ever writes one number. Setting `height` directly would override the desktop
+   * rule too, and a phone-sized sheet would follow the shopper onto a tablet in
+   * landscape.
+   *
+   * Stored as a percentage rather than pixels for the same reason `dvh` is used
+   * below: a phone rotated, or a URL bar that collapses, must not leave the sheet
+   * at a height that made sense against a viewport that is gone.
+   */
+  var SIZE_KEY = 'storeagent:panelHeight';
+  var MIN_VH = 24;
+  var MAX_VH = 88;
+
+  function applyHeight(vh) {
+    var clamped = Math.max(MIN_VH, Math.min(MAX_VH, vh));
+    host.style.setProperty('--sa-h', clamped.toFixed(1) + 'dvh');
+    try {
+      localStorage.setItem(SIZE_KEY, String(Math.round(clamped)));
+    } catch (e) {
+      // Private mode, or storage disabled. The size still applies for this
+      // visit; only remembering it is lost, which is not worth an error.
+    }
+    return clamped;
+  }
+
+  function wireResize(p) {
+    var grab = p.querySelector('.grab');
+    if (!grab) return;
+
+    var stored = null;
+    try {
+      stored = localStorage.getItem(SIZE_KEY);
+    } catch (e) {}
+    // Restored before the panel is shown, so it opens at the size they left it
+    // rather than snapping after the fact.
+    if (stored !== null && isFinite(Number(stored))) applyHeight(Number(stored));
+
+    var startY = 0;
+    var startVh = 0;
+    var dragging = false;
+
+    function current() {
+      return (p.getBoundingClientRect().height / Math.max(1, window.innerHeight)) * 100;
+    }
+
+    grab.addEventListener('pointerdown', function (e) {
+      dragging = true;
+      startY = e.clientY;
+      startVh = current();
+      p.classList.add('sizing');
+      // Keeps the gesture even when the finger leaves the 38px handle, which it
+      // always does — a drag of any length ends up over the page behind.
+      try {
+        grab.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      e.preventDefault();
+    });
+
+    grab.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      // Upward is negative in client coordinates and taller to a person.
+      var delta = ((startY - e.clientY) / Math.max(1, window.innerHeight)) * 100;
+      applyHeight(startVh + delta);
+      e.preventDefault();
+    });
+
+    function end(e) {
+      if (!dragging) return;
+      dragging = false;
+      p.classList.remove('sizing');
+      try {
+        grab.releasePointerCapture(e.pointerId);
+      } catch (err) {}
+    }
+    grab.addEventListener('pointerup', end);
+    grab.addEventListener('pointercancel', end);
+
+    /**
+     * The same control for anyone not using a finger.
+     *
+     * A separator with no keyboard handling is a separator that only exists for
+     * people who can drag, and this is the only way to reach the rest of a long
+     * answer on a small sheet.
+     */
+    grab.addEventListener('keydown', function (e) {
+      var step = e.key === 'ArrowUp' ? 6 : e.key === 'ArrowDown' ? -6 : 0;
+      if (step === 0) return;
+      applyHeight(current() + step);
+      e.preventDefault();
+    });
+  }
+
   // ---------- panel -------------------------------------------------------
   function build() {
     if (els.panel) return;
@@ -575,6 +694,18 @@ textarea::placeholder{color:var(--muted)}
     p.setAttribute('aria-modal', 'false');
     p.setAttribute('aria-label', 'Shopping assistant');
     p.innerHTML =
+      /**
+       * Drag to resize, on a phone, without reloading.
+       *
+       * The sheet opens at a third of the viewport so it does not cover the
+       * product being asked about — but a third is right for a price and wrong
+       * for six results, and the shopper is the only one who knows which they
+       * are looking at. A separator rather than a button: it has a continuous
+       * value, and screen readers and keyboards get the same control through
+       * ArrowUp/ArrowDown as a finger gets through dragging.
+       */
+      '<div class="grab" role="separator" aria-orientation="horizontal" tabindex="0"' +
+      ' aria-label="Resize the assistant. Use the up and down arrow keys."></div>' +
       '<header>' +
       '<div class="avatar"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2"/></svg></div>' +
       '<div class="who"><b>Assistant</b><span class="status">Ready</span></div>' +
@@ -613,6 +744,7 @@ textarea::placeholder{color:var(--muted)}
       '</button></form>';
 
     els.panel = p;
+    wireResize(p);
     els.scroll = p.querySelector('.scroll');
     els.intro = p.querySelector('.intro');
     els.log = p.querySelector('.log');

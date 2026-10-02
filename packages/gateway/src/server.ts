@@ -211,6 +211,35 @@ export function createGateway(deps: GatewayDeps): Server {
   const catalogSnapshot = new CatalogSnapshot({ log });
 
   /**
+   * Whether this shop's speakers are transcribed well by the primary model.
+   *
+   * `gpt-4o-transcribe` is a language model doing transcription, and handed audio
+   * it cannot place it does not fall silent — it writes a fluent sentence in
+   * whatever language it lands on. Observed live on the dev store, two of five
+   * spoken English turns came back in Arabic script:
+   *
+   *     voice_language_mismatch {"asked":"en","got":"Arabic","words":3}
+   *     voice_fallback_rescued  {"model":"whisper-1","words":6}
+   *
+   * The mismatch guard caught both and `whisper-1` rescued both — so the shopper
+   * got an answer, and paid for it: a second upload on every bad turn, 4554 ms and
+   * 2067 ms against ~1250 ms for the clean ones, and a transcript from the weaker
+   * model anyway.
+   *
+   * If the acoustic model is what ends up being believed here, it should go first
+   * here. Per shop and reversible, because the choice is about who is talking —
+   * an accent, a room, a microphone — not about the model being wrong everywhere.
+   * The primary is better on shop vocabulary where it works, so a store it suits
+   * keeps it, and a store it does not gets probed again after the window.
+   */
+  const sttBreaker = new CircuitBreaker({
+    // Two, not one: a single mismatch is a bad second of audio, not a pattern.
+    threshold: 2,
+    resetAfterMs: 30 * 60_000,
+    successesToClose: 2,
+  });
+
+  /**
    * The merchant's own policy pages, so `get_policy` stops answering for them.
    * See shopify/policies.ts — this replaced a fixture that was being quoted as
    * every live merchant's returns policy.
@@ -1599,12 +1628,30 @@ export function createGateway(deps: GatewayDeps): Server {
       // present. 'auto' is a real choice and means send no language at all.
       const chosen = pageLang === '' ? merchantDefault : pageLang;
       const resolved = chosen === 'auto' || !/^[a-z]{2}$/.test(chosen) ? '' : chosen;
+      /**
+       * Put the acoustic model first where the primary keeps inventing a language.
+       *
+       * Swapped rather than replaced, so the one that was failing becomes the
+       * fallback and still gets to rescue a turn the other cannot read.
+       */
+      const primaryTrusted = sttBreaker.allow(shop);
       const cfg = {
         ...voiceConfig,
+        ...(primaryTrusted || voiceConfig.fallbackSttModel === undefined
+          ? {}
+          : { sttModel: voiceConfig.fallbackSttModel, fallbackSttModel: voiceConfig.sttModel }),
         log,
         // Both sinks, from one call inside the service. See VoiceConfig.onOutcome.
         onOutcome: (outcome: TranscriptOutcome) => {
           metrics.transcripts.inc({ shop, outcome });
+          /**
+           * Only a language mismatch counts against the primary. It is the one
+           * outcome that means the model read the audio and answered in a script
+           * nobody asked for — silence, a failed upload or an unpaid account say
+           * nothing about which model suits this shop's speakers.
+           */
+          if (outcome === 'language_mismatch') sttBreaker.fail(shop);
+          else if (outcome === 'heard') sttBreaker.succeed(shop);
         },
         // VOICE_LANGUAGE, if set, still overrides everything — it is the
         // operator's lever for a single-shop deployment.
@@ -1623,6 +1670,9 @@ export function createGateway(deps: GatewayDeps): Server {
       log.info('voice_language', {
         header: pageLang === '' ? null : pageLang,
         using: (cfg as { language?: string }).language ?? 'auto-detect',
+        // Which model actually went first. Without this, a shop quietly running on
+        // the acoustic model looks identical in the log to one that never needed to.
+        stt: cfg.sttModel,
       });
       // Measured around the whole thing, including the ogg relabel retry and
       // the acoustic-model fallback. The shopper waits for all of it, so
