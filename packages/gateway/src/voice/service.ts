@@ -193,20 +193,29 @@ export const DEFAULT_VOICE: Omit<VoiceConfig, 'apiKey'> = {
   fallbackSttModel: 'whisper-1',
   ttsModel: 'gpt-4o-mini-tts',
   /**
-   * Soft, female, unhurried in tone but not in pace.
+   * Chosen by the merchant, from the same sentence read by six voices.
    *
-   * `alloy` is the neutral default and reads flat over a storefront. A
-   * shop assistant's voice should sound like someone who works there and
-   * is glad to help; `shimmer` is the gentlest of the female voices, and
-   * the speed below stops gentle turning into slow.
+   * It was `shimmer` at 1.15×, picked on the reasoning that it was the gentlest
+   * of the older voices and that a shopper waiting on an answer would rather hear
+   * it quickly. Heard on a phone, that combination is what someone described as
+   * sounding cheap — and the audio was measured first to rule out a fault: 24 kHz,
+   * 149 words per minute, peaking at 55% of full scale. Nothing wrong with it. It
+   * simply was not a good voice.
+   *
+   * `marin` is a later generation and carries much less of the flat synthetic edge
+   * on the same text through the same model.
    */
-  voice: 'shimmer',
+  voice: 'marin',
   /**
-   * Slightly quicker than natural. A shopper is waiting on an answer they
-   * could have read in two seconds, so the default 1.0 feels padded read
-   * aloud — and anything past ~1.2 starts to sound harried.
+   * Natural pace, because that is the version that was actually listened to.
+   *
+   * The old 1.15× came from sound reasoning — an answer read aloud takes longer
+   * than an answer read — but the comparison included `shimmer` at both speeds
+   * precisely so the rush could be separated from the voice, and natural is what
+   * was chosen. Shipping a voice at a speed nobody auditioned would make the whole
+   * exercise meaningless.
    */
-  speed: 1.15,
+  speed: 1.0,
   /**
    * Unset = detect, which is what a store serving shoppers in several
    * languages needs.
