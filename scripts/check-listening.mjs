@@ -123,7 +123,7 @@ const API_KEY = process.env.OPENAI_API_KEY ?? env.OPENAI_API_KEY;
 const PAUSE = '…';
 const PAUSE_MS = 700;
 
-async function synthesizeSpeech(text, voice) {
+async function speakOnce(text, voice) {
   const res = await fetch('https://api.openai.com/v1/audio/speech', {
     method: 'POST',
     headers: { authorization: `Bearer ${API_KEY}`, 'content-type': 'application/json' },
@@ -144,6 +144,131 @@ async function synthesizeSpeech(text, voice) {
     throw new Error(`tts failed (${res.status}): ${(await res.text()).slice(0, 160)}`);
   }
   return new Uint8Array(await res.arrayBuffer());
+}
+
+/**
+ * The floor on how long a segment of N words may be.
+ *
+ * Generous on purpose — a check for gross truncation, not a style guide. Real
+ * segments in this corpus run 0.24-0.88 s/word including their own lead-in and
+ * trailing silence, so this is well below anything a synthesiser produces when it
+ * is actually saying the words.
+ */
+const MIN_SECONDS_PER_WORD = 0.12;
+
+/**
+ * How wrong a fresh clip may read back before it is rejected as mis-synthesised.
+ *
+ * Deliberately loose. The job is to catch a clip with WORDS MISSING, not to
+ * demand a perfect round trip — the corpus intentionally keeps references that no
+ * recogniser reproduces verbatim ("one hundred and fifty dollars" comes back as
+ * "$150", "grey" as "gray"), and rejecting those would throw away the clips that
+ * make the `numbers` group worth having. Half the words wrong is far outside that
+ * and is what truncation looks like.
+ */
+const MAX_GENERATION_WER = 0.5;
+
+/**
+ * Did the synthesiser actually say the words, or only some of them?
+ *
+ * ## Why this check exists
+ *
+ * `hanging-thinking.wav` was generated once, cached, and quietly wrong for as long
+ * as it existed. Taken apart, the clip contained:
+ *
+ *     0.00s "Do you have"        gap 1080ms
+ *     2.30s "Sari"               gap 1940ms
+ *     4.82s "Do you have these"  gap  420ms   <- "in a" was never spoken
+ *     6.50s "Medium"
+ *
+ * The reference said "do you have these in a medium?" and the audio did not. Both
+ * recognisers read it as "Do you have these idiom?" on every single run — a fair
+ * reading of audio with a hole in it — and the corpus reported that as the product
+ * failing to listen, at 43% WER for the whole group. Freshly synthesised, the same
+ * words in the same voice transcribe perfectly.
+ *
+ * A fixture that does not contain its own reference does not measure the product.
+ * It is worse than no test, because it spends an afternoon on a bug that is not
+ * there.
+ *
+ * ## Why it reads the clip back, and why that is not circular
+ *
+ * Two cheaper signals were tried first and both are unsafe. A duration floor
+ * cannot see it: the broken clip ran 0.70 s/word, comfortably normal, because the
+ * inserted gap replaced the missing words. A "no long silence inside a phrase"
+ * rule looked precise and would have rejected good fixtures — `long-returns`,
+ * `short-greet` and six others pause naturally at a comma, and every one of them
+ * scores 0% WER. Only "the words are not in there" separates the bad clip from
+ * those, and reading it back is what detects that.
+ *
+ * The circularity objection is real but narrow. This runs ONCE, at generation, on
+ * the clean clip at its native rate. What the suite then measures is the product
+ * on degraded variants of it — room noise, 6 dB SNR, resampled to 16 kHz, through
+ * the container handling, the fabrication filters and the whisper-1 fallback —
+ * none of which this check exercises. So a real recognition failure can still be
+ * found; what can no longer happen is a mis-synthesised clip being reported as
+ * one. The case this forecloses — a phrase the recogniser cannot hear even in
+ * perfect conditions, cleanly synthesised — is indistinguishable from a TTS defect
+ * on synthetic audio, and the evidence above is that it was a TTS defect.
+ */
+async function clipComplaint(samples, rate, text, bytes, lang) {
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const seconds = samples.length / rate;
+  if (words > 0 && seconds / words < MIN_SECONDS_PER_WORD) {
+    return `${seconds.toFixed(2)}s for ${words} words is too short to contain them`;
+  }
+
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: 'audio/wav' }), 'clip.wav');
+  form.append('model', 'gpt-4o-transcribe');
+  // The clip's OWN language. Pinning 'en' here would transliterate the Hindi and
+  // Spanish fixtures and reject them as corrupt when they are nothing of the kind.
+  if (lang) form.append('language', lang);
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${API_KEY}` },
+    body: form,
+  });
+  if (!res.ok) {
+    // Cannot verify is not the same as corrupt. Say so and keep the clip rather
+    // than failing a run over a transient 429 on the check itself.
+    process.stdout.write(`  (could not verify generation: http ${res.status})\n`);
+    return undefined;
+  }
+  const heard = (await res.json()).text ?? '';
+  const { wer } = scoreTranscript(text, heard);
+  if (wer > MAX_GENERATION_WER) {
+    return `reads back as "${heard.trim()}" (wer ${(wer * 100).toFixed(0)}%) — words are missing`;
+  }
+  return undefined;
+}
+
+/** How many times to re-ask for a segment the synthesiser mangled. */
+const TTS_ATTEMPTS = 3;
+
+/**
+ * Synthesise one segment, and refuse to return one that is missing words.
+ *
+ * Retried rather than failed on, because this is a sampled model and a mangled
+ * take is not a permanent property of the text — the same words came back clean
+ * on the next attempt. Failing loudly after that, because caching a bad clip is
+ * how this went unnoticed in the first place.
+ */
+async function synthesizeSpeech(text, voice, clipId, lang) {
+  let last;
+  for (let attempt = 1; attempt <= TTS_ATTEMPTS; attempt++) {
+    const bytes = await speakOnce(text, voice);
+    const { samples, sampleRate } = decodeWav(bytes);
+    last = await clipComplaint(samples, sampleRate, text, bytes, lang);
+    if (last === undefined) return bytes;
+    process.stdout.write(
+      `  retry ${clipId} (${attempt}/${TTS_ATTEMPTS}): ${last}\n`,
+    );
+  }
+  throw new Error(
+    `tts kept mangling "${text}" for ${clipId} after ${TTS_ATTEMPTS} attempts: ${last}. ` +
+      `Not caching it — a fixture that does not contain its reference measures nothing.`,
+  );
 }
 
 /** Voices rotate by clip so the corpus is not one speaker read twenty times. */
@@ -182,7 +307,7 @@ async function cleanSamples(spec, index) {
     const voice = VOICES[index % VOICES.length];
     const parts = [];
     for (const segment of segments) {
-      parts.push(decodeWav(await synthesizeSpeech(segment, voice)));
+      parts.push(decodeWav(await synthesizeSpeech(segment, voice, spec.id, spec.lang)));
     }
     const rate = parts[0].sampleRate;
     const gap = Math.round((PAUSE_MS / 1000) * rate);
