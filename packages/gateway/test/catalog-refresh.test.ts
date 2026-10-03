@@ -305,9 +305,9 @@ describe('the webhook that triggers it', () => {
 });
 
 describe('refreshCatalogIndex', () => {
-  it('asks for one bounded page and builds from it', async () => {
+  it('stops after one page when the store says there is nothing more', async () => {
     // 250 in one call is the most expensive request we make against a
-    // complexity-budgeted endpoint; the limit is a decision with a cost.
+    // complexity-budgeted endpoint; the page size is a decision with a cost.
     const asked: unknown[] = [];
     const built: { shop: string; count: number }[] = [];
     const count = await refreshCatalogIndex(
@@ -353,5 +353,136 @@ describe('refreshCatalogIndex', () => {
         { build: vi.fn() } as unknown as CatalogIndex,
       ),
     ).rejects.toThrow(/ucp 503/);
+  });
+
+  /**
+   * Indexing the whole catalog, not its first page.
+   *
+   * This asked for 100 products and stopped. A store with 300 therefore had 200
+   * of them absent from meaning-based search — "anything warmer?" could not find
+   * a coat that keyword search returned immediately, from the same catalog,
+   * seconds apart. The dev store has 27 products, so nothing here ever showed it.
+   *
+   * The cursor was always available. What was missing was a reader that could see
+   * it: the result type named the field `next_cursor`, a live storefront sends
+   * `cursor`, so the walk ended after one page and reported success.
+   */
+  describe('paginating a catalog bigger than one page', () => {
+    /** A store that pages like the live one: `has_next_page` plus `cursor`. */
+    function pagedStore(totalProducts: number) {
+      const asked: unknown[] = [];
+      const source = {
+        searchCatalog: async (input: {
+          query: string;
+          pagination?: { limit: number; cursor?: string };
+        }) => {
+          asked.push(input.pagination);
+          const from = input.pagination?.cursor === undefined ? 0 : Number(input.pagination.cursor);
+          const limit = input.pagination?.limit ?? 100;
+          const slice = Array.from(
+            { length: Math.max(0, Math.min(limit, totalProducts - from)) },
+            (_, i) => ({ title: `p${from + i}` }),
+          );
+          const end = from + slice.length;
+          return {
+            products: slice,
+            pagination:
+              end >= totalProducts
+                ? { has_next_page: false }
+                : { has_next_page: true, cursor: String(end) },
+          };
+        },
+      };
+      return { source, asked };
+    }
+
+    function indexCapturing(into: unknown[][]): CatalogIndex {
+      return {
+        build: async (_shop: string, products: readonly unknown[]) => void into.push([...products]),
+      } as unknown as CatalogIndex;
+    }
+
+    it('follows the cursor until the store says it is done', async () => {
+      const { source, asked } = pagedStore(250);
+      const built: unknown[][] = [];
+
+      const count = await refreshCatalogIndex('acme.myshopify.com', source, indexCapturing(built));
+
+      // 100 + 100 + 50: the third page is what the old code never asked for.
+      expect(count).toBe(250);
+      expect(asked).toEqual([{ limit: 100 }, { limit: 100, cursor: '100' }, { limit: 100, cursor: '200' }]);
+      // One build, from the whole catalog — not one build per page.
+      expect(built).toHaveLength(1);
+      expect(built[0]).toHaveLength(250);
+      expect(built[0]?.at(-1)).toEqual({ title: 'p249' });
+    });
+
+    it('indexes a product that used to fall outside the first page', async () => {
+      const { source } = pagedStore(300);
+      const built: unknown[][] = [];
+      await refreshCatalogIndex('acme.myshopify.com', source, indexCapturing(built));
+      // Product #250: present now, absent from every index built before this.
+      expect(built[0]).toContainEqual({ title: 'p249' });
+    });
+
+    it('stops at the page ceiling and says so, rather than downloading a warehouse', async () => {
+      // A catalog of fifty thousand must not turn a webhook into a fifty-thousand
+      // product download. The store past the ceiling gets its first thousand
+      // instead of its first hundred, and the truncation is logged — a limit
+      // nobody can see is a limit nobody will raise.
+      const { source, asked } = pagedStore(5_000);
+      const built: unknown[][] = [];
+      const warnings: { event: string; fields?: Record<string, unknown> }[] = [];
+
+      const count = await refreshCatalogIndex('acme.myshopify.com', source, indexCapturing(built), {
+        warn: (event, fields) => void warnings.push({ event, ...(fields ? { fields } : {}) }),
+      });
+
+      expect(count).toBe(1_000);
+      expect(asked).toHaveLength(10);
+      expect(warnings).toEqual([
+        {
+          event: 'catalog_truncated',
+          fields: { shop: 'acme.myshopify.com', products: 1_000, pages: 10 },
+        },
+      ]);
+    });
+
+    it('does not warn when the catalog ends exactly on the ceiling', async () => {
+      // Nothing was dropped, so there is nothing to report. A warning here would
+      // train whoever reads the logs to ignore the one that matters.
+      const { source } = pagedStore(1_000);
+      const warnings: string[] = [];
+      const count = await refreshCatalogIndex(
+        'acme.myshopify.com',
+        source,
+        indexCapturing([]),
+        { warn: (event) => void warnings.push(event) },
+      );
+      expect(count).toBe(1_000);
+      expect(warnings).toEqual([]);
+    });
+
+    it('stops rather than looping when a store keeps handing back one cursor', async () => {
+      // A store whose cursor never advances would otherwise be walked until the
+      // ceiling, re-embedding the same page ten times over.
+      let calls = 0;
+      const built: unknown[][] = [];
+      const count = await refreshCatalogIndex(
+        'acme.myshopify.com',
+        {
+          searchCatalog: async () => {
+            calls++;
+            return {
+              products: [{ title: 'same' }],
+              pagination: { has_next_page: true, cursor: 'stuck' },
+            };
+          },
+        },
+        indexCapturing(built),
+      );
+      expect(calls).toBe(10);
+      expect(count).toBe(10);
+    });
   });
 });

@@ -19,6 +19,20 @@ import { refreshCatalogIndex, type CatalogSource } from './search/refresh.js';
  * included — can tell the difference.
  */
 
+/**
+ * What the storefront page knows about the product on it, beyond the id.
+ *
+ * Identity only, and treated as untrusted throughout: it arrives from the
+ * shopper's browser, so it may name a product but may never carry a fact about
+ * one. See `resolveByName` for the match that makes it safe to act on.
+ */
+export interface ProductHint {
+  /** The product's own name, cleaned of the shop name the tab title carries. */
+  readonly title?: string;
+  /** From the URL path. Unique per store, and survives translation prefixes. */
+  readonly handle?: string;
+}
+
 export interface ToolExecutorDeps {
   readonly session: Session;
   readonly ucp?: UcpClient | undefined;
@@ -452,7 +466,11 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
     return ta === tb && /^\d+$/.test(ta);
   }
 
-  async function getProductResilient(id: string, signal?: AbortSignal): Promise<unknown> {
+  async function getProductResilient(
+    id: string,
+    signal?: AbortSignal,
+    hint?: ProductHint,
+  ): Promise<unknown> {
     const shop = session.shopDomain;
 
     /**
@@ -513,25 +531,96 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
       const pid = (p as { id?: unknown }).id;
       return pid !== undefined && sameProductId(String(pid), id);
     });
-    if (found === undefined) {
-      // Honest, and specific enough to be actionable: the model should search
-      // by name rather than retry an id that cannot be resolved.
-      return {
-        error: true,
-        message: `Could not resolve product ${id}. Use search_catalog by name instead.`,
-      };
+    if (found !== undefined) return { product: found };
+
+    // The browse is one page deep, so on any catalog past that the product the
+    // shopper is standing on is simply not in it. Ask for it by name.
+    const byName = await resolveByName(id, hint, signal);
+    if (byName !== undefined) return { product: byName };
+
+    // Honest, and specific enough to be actionable: the model should search
+    // by name rather than retry an id that cannot be resolved.
+    return {
+      error: true,
+      message: `Could not resolve product ${id}. Use search_catalog by name instead.`,
+    };
+  }
+
+  /**
+   * Resolve the page's product by searching for its name, for catalogs the
+   * one-page browse cannot cover.
+   *
+   * ## Why this tier exists
+   *
+   * The browse above asks for 100 products. A shopper standing on product #250 of
+   * a 300-product store was therefore unresolvable: the page-fact lane declined
+   * and the model answered instead. Safe, but it meant the 300 ms path never fired
+   * for most products of any store large enough to matter — and the dev store has
+   * 27 products, so nothing here ever showed it.
+   *
+   * Paginating to find one product is the obvious alternative and the wrong one:
+   * it costs up to ten sequential round trips, which is slower than the model path
+   * it exists to beat, and it would hold a 1000-product catalog in the snapshot
+   * for every shop. The store's keyword search already goes straight to the live
+   * catalog, so one call finds the product wherever it sits.
+   *
+   * ## Why only an exact id or handle match is accepted
+   *
+   * This lane quotes prices with no model in the loop, so a near miss is not a
+   * degraded answer, it is a confident wrong one — the price of a different
+   * swimsuit, in 300 ms, in the merchant's voice. A keyword search for "One Piece
+   * Swimsuit" will happily return nine other swimsuits. So the search is used only
+   * to *locate* a product whose identity is already known: the id from the page,
+   * or the handle from its URL, which is unique per store and is the one thing the
+   * shopper's address bar proves. Anything else declines and lets the model answer.
+   */
+  async function resolveByName(
+    id: string,
+    hint: ProductHint | undefined,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const query = (hint?.title ?? '').trim();
+    if (query === '') return undefined;
+
+    let candidates: readonly unknown[];
+    try {
+      const page = (await ucp!.searchCatalog(
+        { query, pagination: { limit: 10 } },
+        signal,
+      )) as unknown as { products?: readonly unknown[] };
+      candidates = page.products ?? [];
+    } catch (err) {
+      // Not fatal: the caller still has an honest decline, and a search that
+      // failed says nothing about whether the product exists.
+      deps.log?.warn('product_name_resolve_failed', {
+        shop: session.shopDomain,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
     }
-    return { product: found };
+
+    const byId = candidates.find((p) => {
+      const pid = (p as { id?: unknown }).id;
+      return pid !== undefined && sameProductId(String(pid), id);
+    });
+    if (byId !== undefined) return byId;
+
+    const handle = (hint?.handle ?? '').trim().toLowerCase();
+    if (handle === '') return undefined;
+    return candidates.find(
+      (p) => String((p as { handle?: unknown }).handle ?? '').toLowerCase() === handle,
+    );
   }
 
   async function rebuildIndex(): Promise<void> {
     // Shared with the webhook worker in search/refresh.ts. Two copies of "fetch
-    // 100 products and build" drift, and the limit in particular is a decision
-    // with a cost attached that should only be made in one place.
+    // the catalog and build" drift, and the page ceiling in particular is a
+    // decision with a cost attached that should only be made in one place.
     await refreshCatalogIndex(
       session.shopDomain,
       ucp as unknown as CatalogSource,
       deps.catalogIndex!,
+      deps.log,
     );
   }
 
@@ -720,7 +809,20 @@ export function createToolExecutor(deps: ToolExecutorDeps): ToolExecutor {
 
         case 'get_product': {
           const id = String(input['id'] ?? '');
-          if (ucp) return withDisplayPrices(await getProductResilient(id, signal));
+          /**
+           * Identity the page already knows, for the resolution tier that needs it.
+           *
+           * Both are untrusted — they come from the shopper's browser — and both
+           * are safe to pass, because `resolveByName` uses them only to search and
+           * then insists on an exact id or handle match before believing anything.
+           * A forged title finds nothing; it cannot substitute one product's price
+           * for another's.
+           */
+          const hint: ProductHint = {
+            ...(typeof input['title'] === 'string' ? { title: input['title'] } : {}),
+            ...(typeof input['handle'] === 'string' ? { handle: input['handle'] } : {}),
+          };
+          if (ucp) return withDisplayPrices(await getProductResilient(id, signal, hint));
           const found = searchDemoCatalog('', 100).products.find((p) => p.id === id);
           if (found === undefined) return { error: true, message: `No product with id ${id}` };
           return withDisplayPrices({ product: found });

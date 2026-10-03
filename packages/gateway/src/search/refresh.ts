@@ -1,3 +1,4 @@
+import { nextCursor, type SearchCatalogResult } from '@storeagent/ucp-client';
 import type { CatalogIndex } from './catalog-index.js';
 
 /**
@@ -27,29 +28,75 @@ import type { CatalogIndex } from './catalog-index.js';
 
 /** The catalog fetch a rebuild needs. Narrow on purpose — see UcpLike. */
 export interface CatalogSource {
-  searchCatalog(input: { query: string; pagination?: { limit: number } }): Promise<unknown>;
+  searchCatalog(input: {
+    query: string;
+    pagination?: { limit: number; cursor?: string };
+  }): Promise<unknown>;
 }
+
+/** Products per request. 100 of ~250 allowed, to leave complexity budget spare. */
+const PAGE_SIZE = 100;
+
+/**
+ * The most pages one rebuild will walk.
+ *
+ * There has to be a ceiling: this runs on a webhook and a shopper's cold-start,
+ * and a catalog of fifty thousand products must not turn either into a
+ * fifty-thousand-product download. Ten pages covers the overwhelming majority of
+ * Shopify stores outright, and a store past it gets its first thousand products
+ * rather than its first hundred. Truncation is logged, because a limit nobody can
+ * see is a limit nobody will raise.
+ */
+const MAX_PAGES = 10;
 
 /**
  * Fetch a shop's catalog and re-embed it.
  *
  * Shared by the shopper path (which warms a cold index in the background) and
- * the webhook worker, because two copies of "fetch 100 products and build"
- * drift — and the limit in particular is a decision with a cost attached.
+ * the webhook worker, because two copies of "fetch the catalog and build" drift —
+ * and the ceiling in particular is a decision with a cost attached.
+ *
+ * ## Why this paginates now
+ *
+ * It asked for 100 products and stopped, so a store with 300 had 200 of them
+ * missing from meaning-based search: "do you have anything warmer" could not
+ * find a product that was sitting in the catalog, while keyword search found it
+ * immediately because that goes straight to the live store. Two answers from the
+ * same catalog, seconds apart, and the inconsistency scaled with how much the
+ * merchant stocked.
+ *
+ * The cursor to do this with was there the whole time. What was not there was a
+ * reader that could see it — the result type named the field `next_cursor` and a
+ * live storefront sends `cursor`, so every walk ended after one page and reported
+ * success. See `nextCursor` for the measurements.
  */
 export async function refreshCatalogIndex(
   shop: string,
   source: CatalogSource,
   index: CatalogIndex,
+  /** Only `warn` is needed, so a caller holding a warn-only logger can pass it. */
+  log?: { warn(event: string, fields?: Record<string, unknown>): void },
 ): Promise<number> {
-  const full = (await source.searchCatalog({
-    query: '',
-    // 250 in one call is the single most expensive request we make against a
-    // complexity-budgeted endpoint. A catalog larger than this was always going
-    // to be truncated anyway; taking less of the budget matters more.
-    pagination: { limit: 100 },
-  })) as { products?: readonly unknown[] };
-  const products = full.products ?? [];
+  const products: unknown[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+
+  do {
+    const page = (await source.searchCatalog({
+      query: '',
+      pagination: cursor === undefined ? { limit: PAGE_SIZE } : { limit: PAGE_SIZE, cursor },
+    })) as { products?: readonly unknown[]; pagination?: SearchCatalogResult['pagination'] };
+    products.push(...(page.products ?? []));
+    pages++;
+    cursor = nextCursor(page);
+    // A store that keeps handing back the same cursor would otherwise walk until
+    // the page cap, re-embedding the same products each time.
+    if (pages >= MAX_PAGES && cursor !== undefined) {
+      log?.warn('catalog_truncated', { shop, products: products.length, pages });
+      break;
+    }
+  } while (cursor !== undefined);
+
   await index.build(shop, products);
   return products.length;
 }

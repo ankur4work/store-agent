@@ -172,7 +172,12 @@ export function createGateway(deps: GatewayDeps): Server {
     refresh: async (shop) => {
       const ucp = ucpFor(shop);
       if (ucp === undefined || deps.catalogIndex === undefined) return;
-      const count = await refreshCatalogIndex(shop, ucp as unknown as CatalogSource, deps.catalogIndex);
+      const count = await refreshCatalogIndex(
+        shop,
+        ucp as unknown as CatalogSource,
+        deps.catalogIndex,
+        log,
+      );
       metrics.catalogRefreshes.inc({ shop });
       log.info('catalog_refresh_done', { shop, products: count });
     },
@@ -1398,7 +1403,7 @@ export function createGateway(deps: GatewayDeps): Server {
     request: PageFactRequest,
     ctx: {
       session: Session;
-      page: { productId?: string; variantName?: string; title?: string };
+      page: { productId?: string; variantName?: string; title?: string; handle?: string };
       send: (event: string, data: unknown) => void;
       speakIfVoice: (text: string) => void;
       startedAt: number;
@@ -1429,7 +1434,17 @@ export function createGateway(deps: GatewayDeps): Server {
 
     let product: unknown;
     try {
-      const result = (await executor.execute('get_product', { id })) as {
+      /**
+       * The title and handle travel with the id so a catalog larger than one
+       * browse page can still be resolved — without them this lane declines on
+       * any store past 100 products, which is most real ones. Identity only; the
+       * price is still read from the catalog, never from the page.
+       */
+      const result = (await executor.execute('get_product', {
+        id,
+        ...(page.title === undefined ? {} : { title: page.title }),
+        ...(page.handle === undefined ? {} : { handle: page.handle }),
+      })) as {
         product?: unknown;
         error?: unknown;
       };

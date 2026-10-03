@@ -1,4 +1,5 @@
 export { UcpClient } from './client.js';
+export { nextCursor } from './pagination.js';
 export { SafeCart, projectWritable, assertNoFieldLoss, mergeLine } from './cart.js';
 export { UcpTransport, type TransportOptions, type ToolTiming } from './transport.js';
 export {

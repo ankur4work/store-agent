@@ -73,9 +73,37 @@ export interface SearchCatalogInput {
   readonly pagination?: { readonly cursor?: string; readonly limit?: number };
 }
 
+/**
+ * A page of catalog results, and how to ask for the next one.
+ *
+ * ## Why there are three fields for one cursor
+ *
+ * The spec names the cursor `next_cursor`. Measured against a live Shopify
+ * storefront, the endpoint sends `{ has_next_page, cursor }` and never sends
+ * `next_cursor` at all:
+ *
+ *     page 1: 10 products | has_next_page=true  | cursor=present | next_cursor=ABSENT
+ *     page 2: 10 products | has_next_page=true  | cursor=present | next_cursor=ABSENT
+ *     page 3:  7 products | has_next_page=false | cursor=ABSENT  | next_cursor=ABSENT
+ *
+ * So a reader that trusts the spec sees `undefined` on page one and concludes
+ * the catalog ended there — silently, because an empty cursor and a finished
+ * walk are indistinguishable. Both spellings are accepted rather than picking a
+ * side: the store we can observe sends one, the spec promises the other, and
+ * being wrong in either direction truncates a merchant's catalog.
+ *
+ * Read this through `nextCursor()` rather than by hand.
+ */
 export interface SearchCatalogResult {
   readonly products: readonly CatalogProduct[];
-  readonly pagination?: { readonly next_cursor?: string };
+  readonly pagination?: {
+    /** The spec's spelling. */
+    readonly next_cursor?: string;
+    /** What a live Shopify storefront actually returns. */
+    readonly cursor?: string;
+    /** Authoritative when present: `false` ends the walk even if a cursor is not. */
+    readonly has_next_page?: boolean;
+  };
 }
 
 export interface LookupCatalogInput {
