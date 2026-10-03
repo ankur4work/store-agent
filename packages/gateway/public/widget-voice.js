@@ -926,6 +926,39 @@
     var MAX_UTTERANCE_MS = 20000;  // a hard stop, so noise cannot record forever
     var IDLE_GIVE_UP_MS = 8000;    // heard nothing at all — mic muted or dead
 
+    /**
+     * The level a frame must clear to count as speech.
+     *
+     * Whichever is higher: clear of the room, or a real fraction of how loud this
+     * speaker actually is. The first handles a noisy shop, the second a quiet
+     * room with a soft voice. Pure and named so it can be tested directly —
+     * the property that matters is that a STEADY room never clears its own
+     * threshold, at any level. See the note on `voice.floor`.
+     */
+    function speechThreshold(floor, peak) {
+      return Math.max(6, floor + 6, peak * 0.3);
+    }
+
+
+    /**
+     * Count the speech in frames that were held back while the room was measured.
+     *
+     * Returns the milliseconds that cleared the threshold and when the last of
+     * them was, so the silence timer can be told the shopper was still talking
+     * at that point rather than silent since the tap.
+     */
+    function replayCalibration(frames, threshold) {
+      var spokeMs = 0;
+      var lastAt = 0;
+      for (var i = 0; i < frames.length; i++) {
+        if (frames[i].level > threshold) {
+          spokeMs += frames[i].dt;
+          lastAt = frames[i].at;
+        }
+      }
+      return { spokeMs: spokeMs, lastAt: lastAt };
+    }
+
     /** Words that almost never end an utterance. Mirrors endpoint.ts. */
     var HANGING = (
       "and but or so because if when while that which the a an my your this these those some any " +
@@ -1243,7 +1276,23 @@
       // How many frames the calibration window actually contributed. Zero means
       // it never ran, which is a different state from "the room measured zero".
       var calibFrames = 0;
-      var calibSum = 0;
+      /**
+       * The quietest frame the calibration window saw.
+       *
+       * A noise floor is a MINIMUM statistic. This used to average the window,
+       * and the average of a window the shopper is talking through is the
+       * shopper — the comment claimed talking early "cannot poison the reading",
+       * which was true of `spokeMs` and false of the floor. The quietest frame in
+       * the same window is the gap between their syllables, which is the room.
+       */
+      var calibMin = 255;
+      /**
+       * Frames held back while the room is being measured, so they can be
+       * counted once there is a threshold to judge them against. See the replay
+       * below — without it, a short answer said straight after the tap was
+       * erased entirely.
+       */
+      var calibHeld = [];
 
       function tick() {
         if (!voice.on) return;
@@ -1278,10 +1327,10 @@
         var sinceStart = now - startedAt;
         var calibrating = sinceStart < CALIBRATE_TO_MS;
         if (sinceStart >= CALIBRATE_FROM_MS && calibrating) {
-          calibSum += level;
           calibFrames++;
-          // The room, as measured, plus a little headroom for its own variance.
-          floorRaw = calibSum / calibFrames;
+          // The room is the quietest thing in the window, not the average of it.
+          if (level < calibMin) calibMin = level;
+          floorRaw = calibMin;
         }
 
         // Fall to a new quiet level at once, climb back very slowly — so a gap
@@ -1297,20 +1346,69 @@
         // meter is not working" — see the peak check in onCaptured.
         voice.peak = peak;
 
-        // The floor stays CAPPED against the peak.
-        //
-        // With the calibration window above, this is no longer the only thing
-        // standing between a talkative shopper and a mic that never stops. It is
-        // kept because a real noise floor is never half the peak, so the clamp
-        // still catches a reading poisoned some other way — a cough during
-        // calibration, a door, someone else's voice.
-        voice.floor = Math.min(floorRaw, peak * 0.5);
+        /**
+         * The floor as measured. NOT capped against the peak.
+         *
+         * `Math.min(floorRaw, peak * 0.5)` used to sit here, to rescue a floor
+         * read too high when speech landed inside the calibration window. Work
+         * out when that expression actually changes the value and it is only ever
+         * when `peak < 2 * floorRaw` — when nothing much louder than the floor has
+         * happened, which is to say a steady room. There peak is about the same
+         * as the level, and the arithmetic lands somewhere familiar:
+         *
+         *     floor     = min(L, 0.5L)            = 0.5L
+         *     threshold = max(6, 0.5L + 6, 0.3L)  = 0.5L + 6
+         *     speaking  <=> L > 0.5L + 6          <=> L > 12
+         *
+         * So every room above level 12 was heard as a shopper talking, forever —
+         * reinstating the hardcoded `level > 12` this routine was rewritten to
+         * remove. A fan, traffic or shop music held `silenceSince` at the current
+         * frame, nothing ever endpointed, and the capture ran to its 20-second
+         * stop with no speech in it at all.
+         *
+         * What the cap was for is now done where it belongs. The calibration
+         * floor is the window's MINIMUM, so speech in the window no longer raises
+         * it: a word has gaps between its syllables and the quietest frame across
+         * 300ms is the room. Checked on the case the cap existed for — a loud
+         * start settling into soft speech — dropping it scores better than
+         * keeping it, because the floor it starts from is no longer wrong.
+         *
+         * A guarded cap was tried in between and is worth recording as a dead
+         * end: `peak > floorRaw * 1.5` reads as "a real dynamic range exists",
+         * but a room merely wandering reaches that ratio (level 10 drifting ±3
+         * gives 1.84) and the cap then halved a correct floor again.
+         */
+        voice.floor = floorRaw;
 
         // Whichever is higher: clear of the room, or a real fraction of how
         // loud this speaker actually is. The first handles a noisy shop, the
         // second a quiet room with a soft voice.
-        var threshold = Math.max(6, voice.floor + 6, peak * 0.3);
-        // Speech is not counted until the room has been measured. See above.
+        var threshold = speechThreshold(voice.floor, peak);
+
+        /**
+         * Speech during calibration is still speech — count it, late.
+         *
+         * It used to be discarded outright (`&& !calibrating`), on the reasoning
+         * that the room had not been measured yet. But the frames are not the
+         * problem; judging them with no threshold is. So they are held, and
+         * replayed here against the first real threshold.
+         *
+         * Without this, everything said in the first 480ms was erased. A shopper
+         * who taps and immediately says one word — "medium", "red", "yes", which
+         * is the whole answer to "which size?" — had the entire word inside that
+         * window, so `spokeMs` stayed 0, and the upload gate threw the turn away
+         * as silence: "I didn't catch that — tap to try again." Measured against
+         * this routine's own arithmetic, a 500ms word went from 0ms counted to
+         * 333ms, which is what the same word scores when the shopper waits first.
+         */
+        if (calibrating) {
+          calibHeld.push({ level: level, at: now, dt: dt });
+        } else if (calibHeld.length > 0) {
+          var replay = replayCalibration(calibHeld, threshold);
+          voice.spokeMs += replay.spokeMs;
+          if (replay.lastAt > 0) voice.silenceSince = replay.lastAt;
+          calibHeld = [];
+        }
         var speaking = level > threshold && !calibrating;
 
         if (speaking) {

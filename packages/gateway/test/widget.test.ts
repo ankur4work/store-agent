@@ -338,11 +338,22 @@ describe('widget voice endpointing', () => {
     expect(vad()).not.toMatch(/tooLong[\s\S]{0,80}spokeMs > MIN_SPEECH_MS/);
   });
 
-  it('caps the floor against the peak, so speech cannot become the floor', () => {
-    // Press the mic and talk at once and the first frames ARE speech. Taking
-    // a plain minimum calibrated the floor to the speaking level and the
-    // threshold then demanded the speaker exceed their own voice.
-    expect(vad()).toMatch(/voice\.floor = Math\.min\(floorRaw, peak \* 0\.5\)/);
+  it('keeps speech out of the floor by measuring the room, not by capping it', () => {
+    // Press the mic and talk at once and the first frames ARE speech, which must
+    // not become the floor — otherwise the threshold demands the speaker exceed
+    // their own voice.
+    //
+    // This was done with `Math.min(floorRaw, peak * 0.5)`, which only ever bites
+    // when `peak < 2 * floorRaw` — a STEADY room — where it halves a correct
+    // floor and works out to `speaking <=> level > 12`, the hardcoded threshold
+    // this routine exists to have removed. The protection now comes from taking
+    // the calibration window's MINIMUM, which speech cannot raise because a word
+    // has gaps between its syllables. See speech-gate.test.ts for the arithmetic.
+    // The cap's absence is pinned in speech-gate.test.ts, against source with
+    // comments stripped — the note explaining the removal quotes the expression,
+    // so a plain `not.toMatch` here is satisfied by the explanation of the bug.
+    expect(vad()).toMatch(/voice\.floor = floorRaw;/);
+    expect(vad()).toMatch(/if \(level < calibMin\) calibMin = level;/);
   });
 
   it('gives up when it hears nothing at all, rather than listening forever', () => {
